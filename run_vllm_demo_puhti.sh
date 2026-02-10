@@ -40,7 +40,11 @@ export HF_HOME="/work/.hf_cache"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
 export HF_HUB_DISABLE_TELEMETRY=1
-mkdir -p "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}"
+export HOME="/work"
+export XDG_CACHE_HOME="/work/.cache"
+export FLASHINFER_WORKSPACE_DIR="/work/.flashinfer"
+export TRITON_CACHE_DIR="/work/.triton"
+mkdir -p "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}" "${XDG_CACHE_HOME}" "${FLASHINFER_WORKSPACE_DIR}" "${TRITON_CACHE_DIR}"
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL}" \
