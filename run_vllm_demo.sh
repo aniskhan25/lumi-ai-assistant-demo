@@ -18,12 +18,20 @@ MAX_MODEL_LEN="4096"
 
 WORKDIR="$(pwd)"
 
-export MODEL PORT MAX_MODEL_LEN
+BIND_ARGS=(--bind "${WORKDIR}:/work")
+if [ -d "${MODEL}" ]; then
+  BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
+fi
 
-apptainer exec --rocm --bind "${WORKDIR}:/work" "${CONTAINER}" bash -s <<'EOS'
+apptainer exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
 export MODEL="${MODEL}"
+export HF_HOME="/work/.hf_cache"
+export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
+export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+export HF_HUB_DISABLE_TELEMETRY=1
+mkdir -p "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}"
 
 python -m vllm.entrypoints.openai.api_server \\
   --model "${MODEL}" \\
