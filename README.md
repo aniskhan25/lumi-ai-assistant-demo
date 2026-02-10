@@ -3,7 +3,7 @@
 This repo is a minimal, local-only demo of an "agent-like" assistant on LUMI. It runs a vLLM server and a CLI agent in a single Slurm job, using local docs for retrieval.
 
 ## Contents
-- `run_vllm_demo.slurm`: single-job orchestration
+- `run_vllm_demo.sh`: single-job orchestration
 - `demo_agent.py`: CLI agent with simple RAG + a Slurm template tool
 - `lumi_docs/`: local demo docs used for retrieval
 - `examples/sample_questions.md`: demo prompts
@@ -14,12 +14,12 @@ This repo is a minimal, local-only demo of an "agent-like" assistant on LUMI. It
 - A local or staged model path accessible inside the container
 
 ## Quick Start
-1. Edit `run_vllm_demo.slurm`:
+1. Edit `run_vllm_demo.sh`:
    - Set `CONTAINER` to your vLLM-enabled container path
    - Set `MODEL` to your model path or identifier
    - Optionally update `--account`, `--partition`, and GPU/time directives
 2. Submit the job:
-   - `sbatch run_vllm_demo.slurm`
+   - `sbatch run_vllm_demo.sh`
 3. Follow the prompt in `demo-<jobid>.out` to ask questions.
 
 ## What the Demo Does

@@ -18,16 +18,18 @@ MAX_MODEL_LEN="4096"
 
 WORKDIR="$(pwd)"
 
-apptainer exec --rocm --bind "${WORKDIR}:/work" "${CONTAINER}" bash -lc "
+export MODEL PORT MAX_MODEL_LEN
+
+apptainer exec --rocm --bind "${WORKDIR}:/work" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
-export MODEL=\"${MODEL}\"
+export MODEL="${MODEL}"
 
 python -m vllm.entrypoints.openai.api_server \\
-  --model \"${MODEL}\" \\
+  --model "${MODEL}" \\
   --host 127.0.0.1 \\
-  --port ${PORT} \\
-  --max-model-len ${MAX_MODEL_LEN} \\
+  --port "${PORT}" \\
+  --max-model-len "${MAX_MODEL_LEN}" \\
   > /work/vllm_server.log 2>&1 &
 
 VLLM_PID=\$!
@@ -58,5 +60,5 @@ for attempt in range(60):
         time.sleep(2)
 PY
 
-python /work/demo_agent.py --base-url \"http://127.0.0.1:${PORT}/v1\"
-"
+python /work/demo_agent.py --base-url "http://127.0.0.1:${PORT}/v1"
+EOS
