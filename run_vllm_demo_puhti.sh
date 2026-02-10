@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=puhti-vllm-demo
 #SBATCH --account=project_2014553
-#SBATCH --partition=gpu
+#SBATCH --partition=gputest
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:v100:1
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:15:00
 #SBATCH --output=demo-%j.out
 #SBATCH --error=demo-%j.err
 
@@ -19,10 +19,14 @@ MAX_MODEL_LEN="4096"
 GPU_MEMORY_UTILIZATION="0.85"
 SWAP_SPACE_GB="0"
 MAX_NUM_SEQS="1"
+ATTN_BACKEND="TORCH_SDPA"
 
 WORKDIR="$(pwd)"
+RUNTIME_BASE="/scratch/project_2014553/anisrahm/vllm_runtime"
+RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
+mkdir -p "${RUNTIME_DIR}"
 
-BIND_ARGS=(--bind "${WORKDIR}:/work")
+BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 else
@@ -30,20 +34,21 @@ else
   exit 2
 fi
 
-export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS
+export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS ATTN_BACKEND
 
 apptainer exec --nv "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
-export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS
-export HF_HOME="/work/.hf_cache"
+export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS ATTN_BACKEND
+export HF_HUB_DISABLE_TELEMETRY=1
+export HOME="/runtime"
+export HF_HOME="/runtime/.hf_cache"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
-export HF_HUB_DISABLE_TELEMETRY=1
-export HOME="/work"
-export XDG_CACHE_HOME="/work/.cache"
-export FLASHINFER_WORKSPACE_DIR="/work/.flashinfer"
-export TRITON_CACHE_DIR="/work/.triton"
+export XDG_CACHE_HOME="/runtime/.cache"
+export FLASHINFER_WORKSPACE_DIR="/runtime/.flashinfer"
+export TRITON_CACHE_DIR="/runtime/.triton"
+export VLLM_ATTENTION_BACKEND="${ATTN_BACKEND}"
 mkdir -p "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}" "${XDG_CACHE_HOME}" "${FLASHINFER_WORKSPACE_DIR}" "${TRITON_CACHE_DIR}"
 
 python -m vllm.entrypoints.openai.api_server \
