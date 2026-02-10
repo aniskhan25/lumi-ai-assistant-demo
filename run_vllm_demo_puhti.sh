@@ -25,6 +25,9 @@ WORKDIR="$(pwd)"
 BIND_ARGS=(--bind "${WORKDIR}:/work")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
+else
+  echo "Model directory does not exist on host: ${MODEL}" >&2
+  exit 2
 fi
 
 export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS
@@ -50,6 +53,7 @@ python -m vllm.entrypoints.openai.api_server \
   > /work/vllm_server.log 2>&1 &
 
 VLLM_PID=$!
+export VLLM_PID
 cleanup() {
   kill $VLLM_PID 2>/dev/null || true
   wait $VLLM_PID 2>/dev/null || true
@@ -63,6 +67,8 @@ import time
 import urllib.request
 
 port = int(os.environ["PORT"])
+pid = int(os.environ["VLLM_PID"])
+log_path = "/work/vllm_server.log"
 base_url = f"http://127.0.0.1:{port}/v1/models"
 
 for attempt in range(60):
@@ -74,7 +80,23 @@ for attempt in range(60):
                 print(f"vLLM ready. Models: {ids}")
                 break
     except Exception as e:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            print("vLLM process exited before readiness. Last server log lines:")
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                for line in lines[-80:]:
+                    print(line.rstrip())
+            raise SystemExit(f"vLLM failed before becoming ready: {e}")
         if attempt == 59:
+            print("vLLM readiness timeout. Last server log lines:")
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                for line in lines[-80:]:
+                    print(line.rstrip())
             raise SystemExit(f"vLLM did not become ready: {e}")
         time.sleep(2)
 PY
