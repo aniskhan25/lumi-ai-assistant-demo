@@ -23,36 +23,40 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
+export MODEL PORT MAX_MODEL_LEN
+
 apptainer exec --nv "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
-export MODEL="${MODEL}"
+export MODEL PORT MAX_MODEL_LEN
 export HF_HOME="/work/.hf_cache"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
 export HF_HUB_DISABLE_TELEMETRY=1
 mkdir -p "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}"
 
-python -m vllm.entrypoints.openai.api_server \\
-  --model "${MODEL}" \\
-  --host 127.0.0.1 \\
-  --port "${PORT}" \\
-  --max-model-len "${MAX_MODEL_LEN}" \\
+python -m vllm.entrypoints.openai.api_server \
+  --model "${MODEL}" \
+  --host 127.0.0.1 \
+  --port "${PORT}" \
+  --max-model-len "${MAX_MODEL_LEN}" \
   > /work/vllm_server.log 2>&1 &
 
-VLLM_PID=\$!
+VLLM_PID=$!
 cleanup() {
-  kill \$VLLM_PID 2>/dev/null || true
-  wait \$VLLM_PID 2>/dev/null || true
+  kill $VLLM_PID 2>/dev/null || true
+  wait $VLLM_PID 2>/dev/null || true
 }
 trap cleanup EXIT
 
 python - <<'PY'
 import json
+import os
 import time
 import urllib.request
 
-base_url = f"http://127.0.0.1:{int('${PORT}')}/v1/models"
+port = int(os.environ["PORT"])
+base_url = f"http://127.0.0.1:{port}/v1/models"
 
 for attempt in range(60):
     try:
