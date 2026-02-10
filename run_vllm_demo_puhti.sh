@@ -5,6 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:v100:1
+#SBATCH --mem=64G
 #SBATCH --time=01:00:00
 #SBATCH --output=demo-%j.out
 #SBATCH --error=demo-%j.err
@@ -15,6 +16,9 @@ CONTAINER="/appl/soft/ai/wrap/pytorch-2.9/container.sif"
 MODEL="/scratch/project_2014553/anisrahm/models/Mistral-7B-Instruct-v0.2"
 PORT="8000"
 MAX_MODEL_LEN="4096"
+GPU_MEMORY_UTILIZATION="0.85"
+SWAP_SPACE_GB="0"
+MAX_NUM_SEQS="1"
 
 WORKDIR="$(pwd)"
 
@@ -23,12 +27,12 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT MAX_MODEL_LEN
+export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS
 
 apptainer exec --nv "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
-export MODEL PORT MAX_MODEL_LEN
+export MODEL PORT MAX_MODEL_LEN GPU_MEMORY_UTILIZATION SWAP_SPACE_GB MAX_NUM_SEQS
 export HF_HOME="/work/.hf_cache"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
@@ -40,6 +44,9 @@ python -m vllm.entrypoints.openai.api_server \
   --host 127.0.0.1 \
   --port "${PORT}" \
   --max-model-len "${MAX_MODEL_LEN}" \
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+  --swap-space "${SWAP_SPACE_GB}" \
+  --max-num-seqs "${MAX_NUM_SEQS}" \
   > /work/vllm_server.log 2>&1 &
 
 VLLM_PID=$!
