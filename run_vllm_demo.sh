@@ -12,48 +12,47 @@
 set -euo pipefail
 
 CONTAINER="/appl/local/laifs/containers/lumi-multitorch-u24r64f21m43t29-20260124_092648/lumi-multitorch-full-u24r64f21m43t29-20260124_092648.sif"
-MODEL="/path/to/model"
+MODEL="/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2"
 PORT="8000"
-MAX_MODEL_LEN="4096"
 
-WORKDIR="$(pwd)"
+WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
+RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
+mkdir -p "${RUNTIME_DIR}"
 
-BIND_ARGS=(--bind "${WORKDIR}:/work")
+BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT MAX_MODEL_LEN
+export MODEL PORT
 
 apptainer exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
-export MODEL PORT MAX_MODEL_LEN
-export HF_HOME="/work/.hf_cache"
-export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
-export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
-export HF_HUB_DISABLE_TELEMETRY=1
-mkdir -p "${HUGGINGFACE_HUB_CACHE}" "${TRANSFORMERS_CACHE}"
+export HOME="/runtime"
+export XDG_CACHE_HOME="/runtime/.cache"
+export HF_HOME="/runtime/.cache/huggingface"
+mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}"
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL}" \
   --host 127.0.0.1 \
   --port "${PORT}" \
-  --max-model-len "${MAX_MODEL_LEN}" \
   > /work/vllm_server.log 2>&1 &
 
 VLLM_PID=$!
 cleanup() {
-  kill $VLLM_PID 2>/dev/null || true
-  wait $VLLM_PID 2>/dev/null || true
+  kill "${VLLM_PID}" 2>/dev/null || true
+  wait "${VLLM_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-python - <<'PY'
-import json
+if ! python - <<'PY'
 import os
 import time
 import urllib.request
+import sys
 
 port = int(os.environ["PORT"])
 base_url = f"http://127.0.0.1:{port}/v1/models"
@@ -62,15 +61,20 @@ for attempt in range(60):
     try:
         with urllib.request.urlopen(base_url, timeout=5) as resp:
             if resp.status == 200:
-                data = json.loads(resp.read().decode('utf-8'))
-                ids = [m.get('id') for m in data.get('data', [])]
-                print(f"vLLM ready. Models: {ids}")
-                break
-    except Exception as e:
-        if attempt == 59:
-            raise SystemExit(f"vLLM did not become ready: {e}")
+                print("vLLM ready.")
+                sys.exit(0)
+    except Exception:
+        pass
+    if attempt == 59:
+        raise SystemExit("vLLM did not become ready in time.")
+    else:
         time.sleep(2)
 PY
+then
+  echo "vLLM failed to start. Last server log lines:" >&2
+  tail -n 80 /work/vllm_server.log >&2 || true
+  exit 1
+fi
 
 python /work/demo_agent.py --base-url "http://127.0.0.1:${PORT}/v1"
 EOS
