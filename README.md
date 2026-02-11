@@ -99,19 +99,40 @@ Use this to decide when concurrency is no longer worth increasing.
 4. Also stop if failures appear (`requests_failed > 0`), even if throughput still rises.
 5. Pick the highest concurrency before plateau/failures as the production throughput profile.
 
-## Operating Profiles (Puhti, current measurements)
-Based on your benchmark summaries with `max_tokens=128`.
+## Operating Profiles (Puhti, final)
+Based on your final benchmark set (plateau around `concurrency=128` for `max_tokens=128`).
+Note: these plateau findings were measured with `requests=120`; rerun with larger request counts for stronger confidence.
 
 1. Throughput profile:
-   - `concurrency=16`, `max_tokens=128`
-   - observed `throughput_completion_tokens_s=539.216`
-   - observed `latency_p95_s=3.590`
-   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 120 16 128`
-2. Interactive profile:
+   - `concurrency=128`, `max_tokens=128`
+   - observed `throughput_completion_tokens_s=1688.517`
+   - observed `latency_p95_s=7.960`
+   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 120 128 128`
+2. Peak throughput profile:
+   - `concurrency=256`, `max_tokens=128`
+   - observed `throughput_completion_tokens_s=1690.424`
+   - observed `latency_p95_s=7.960`
+   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 120 256 128`
+3. Interactive profile:
    - `concurrency=4`, `max_tokens=64`
    - observed `latency_p95_s=1.680`
    - observed `throughput_completion_tokens_s=153.394`
    - run: `benchmarks/run_benchmark_puhti.sh <jobid> 60 4 64`
+
+## Post-Plateau Checklist
+Once plateau is found, use this sequence:
+
+1. Soak test throughput profile:
+   - run 3 long tests (for example `requests=2000` or higher) at `concurrency=128`, `max_tokens=128`
+   - confirm `requests_failed=0` and stable p95/p99
+2. Define SLO guardrails:
+   - set target p95 and max error rate for production
+   - if breached, step down to a safer profile (for example `concurrency=64` or `96`)
+3. Capacity sizing:
+   - use measured throughput to estimate required GPUs:
+   - `required_gpus = target_completion_tokens_per_second / 1688.517`
+4. Regression baseline:
+   - keep this profile as baseline and rerun after model, container, or driver changes
 
 ## What the Demo Does
 - Starts a vLLM OpenAI-compatible server bound to `127.0.0.1` only
