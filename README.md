@@ -56,6 +56,9 @@ Use the same model and same prompt file for all runs. Change one variable at a t
    - Repeat one mid-load case (`requests=80`, `concurrency=4`, `max_tokens=128`) 3 times
 5. Saturation check:
    - `requests=120`, `concurrency=8,10,12,16`, `max_tokens=128`
+6. Plateau check:
+   - extend saturation to `concurrency=20,24` (and optionally 28)
+   - stop increasing concurrency when throughput gain is small and latency cost is high
 
 Record and compare:
 - request throughput (`throughput_req_s`)
@@ -76,10 +79,39 @@ From repo root, against a running Puhti vLLM job:
    - `benchmarks/run_saturation_puhti.sh <jobid> 120 128 "8 10 12 16"`
 5. Summarize one job directory:
    - `python3 benchmarks/summarize_results.py --job-dir benchmarks/results/job_<jobid>`
+6. Plateau extension:
+   - `benchmarks/run_saturation_puhti.sh <jobid> 120 128 "16 20 24"`
+7. Optional: tune startup wait if model load is slow:
+   - `python3 benchmarks/benchmark_openai.py --base-url http://127.0.0.1:8000/v1 --requests 40 --concurrency 4 --max-tokens 128 --startup-wait-s 300 --startup-poll-s 2`
 
 Results are written to:
 - `benchmarks/results/job_<jobid>/summary_*.json`
 - `benchmarks/results/job_<jobid>/raw_*.json`
+
+## Plateau Decision Rule
+Use this to decide when concurrency is no longer worth increasing.
+
+1. Run at least 3 adjacent points (for example `16,20,24`) with same `requests` and `max_tokens`.
+2. Compare each point to the previous point using `throughput_completion_tokens_s` and `latency_p95_s`.
+3. Treat it as plateau if both are true:
+   - throughput gain is below 5% (`new/old < 1.05`)
+   - p95 latency increase is above 10% (`new/old > 1.10`)
+4. Also stop if failures appear (`requests_failed > 0`), even if throughput still rises.
+5. Pick the highest concurrency before plateau/failures as the production throughput profile.
+
+## Operating Profiles (Puhti, current measurements)
+Based on your benchmark summaries with `max_tokens=128`.
+
+1. Throughput profile:
+   - `concurrency=16`, `max_tokens=128`
+   - observed `throughput_completion_tokens_s=539.216`
+   - observed `latency_p95_s=3.590`
+   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 120 16 128`
+2. Interactive profile:
+   - `concurrency=4`, `max_tokens=64`
+   - observed `latency_p95_s=1.680`
+   - observed `throughput_completion_tokens_s=153.394`
+   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 60 4 64`
 
 ## What the Demo Does
 - Starts a vLLM OpenAI-compatible server bound to `127.0.0.1` only

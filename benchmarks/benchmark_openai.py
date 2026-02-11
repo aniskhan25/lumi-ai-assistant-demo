@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -34,9 +36,36 @@ def request_json(method: str, url: str, payload: Optional[dict], timeout: float)
         return json.loads(resp.read().decode("utf-8"))
 
 
-def get_model_id(base_url: str, timeout: float) -> str:
-    body = request_json("GET", f"{base_url}/models", None, timeout)
-    models = body.get("data", [])
+def wait_for_models_endpoint(
+    base_url: str,
+    startup_wait_s: float,
+    poll_interval_s: float,
+    request_timeout_s: float,
+) -> dict:
+    deadline = time.time() + startup_wait_s
+    last_error = None
+    url = f"{base_url}/models"
+
+    while time.time() < deadline:
+        try:
+            return request_json("GET", url, None, request_timeout_s)
+        except Exception as exc:
+            last_error = exc
+            remaining = max(0.0, deadline - time.time())
+            print(
+                f"Waiting for vLLM endpoint {url} "
+                f"(remaining {remaining:.0f}s): {exc}"
+            )
+            time.sleep(poll_interval_s)
+
+    raise RuntimeError(
+        f"vLLM endpoint {url} did not become ready within {startup_wait_s:.0f}s. "
+        f"Last error: {last_error}"
+    )
+
+
+def model_id_from_models_response(models_body: dict, base_url: str) -> str:
+    models = models_body.get("data", [])
     if not models:
         raise RuntimeError(f"No models returned from {base_url}/models")
     model_id = models[0].get("id")
@@ -145,6 +174,18 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--startup-wait-s",
+        type=float,
+        default=180.0,
+        help="Max time to wait for /models before starting benchmark",
+    )
+    parser.add_argument(
+        "--startup-poll-s",
+        type=float,
+        default=2.0,
+        help="Polling interval while waiting for /models",
+    )
+    parser.add_argument(
         "--output-json",
         default="benchmarks/results/latest_summary.json",
         help="Summary output path on local filesystem",
@@ -164,7 +205,32 @@ def main() -> int:
     random.seed(args.seed)
     prompts = load_prompts(args.prompts_file)
 
-    model = args.model or get_model_id(args.base_url, args.timeout)
+    if args.startup_wait_s < 0:
+        raise ValueError("--startup-wait-s must be >= 0")
+    if args.startup_poll_s <= 0:
+        raise ValueError("--startup-poll-s must be > 0")
+
+    # Graceful startup handling: wait for vLLM readiness instead of failing fast
+    # with connection-refused when the server is still loading weights.
+    try:
+        if args.startup_wait_s > 0:
+            print(
+                f"Checking vLLM readiness at {args.base_url}/models "
+                f"(up to {args.startup_wait_s:.0f}s)..."
+            )
+            models_body = wait_for_models_endpoint(
+                args.base_url,
+                startup_wait_s=args.startup_wait_s,
+                poll_interval_s=args.startup_poll_s,
+                request_timeout_s=min(args.timeout, 10.0),
+            )
+        else:
+            models_body = request_json("GET", f"{args.base_url}/models", None, args.timeout)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    model = args.model or model_id_from_models_response(models_body, args.base_url)
     print(f"Benchmark model: {model}")
     print(f"Base URL: {args.base_url}")
     print(
