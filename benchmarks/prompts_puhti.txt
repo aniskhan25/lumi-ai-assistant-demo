@@ -1,0 +1,17 @@
+# Short operational questions
+How do I request 1 GPU on Puhti?
+What is the difference between --ntasks and --cpus-per-task in Slurm?
+How can I see why my Slurm job is pending?
+Give me a minimal sbatch script for one GPU job.
+
+# Medium explanation questions
+Explain how to structure a Slurm job script for GPU inference on an HPC cluster.
+What are good first checks when a vLLM server does not become ready?
+How can I improve throughput for an OpenAI-compatible inference server?
+What should I log when benchmarking inference latency?
+
+# Longer generation prompts
+Write a concise checklist for debugging slow model startup on shared GPU clusters.
+Provide a step-by-step plan to compare two model serving frameworks on the same hardware.
+Summarize best practices for repeatable LLM benchmarking with fixed prompt sets.
+Draft a troubleshooting guide for permission and bind-mount errors in containerized HPC runs.
