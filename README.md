@@ -8,7 +8,9 @@ This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It 
 - `demo_agent.py`: CLI agent with simple RAG + a Slurm template tool
 - `benchmarks/benchmark_openai.py`: OpenAI-compatible benchmark runner
 - `benchmarks/run_benchmark_puhti.sh`: helper to benchmark against a running Puhti job
+- `benchmarks/run_saturation_puhti.sh`: helper for high-concurrency saturation sweep on Puhti
 - `benchmarks/prompts_puhti.txt`: prompt set for repeatable benchmark runs
+- `benchmarks/summarize_results.py`: summarize and rank benchmark summaries
 - `lumi_docs/`: local demo docs used for retrieval
 - `examples/sample_questions.md`: demo prompts
 
@@ -52,6 +54,8 @@ Use the same model and same prompt file for all runs. Change one variable at a t
    - `requests=60`, `concurrency=4`, `max_tokens=64,256,512`
 4. Stability check:
    - Repeat one mid-load case (`requests=80`, `concurrency=4`, `max_tokens=128`) 3 times
+5. Saturation check:
+   - `requests=120`, `concurrency=8,10,12,16`, `max_tokens=128`
 
 Record and compare:
 - request throughput (`throughput_req_s`)
@@ -68,6 +72,10 @@ From repo root, against a running Puhti vLLM job:
    - `for c in 1 2 4 8; do benchmarks/run_benchmark_puhti.sh <jobid> 80 "$c" 128; done`
 3. Token-length sweep:
    - `for t in 64 256 512; do benchmarks/run_benchmark_puhti.sh <jobid> 60 4 "$t"; done`
+4. Saturation sweep:
+   - `benchmarks/run_saturation_puhti.sh <jobid> 120 128 "8 10 12 16"`
+5. Summarize one job directory:
+   - `python3 benchmarks/summarize_results.py --job-dir benchmarks/results/job_<jobid>`
 
 Results are written to:
 - `benchmarks/results/job_<jobid>/summary_*.json`
