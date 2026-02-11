@@ -35,12 +35,13 @@ export HOME="/runtime"
 export XDG_CACHE_HOME="/runtime/.cache"
 export HF_HOME="/runtime/.cache/huggingface"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}"
+LOG_PATH="/runtime/vllm_server.log"
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL}" \
   --host 127.0.0.1 \
   --port "${PORT}" \
-  > /work/vllm_server.log 2>&1 &
+  > "${LOG_PATH}" 2>&1 &
 
 VLLM_PID=$!
 cleanup() {
@@ -73,7 +74,7 @@ for attempt in range(60):
 PY
 then
   echo "vLLM failed to start. Last server log lines:" >&2
-  tail -n 80 /work/vllm_server.log >&2 || true
+  tail -n 80 "${LOG_PATH}" >&2 || true
   exit 1
 fi
 

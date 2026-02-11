@@ -48,7 +48,9 @@ If not set, it falls back to placeholders.
 ## Logs
 - Slurm output: `demo-%j.out`
 - Slurm error: `demo-%j.err`
-- vLLM server log: `vllm_server.log`
+- vLLM server log (inside container): `/runtime/vllm_server.log`
+- Host path (Puhti): `/scratch/project_2014553/<user>/vllm_runtime/<jobid>/vllm_server.log`
+- Host path (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
 
 ## Notes
 - `run_vllm_demo.sh` (LUMI) and `run_vllm_demo_puhti.sh` (Puhti) now use the same minimal flow: start vLLM, wait for `/v1/models`, then run `demo_agent.py`.
