@@ -15,6 +15,7 @@ set -euo pipefail
 CONTAINER="/appl/soft/ai/wrap/pytorch-2.9/container.sif"
 MODEL="/scratch/project_2014553/anisrahm/models/Mistral-7B-Instruct-v0.2"
 PORT="8000"
+TP_SIZE="1"
 
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_BASE="/scratch/project_2014553/anisrahm/vllm_runtime"
@@ -26,7 +27,7 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT
+export MODEL PORT TP_SIZE
 
 apptainer exec --nv "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
@@ -41,6 +42,7 @@ python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL}" \
   --host 127.0.0.1 \
   --port "${PORT}" \
+  --tensor-parallel-size "${TP_SIZE}" \
   > "${LOG_PATH}" 2>&1 &
 
 VLLM_PID=$!

@@ -26,11 +26,21 @@ This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It 
 2. Edit the selected script:
    - Set `CONTAINER` to your vLLM-enabled container path
    - Set `MODEL` to your model path or model identifier
+   - Set `TP_SIZE` (default `1`) for tensor parallelism across multiple GPUs
    - Update `#SBATCH` account/partition/GPU/time directives for your project
 3. Submit the job:
    - LUMI: `sbatch run_vllm_demo.sh`
    - Puhti: `sbatch run_vllm_demo_puhti.sh`
 4. Follow the prompt in `demo-<jobid>.out` to ask questions.
+
+## Multi-GPU (Tensor Parallel)
+Both launcher scripts support `TP_SIZE` for vLLM tensor parallelism.
+
+1. Set `TP_SIZE` in the script (for example `TP_SIZE="4"`).
+2. Request the same number of GPUs in Slurm:
+   - Puhti: `#SBATCH --gres=gpu:v100:4`
+   - LUMI: `#SBATCH --gpus-per-node=4`
+3. Keep `TP_SIZE` aligned with allocated GPUs (`TP_SIZE <= GPUs allocated`).
 
 ## Query A Running Server
 If vLLM is already running inside a Slurm job, run queries from another step with `srun --jobid ... --overlap`.
