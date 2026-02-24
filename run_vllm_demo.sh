@@ -16,10 +16,22 @@ MODEL="/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2"
 PORT="8000"
 TP_SIZE="1"
 
-WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKDIR="${REPO_DIR:-${SCRIPT_DIR}}"
 RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
 RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
 mkdir -p "${RUNTIME_DIR}"
+
+if [ ! -f "${WORKDIR}/demo_agent.py" ]; then
+  echo "demo_agent.py not found at ${WORKDIR}/demo_agent.py" >&2
+  echo "Set REPO_DIR to your repo checkout path before submitting." >&2
+  exit 2
+fi
+if [ ! -d "${WORKDIR}/lumi_docs" ]; then
+  echo "lumi_docs directory not found at ${WORKDIR}/lumi_docs" >&2
+  echo "Set REPO_DIR to your repo checkout path before submitting." >&2
+  exit 2
+fi
 
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
