@@ -166,7 +166,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Simple OpenAI-compatible benchmark runner")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--model", default=None, help="Optional. If unset, use first model from /models")
-    parser.add_argument("--prompts-file", default="benchmarks/prompts_puhti.txt")
+    parser.add_argument("--prompts-file", default="benchmarks/prompts.txt")
     parser.add_argument("--requests", type=int, default=40)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-tokens", type=int, default=128)

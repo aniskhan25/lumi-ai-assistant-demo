@@ -17,6 +17,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for c in ${CONCURRENCY_LIST}; do
   echo
   echo "=== Saturation run: concurrency=${c}, requests=${REQUESTS}, max_tokens=${MAX_TOKENS} ==="
-  "${SCRIPT_DIR}/run_benchmark_puhti.sh" "${JOBID}" "${REQUESTS}" "${c}" "${MAX_TOKENS}"
+  "${SCRIPT_DIR}/run_benchmark.sh" "${JOBID}" "${REQUESTS}" "${c}" "${MAX_TOKENS}"
 done
-

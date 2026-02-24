@@ -11,6 +11,7 @@ REQUESTS="${2:-40}"
 CONCURRENCY="${3:-4}"
 MAX_TOKENS="${4:-128}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -23,9 +24,9 @@ echo "Base URL: ${BASE_URL}"
 echo "Requests=${REQUESTS}, Concurrency=${CONCURRENCY}, MaxTokens=${MAX_TOKENS}"
 
 srun --jobid "${JOBID}" --overlap \
-  python3 "${REPO_ROOT}/benchmarks/benchmark_openai.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/benchmark_openai.py" \
   --base-url "${BASE_URL}" \
-  --prompts-file "${REPO_ROOT}/benchmarks/prompts_puhti.txt" \
+  --prompts-file "${REPO_ROOT}/benchmarks/prompts.txt" \
   --requests "${REQUESTS}" \
   --concurrency "${CONCURRENCY}" \
   --max-tokens "${MAX_TOKENS}" \

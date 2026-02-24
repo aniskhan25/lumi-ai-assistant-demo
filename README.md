@@ -7,9 +7,9 @@ This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It 
 - `run_vllm_demo_puhti.sh`: single-job orchestration for Puhti
 - `demo_agent.py`: CLI agent with simple RAG + a Slurm template tool
 - `benchmarks/benchmark_openai.py`: OpenAI-compatible benchmark runner
-- `benchmarks/run_benchmark_puhti.sh`: helper to benchmark against a running Puhti job
-- `benchmarks/run_saturation_puhti.sh`: helper for high-concurrency saturation sweep on Puhti
-- `benchmarks/prompts_puhti.txt`: prompt set for repeatable benchmark runs
+- `benchmarks/run_benchmark.sh`: helper to benchmark against a running vLLM job
+- `benchmarks/run_saturation.sh`: helper for high-concurrency saturation sweep
+- `benchmarks/prompts.txt`: prompt set for repeatable benchmark runs
 - `benchmarks/summarize_results.py`: summarize and rank benchmark summaries
 - `lumi_docs/`: local demo docs used for retrieval
 - `examples/sample_questions.md`: demo prompts
@@ -82,26 +82,30 @@ Record and compare:
 - failure rate (`requests_failed`)
 
 ## Run Benchmarks
-From repo root, against a running Puhti vLLM job:
+From repo root, against a running vLLM job:
 
 1. Single run:
-   - `benchmarks/run_benchmark_puhti.sh <jobid> 40 4 128`
+   - `benchmarks/run_benchmark.sh <jobid> 40 4 128`
 2. Concurrency sweep:
-   - `for c in 1 2 4 8; do benchmarks/run_benchmark_puhti.sh <jobid> 80 "$c" 128; done`
+   - `for c in 1 2 4 8; do benchmarks/run_benchmark.sh <jobid> 80 "$c" 128; done`
 3. Token-length sweep:
-   - `for t in 64 256 512; do benchmarks/run_benchmark_puhti.sh <jobid> 60 4 "$t"; done`
+   - `for t in 64 256 512; do benchmarks/run_benchmark.sh <jobid> 60 4 "$t"; done`
 4. Saturation sweep:
-   - `benchmarks/run_saturation_puhti.sh <jobid> 120 128 "8 10 12 16"`
+   - `benchmarks/run_saturation.sh <jobid> 120 128 "8 10 12 16"`
 5. Summarize one job directory:
    - `python3 benchmarks/summarize_results.py --job-dir benchmarks/results/job_<jobid>`
 6. Plateau extension:
-   - `benchmarks/run_saturation_puhti.sh <jobid> 120 128 "16 20 24"`
+   - `benchmarks/run_saturation.sh <jobid> 120 128 "16 20 24"`
 7. Optional: tune startup wait if model load is slow:
    - `python3 benchmarks/benchmark_openai.py --base-url http://127.0.0.1:8000/v1 --requests 40 --concurrency 4 --max-tokens 128 --startup-wait-s 300 --startup-poll-s 2`
 
 Results are written to:
 - `benchmarks/results/job_<jobid>/summary_*.json`
 - `benchmarks/results/job_<jobid>/raw_*.json`
+
+Wrapper note:
+- `benchmarks/run_benchmark.sh` uses `PYTHON_BIN` env var (default `python3`).
+- Example for LUMI module Python: `PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
 
 ## Plateau Decision Rule
 Use this to decide when concurrency is no longer worth increasing.
@@ -122,17 +126,17 @@ Note: these plateau findings were measured with `requests=120`; rerun with large
    - `concurrency=128`, `max_tokens=128`
    - observed `throughput_completion_tokens_s=1688.517`
    - observed `latency_p95_s=7.960`
-   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 120 128 128`
+   - run: `benchmarks/run_benchmark.sh <jobid> 120 128 128`
 2. Peak throughput profile:
    - `concurrency=256`, `max_tokens=128`
    - observed `throughput_completion_tokens_s=1690.424`
    - observed `latency_p95_s=7.960`
-   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 120 256 128`
+   - run: `benchmarks/run_benchmark.sh <jobid> 120 256 128`
 3. Interactive profile:
    - `concurrency=4`, `max_tokens=64`
    - observed `latency_p95_s=1.680`
    - observed `throughput_completion_tokens_s=153.394`
-   - run: `benchmarks/run_benchmark_puhti.sh <jobid> 60 4 64`
+   - run: `benchmarks/run_benchmark.sh <jobid> 60 4 64`
 
 ## Post-Plateau Checklist
 Once plateau is found, use this sequence:
