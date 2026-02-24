@@ -15,29 +15,20 @@ CONTAINER="/appl/local/laifs/containers/lumi-multitorch-u24r64f21m43t29-20260124
 MODEL="/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2"
 PORT="8000"
 TP_SIZE="1"
+VLLM_USE_V1="${VLLM_USE_V1:-0}"
+ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
 RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
 mkdir -p "${RUNTIME_DIR}"
 
-if [ ! -f "${WORKDIR}/demo_agent.py" ]; then
-  echo "demo_agent.py not found at ${WORKDIR}/demo_agent.py" >&2
-  echo "Submit from repo root or set REPO_DIR to your repo checkout path." >&2
-  exit 2
-fi
-if [ ! -d "${WORKDIR}/lumi_docs" ]; then
-  echo "lumi_docs directory not found at ${WORKDIR}/lumi_docs" >&2
-  echo "Submit from repo root or set REPO_DIR to your repo checkout path." >&2
-  exit 2
-fi
-
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT TP_SIZE
+export MODEL PORT TP_SIZE VLLM_USE_V1 ENFORCE_EAGER
 
 if command -v apptainer >/dev/null 2>&1; then
   CONTAINER_RUNTIME="apptainer"
@@ -64,15 +55,20 @@ if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
   export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 fi
 unset ROCR_VISIBLE_DEVICES
-export VLLM_USE_V1=0
+export VLLM_USE_V1
 
-python -m vllm.entrypoints.openai.api_server \
-  --model "${MODEL}" \
-  --host 127.0.0.1 \
-  --port "${PORT}" \
-  --tensor-parallel-size "${TP_SIZE}" \
-  --enforce-eager \
-  > "${LOG_PATH}" 2>&1 &
+VLLM_CMD=(
+  python -m vllm.entrypoints.openai.api_server
+  --model "${MODEL}"
+  --host 127.0.0.1
+  --port "${PORT}"
+  --tensor-parallel-size "${TP_SIZE}"
+)
+if [ "${ENFORCE_EAGER}" = "1" ]; then
+  VLLM_CMD+=(--enforce-eager)
+fi
+
+"${VLLM_CMD[@]}" > "${LOG_PATH}" 2>&1 &
 
 VLLM_PID=$!
 cleanup() {

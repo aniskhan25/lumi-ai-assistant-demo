@@ -5,7 +5,6 @@ import math
 import os
 import re
 import sys
-import time
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
@@ -16,7 +15,6 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 @dataclass
 class Doc:
-    path: str
     name: str
     text: str
     tfidf: Dict[str, float]
@@ -67,7 +65,7 @@ def cosine_similarity(a: Dict[str, float], a_norm: float, b: Dict[str, float], b
     return dot / (a_norm * b_norm)
 
 
-def load_docs(docs_dir: str) -> List[Doc]:
+def load_docs(docs_dir: str) -> Tuple[List[Doc], Dict[str, float]]:
     if not os.path.isdir(docs_dir):
         raise FileNotFoundError(f"Docs directory not found: {docs_dir}")
 
@@ -85,34 +83,27 @@ def load_docs(docs_dir: str) -> List[Doc]:
         with open(path, "r", encoding="utf-8") as f:
             texts.append(f.read())
 
-    tfidf_docs, _idf = build_tfidf(texts)
+    tfidf_docs, idf = build_tfidf(texts)
     docs = []
     for path, text, vec in zip(paths, texts, tfidf_docs):
         docs.append(
             Doc(
-                path=path,
                 name=os.path.basename(path),
                 text=text,
                 tfidf=vec,
                 norm=vec_norm(vec),
             )
         )
-    return docs
+    return docs, idf
 
 
-def retrieve(docs: List[Doc], query: str, k: int) -> List[Doc]:
+def retrieve(docs: List[Doc], idf: Dict[str, float], query: str, k: int) -> List[Doc]:
     q_counts = Counter(tokenize(query))
-    # Build query vector using doc IDF derived from docs
-    term_doc_freq = Counter()
-    for doc in docs:
-        for term in doc.tfidf.keys():
-            term_doc_freq[term] += 1
     n_docs = len(docs)
+    unknown_idf = math.log((n_docs + 1) / 1) + 1.0
     q_vec = {}
     for term, tf in q_counts.items():
-        df = term_doc_freq.get(term, 0)
-        idf = math.log((n_docs + 1) / (df + 1)) + 1.0
-        q_vec[term] = tf * idf
+        q_vec[term] = tf * idf.get(term, unknown_idf)
     q_norm = vec_norm(q_vec)
 
     scored = []
@@ -230,8 +221,8 @@ def read_questions_from_file(path: str) -> List[str]:
     return questions
 
 
-def run_single_question(question: str, docs: List[Doc], base_url: str, model: str, k: int):
-    retrieved = retrieve(docs, question, k)
+def run_single_question(question: str, docs: List[Doc], idf: Dict[str, float], base_url: str, model: str, k: int):
+    retrieved = retrieve(docs, idf, question, k)
     tool_output = detect_tool_output(question)
 
     print("\n=== Question ===")
@@ -260,7 +251,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        docs = load_docs(args.docs)
+        docs, idf = load_docs(args.docs)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 2
@@ -279,11 +270,11 @@ def main() -> int:
             print("Error: no questions found in question file")
             return 4
         for q in questions:
-            run_single_question(q, docs, args.base_url, model, args.top_k)
+            run_single_question(q, docs, idf, args.base_url, model, args.top_k)
         return 0
 
     if args.question:
-        run_single_question(args.question, docs, args.base_url, model, args.top_k)
+        run_single_question(args.question, docs, idf, args.base_url, model, args.top_k)
         return 0
 
     print("Enter questions (type 'exit' to quit).")
@@ -296,7 +287,7 @@ def main() -> int:
             continue
         if q.lower() in {"exit", "quit"}:
             break
-        run_single_question(q, docs, args.base_url, model, args.top_k)
+        run_single_question(q, docs, idf, args.base_url, model, args.top_k)
     return 0
 
 
