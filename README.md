@@ -18,6 +18,11 @@ This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It 
 - Access to a GPU partition on LUMI or Puhti
 - An Apptainer image with vLLM installed
 - A local or staged model path accessible inside the container
+- On LUMI, load module-provided Python before query/benchmark steps:
+  - `module use /appl/local/csc/modulefiles/`
+  - `module load pytorch`
+- On Puhti, load module-provided Python before query/benchmark steps:
+  - `module load pytorch/2.9`
 
 ## Quick Start
 1. Pick the script for your cluster:
@@ -46,12 +51,12 @@ Both launcher scripts support `TP_SIZE` for vLLM tensor parallelism.
 If vLLM is already running inside a Slurm job, run queries from another step with `srun --jobid ... --overlap`.
 
 Puhti example:
-`srun --jobid <jobid> --overlap python3 /scratch/project_2014553/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
+`module load pytorch/2.9 && srun --jobid <jobid> --overlap --export=ALL python3 /scratch/project_2014553/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
 
 LUMI example:
-`srun --jobid <jobid> --overlap python3 /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
+`module use /appl/local/csc/modulefiles/ && module load pytorch && srun --jobid <jobid> --overlap --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
 
-Use `python3` in these commands. On some systems `python` is not in `PATH` for `srun` steps.
+Use module-provided `python` on LUMI (after `module load pytorch`). On Puhti, prefer `python3`.
 
 ## Benchmark Plan
 Use the same model and same prompt file for all runs. Change one variable at a time.
