@@ -109,5 +109,8 @@ then
   exit 1
 fi
 
-python /work/demo_agent.py --base-url "http://127.0.0.1:${PORT}/v1"
+echo "vLLM server is ready at http://127.0.0.1:${PORT}/v1 (job ${SLURM_JOB_ID:-unknown})."
+echo "Run queries/benchmarks from another shell via: srun --jobid <jobid> --overlap ..."
+echo "Keeping this job alive until the vLLM server exits."
+wait "${VLLM_PID}"
 EOS
