@@ -47,6 +47,13 @@ export HF_HOME="/runtime/.cache/huggingface"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}"
 LOG_PATH="/runtime/vllm_server.log"
 
+# Ray on ROCm expects HIP_VISIBLE_DEVICES and may fail if only
+# ROCR_VISIBLE_DEVICES is set by the launcher environment.
+if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
+  export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
+fi
+unset ROCR_VISIBLE_DEVICES
+
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL}" \
   --host 127.0.0.1 \
