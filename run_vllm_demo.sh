@@ -53,12 +53,14 @@ if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
   export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 fi
 unset ROCR_VISIBLE_DEVICES
+export VLLM_USE_V1=0
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL}" \
   --host 127.0.0.1 \
   --port "${PORT}" \
   --tensor-parallel-size "${TP_SIZE}" \
+  --enforce-eager \
   > "${LOG_PATH}" 2>&1 &
 
 VLLM_PID=$!
