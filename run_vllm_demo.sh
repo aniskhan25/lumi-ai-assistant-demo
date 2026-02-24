@@ -11,12 +11,15 @@
 
 set -euo pipefail
 
-CONTAINER="/appl/local/laifs/containers/lumi-multitorch-u24r64f21m43t29-20260124_092648/lumi-multitorch-full-u24r64f21m43t29-20260124_092648.sif"
-MODEL="/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2"
-PORT="8000"
-TP_SIZE="1"
+CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r64f21m43t29-20260124_092648/lumi-multitorch-full-u24r64f21m43t29-20260124_092648.sif}"
+MODEL="${MODEL:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
+PORT="${PORT:-8000}"
+TP_SIZE="${TP_SIZE:-1}"
 VLLM_USE_V1="${VLLM_USE_V1:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
+STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
+STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
+ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
@@ -28,7 +31,14 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT TP_SIZE VLLM_USE_V1 ENFORCE_EAGER
+export MODEL PORT TP_SIZE VLLM_USE_V1 ENFORCE_EAGER STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
+
+GPU_COUNT="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
+if [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] && [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
+  echo "TP_SIZE=${TP_SIZE} exceeds allocated GPUs (${GPU_COUNT})." >&2
+  echo "Increase Slurm GPU allocation or lower TP_SIZE." >&2
+  exit 2
+fi
 
 if command -v apptainer >/dev/null 2>&1; then
   CONTAINER_RUNTIME="apptainer"
@@ -56,6 +66,12 @@ if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
 fi
 unset ROCR_VISIBLE_DEVICES
 export VLLM_USE_V1
+if [ "${ROCM_COMPAT_MODE}" = "1" ]; then
+  # More stable on some ROCm stacks for TP>1 (avoids Triton/Inductor crashes).
+  export TORCH_COMPILE_DISABLE=1
+  export VLLM_USE_TRITON_FLASH_ATTN=0
+  export VLLM_WORKER_MULTIPROC_METHOD=spawn
+fi
 
 VLLM_CMD=(
   python -m vllm.entrypoints.openai.api_server
@@ -71,6 +87,7 @@ fi
 "${VLLM_CMD[@]}" > "${LOG_PATH}" 2>&1 &
 
 VLLM_PID=$!
+export VLLM_PID
 cleanup() {
   kill "${VLLM_PID}" 2>/dev/null || true
   wait "${VLLM_PID}" 2>/dev/null || true
@@ -85,8 +102,16 @@ import sys
 
 port = int(os.environ["PORT"])
 base_url = f"http://127.0.0.1:{port}/v1/models"
+pid = int(os.environ["VLLM_PID"])
+timeout_s = int(os.environ.get("STARTUP_TIMEOUT_S", "900"))
+poll_s = float(os.environ.get("STARTUP_POLL_S", "2"))
+deadline = time.time() + timeout_s
 
-for attempt in range(60):
+while time.time() < deadline:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        raise SystemExit("vLLM process exited before readiness check passed.")
     try:
         with urllib.request.urlopen(base_url, timeout=5) as resp:
             if resp.status == 200:
@@ -94,18 +119,20 @@ for attempt in range(60):
                 sys.exit(0)
     except Exception:
         pass
-    if attempt == 59:
-        raise SystemExit("vLLM did not become ready in time.")
-    else:
-        time.sleep(2)
+    time.sleep(poll_s)
+
+raise SystemExit(f"vLLM did not become ready in time (timeout={timeout_s}s).")
 PY
 then
+  echo "Startup settings: TP_SIZE=${TP_SIZE}, STARTUP_TIMEOUT_S=${STARTUP_TIMEOUT_S}, ROCM_COMPAT_MODE=${ROCM_COMPAT_MODE}" >&2
+  echo "Server log path: ${LOG_PATH}" >&2
   echo "vLLM failed to start. Last server log lines:" >&2
   tail -n 80 "${LOG_PATH}" >&2 || true
   exit 1
 fi
 
 echo "vLLM server is ready at http://127.0.0.1:${PORT}/v1 (job ${SLURM_JOB_ID:-unknown})."
+echo "Server log: ${LOG_PATH}"
 echo "Run queries/benchmarks from another shell via: srun --jobid <jobid> --overlap ..."
 echo "Keeping this job alive until the vLLM server exits."
 wait "${VLLM_PID}"

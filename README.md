@@ -1,10 +1,10 @@
 # LUMI/Puhti AI Assistant Demo (vLLM + Local RAG)
 
-This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It runs a vLLM server and a CLI agent in a single Slurm job, using local docs for retrieval.
+This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It runs a vLLM server in Slurm and queries it with a local CLI agent using local docs for retrieval.
 
 ## Contents
-- `run_vllm_demo.sh`: single-job orchestration for LUMI
-- `run_vllm_demo_puhti.sh`: single-job orchestration for Puhti
+- `run_vllm_demo.sh`: LUMI launcher for a persistent vLLM server job
+- `run_vllm_demo_puhti.sh`: Puhti launcher for a persistent vLLM server job
 - `demo_agent.py`: CLI agent with simple RAG + a Slurm template tool
 - `benchmarks/benchmark_openai.py`: OpenAI-compatible benchmark runner
 - `benchmarks/run_benchmark.sh`: helper to benchmark against a running vLLM job
@@ -32,20 +32,26 @@ This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It 
    - Set `CONTAINER` to your vLLM-enabled container path
    - Set `MODEL` to your model path or model identifier
    - Set `TP_SIZE` (default `1`) for tensor parallelism across multiple GPUs
+   - Optional for slow multi-GPU starts: increase `STARTUP_TIMEOUT_S` (default `900`)
    - Update `#SBATCH` account/partition/GPU/time directives for your project
 3. Submit the job:
    - LUMI: `sbatch run_vllm_demo.sh`
    - Puhti: `sbatch run_vllm_demo_puhti.sh`
-4. Follow the prompt in `demo-<jobid>.out` to ask questions.
+4. Use the running server:
+   - LUMI: keep the server job running and query from another shell using `srun --jobid ... --overlap`
+   - Puhti: keep the server job running and query from another shell using `srun --jobid ... --overlap`
 
 ## Multi-GPU (Tensor Parallel)
 Both launcher scripts support `TP_SIZE` for vLLM tensor parallelism.
 
-1. Set `TP_SIZE` in the script (for example `TP_SIZE="4"`).
+1. Set `TP_SIZE` to match GPUs allocated.
 2. Request the same number of GPUs in Slurm:
    - Puhti: `#SBATCH --gres=gpu:v100:4`
    - LUMI: `#SBATCH --gpus-per-node=4`
 3. Keep `TP_SIZE` aligned with allocated GPUs (`TP_SIZE <= GPUs allocated`).
+4. LUMI (tested) example without editing the script:
+   - `sbatch --nodes=1 --gpus-per-node=4 --export=ALL,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 run_vllm_demo.sh`
+5. LUMI launcher defaults `ROCM_COMPAT_MODE=1` to improve TP>1 stability on ROCm stacks.
 
 ## Query A Running Server
 If vLLM is already running inside a Slurm job, run queries from another step with `srun --jobid ... --overlap`.
@@ -179,7 +185,8 @@ If not set, it falls back to placeholders.
 - Host path (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
 
 ## Notes
-- `run_vllm_demo.sh` (LUMI) and `run_vllm_demo_puhti.sh` (Puhti) now use the same minimal flow: start vLLM, wait for `/v1/models`, then run `demo_agent.py`.
+- `run_vllm_demo.sh` (LUMI) starts vLLM and keeps the job alive for external `srun --jobid ... --overlap` query/benchmark steps.
+- `run_vllm_demo_puhti.sh` (Puhti) starts vLLM and keeps the job alive for external `srun --jobid ... --overlap` query/benchmark steps.
 - In both scripts, if `MODEL` points to a local directory, it is bind-mounted into the container automatically.
 - Both scripts create a per-job runtime/cache directory on scratch and mount it at `/runtime`.
 - This is a demo only; the docs in `lumi_docs/` are minimal and not authoritative.
