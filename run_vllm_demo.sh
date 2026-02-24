@@ -28,7 +28,17 @@ fi
 
 export MODEL PORT TP_SIZE
 
-apptainer exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
+if command -v apptainer >/dev/null 2>&1; then
+  CONTAINER_RUNTIME="apptainer"
+elif command -v singularity >/dev/null 2>&1; then
+  CONTAINER_RUNTIME="singularity"
+else
+  echo "No container runtime found (expected apptainer or singularity)." >&2
+  echo "Load the container runtime module first, then resubmit." >&2
+  exit 127
+fi
+
+"${CONTAINER_RUNTIME}" exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 cd /work
 export HOME="/runtime"
