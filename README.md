@@ -57,9 +57,10 @@ Default script behavior:
 - `#SBATCH --gpus-per-node=4`
 - `TP_SIZE` defaults to GPUs per node
 - `PP_SIZE` defaults to number of nodes
+- `MASTER_PORT` defaults from job id (can be overridden)
 
 Example submit:
-- `sbatch --nodes=2 --gpus-per-node=4 --export=ALL,TP_SIZE=4,PP_SIZE=2,STARTUP_TIMEOUT_S=2400 run_vllm_demo_multinode.sh`
+- `sbatch --nodes=2 --gpus-per-node=4 --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 run_vllm_demo_multinode.sh`
 
 After readiness, query pinned to the reported head node:
 - `srun --jobid <jobid> --overlap -w <head_node> --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
