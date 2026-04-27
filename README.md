@@ -7,6 +7,7 @@ This repo is a minimal, local-only HPC demo:
 
 ## Contents
 - `run_vllm_demo.sh`: primary LUMI launcher (persistent vLLM server job)
+- `run_vllm_demo_multinode.sh`: LUMI multi-node launcher (vLLM mp backend)
 - `demo_agent.py`: CLI agent with simple RAG + Slurm template tool
 - `benchmarks/benchmark_openai.py`: OpenAI-compatible benchmark runner
 - `benchmarks/run_benchmark.sh`: run one benchmark profile against a running job
@@ -35,7 +36,7 @@ This repo is a minimal, local-only HPC demo:
 4. Query from another shell:
    - `srun --jobid <jobid> --overlap --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
 
-## Multi-GPU on LUMI (Tensor Parallel)
+## Multi-GPU on LUMI (Single Node)
 Key rule: `TP_SIZE <= allocated GPUs`.
 
 Example (4 GPUs, TP=4):
@@ -46,6 +47,25 @@ Useful launcher knobs in `run_vllm_demo.sh`:
 - `STARTUP_TIMEOUT_S` (default `900`)
 - `ROCM_COMPAT_MODE` (default `1`, safer TP>1 on some ROCm stacks)
 - `ENFORCE_EAGER` (default `1`)
+
+## Multi-Node Testing on LUMI
+Use `run_vllm_demo_multinode.sh` for one vLLM server spanning multiple nodes.
+
+Default script behavior:
+- `#SBATCH --nodes=2`
+- `#SBATCH --ntasks-per-node=1` (one launcher rank per node)
+- `#SBATCH --gpus-per-node=4`
+- `TP_SIZE` defaults to GPUs per node
+- `PP_SIZE` defaults to number of nodes
+
+Example submit:
+- `sbatch --nodes=2 --gpus-per-node=4 --export=ALL,TP_SIZE=4,PP_SIZE=2,STARTUP_TIMEOUT_S=2400 run_vllm_demo_multinode.sh`
+
+After readiness, query pinned to the reported head node:
+- `srun --jobid <jobid> --overlap -w <head_node> --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
+
+Benchmark on multi-node job (pin to head node so `127.0.0.1` resolves to API node):
+- `SRUN_NODELIST=<head_node> PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
 
 ## Benchmark Workflow (LUMI)
 Run from repo root after the server is ready.
@@ -61,6 +81,7 @@ Run from repo root after the server is ready.
 
 Notes:
 - `benchmarks/run_benchmark.sh` uses `PYTHON_BIN` (default `python3`).
+- `benchmarks/run_benchmark.sh` supports `SRUN_NODELIST=<node>` to pin benchmarking to a specific node.
 - On LUMI module Python, use:
   - `PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
 
@@ -68,6 +89,7 @@ Notes:
 - Slurm out/err: `demo-%j.out`, `demo-%j.err`
 - Server log inside container: `/runtime/vllm_server.log`
 - Server log on host (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
+- Multi-node per-rank logs (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log`
 
 ## Optional Agent Usage
 - Single question:

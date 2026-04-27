@@ -12,6 +12,7 @@ CONCURRENCY="${3:-4}"
 MAX_TOKENS="${4:-128}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+SRUN_NODELIST="${SRUN_NODELIST:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -22,8 +23,16 @@ mkdir -p "${OUT_DIR}"
 echo "Running benchmark on job ${JOBID}"
 echo "Base URL: ${BASE_URL}"
 echo "Requests=${REQUESTS}, Concurrency=${CONCURRENCY}, MaxTokens=${MAX_TOKENS}"
+if [ -n "${SRUN_NODELIST}" ]; then
+  echo "Pinned to node: ${SRUN_NODELIST}"
+fi
 
-srun --jobid "${JOBID}" --overlap \
+srun_args=(--jobid "${JOBID}" --overlap)
+if [ -n "${SRUN_NODELIST}" ]; then
+  srun_args+=(-w "${SRUN_NODELIST}")
+fi
+
+srun "${srun_args[@]}" \
   "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/benchmark_openai.py" \
   --base-url "${BASE_URL}" \
   --prompts-file "${REPO_ROOT}/benchmarks/prompts.txt" \
