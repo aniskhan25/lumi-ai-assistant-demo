@@ -21,6 +21,48 @@ STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
 
+ensure_host_python() {
+  if command -v python >/dev/null 2>&1; then
+    echo "python"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return 0
+  fi
+
+  # Try to initialize module support in non-interactive Slurm shells.
+  if ! type module >/dev/null 2>&1; then
+    [ -f /etc/profile.d/lmod.sh ] && source /etc/profile.d/lmod.sh || true
+    [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh || true
+    [ -f /usr/share/lmod/lmod/init/bash ] && source /usr/share/lmod/lmod/init/bash || true
+  fi
+
+  # LUMI module path + pytorch module provide host-side python.
+  if type module >/dev/null 2>&1; then
+    module use /appl/local/csc/modulefiles/ >/dev/null 2>&1 || true
+    module load pytorch >/dev/null 2>&1 || true
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    echo "python"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return 0
+  fi
+
+  return 1
+}
+
+HOST_PYTHON="$(ensure_host_python)" || {
+  echo "No host python found. Tried automatic module load (module use/load pytorch)." >&2
+  echo "Load module python manually and resubmit." >&2
+  exit 127
+}
+echo "Using host python for readiness checks: ${HOST_PYTHON}"
+
 NNODES="${SLURM_NNODES:-1}"
 if [ "${NNODES}" -lt 2 ]; then
   echo "This launcher is for multi-node runs. Set #SBATCH --nodes to 2+." >&2
@@ -134,7 +176,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! python - <<'PY'
+if ! "${HOST_PYTHON}" - <<'PY'
 import os
 import sys
 import time

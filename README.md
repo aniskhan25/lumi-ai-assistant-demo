@@ -23,6 +23,7 @@ This repo is a minimal, local-only HPC demo:
 - Module Python for query/benchmark commands:
   - `module use /appl/local/csc/modulefiles/`
   - `module load pytorch`
+- Launcher/benchmark scripts also try to auto-load `pytorch` if host Python is missing.
 
 ## Quick Start (LUMI)
 1. Edit `run_vllm_demo.sh`:

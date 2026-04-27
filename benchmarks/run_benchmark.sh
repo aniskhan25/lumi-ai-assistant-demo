@@ -18,6 +18,45 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUT_DIR="${REPO_ROOT}/benchmarks/results/job_${JOBID}"
 
+ensure_python_bin() {
+  local bin="$1"
+  if command -v "${bin}" >/dev/null 2>&1; then
+    echo "${bin}"
+    return 0
+  fi
+
+  if ! type module >/dev/null 2>&1; then
+    [ -f /etc/profile.d/lmod.sh ] && source /etc/profile.d/lmod.sh || true
+    [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh || true
+    [ -f /usr/share/lmod/lmod/init/bash ] && source /usr/share/lmod/lmod/init/bash || true
+  fi
+  if type module >/dev/null 2>&1; then
+    module use /appl/local/csc/modulefiles/ >/dev/null 2>&1 || true
+    module load pytorch >/dev/null 2>&1 || true
+  fi
+
+  if command -v "${bin}" >/dev/null 2>&1; then
+    echo "${bin}"
+    return 0
+  fi
+  if [ "${bin}" != "python" ] && command -v python >/dev/null 2>&1; then
+    echo "python"
+    return 0
+  fi
+  if [ "${bin}" != "python3" ] && command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return 0
+  fi
+
+  return 1
+}
+
+PYTHON_BIN="$(ensure_python_bin "${PYTHON_BIN}")" || {
+  echo "Could not find a usable python binary for benchmarks." >&2
+  echo "Tried module auto-load: module use /appl/local/csc/modulefiles/ ; module load pytorch" >&2
+  exit 127
+}
+
 mkdir -p "${OUT_DIR}"
 
 echo "Running benchmark on job ${JOBID}"
