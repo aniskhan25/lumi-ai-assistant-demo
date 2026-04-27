@@ -1,193 +1,95 @@
-# LUMI/Puhti AI Assistant Demo (vLLM + Local RAG)
+# LUMI AI Assistant Demo (vLLM + Local RAG)
 
-This repo is a minimal, local-only demo of an "agent-like" assistant on HPC. It runs a vLLM server in Slurm and queries it with a local CLI agent using local docs for retrieval.
+This repo is a minimal, local-only HPC demo:
+- Start a vLLM OpenAI-compatible server in a Slurm job.
+- Query it from another shell with `demo_agent.py`.
+- Optionally run repeatable load benchmarks.
 
 ## Contents
-- `run_vllm_demo.sh`: LUMI launcher for a persistent vLLM server job
-- `run_vllm_demo_puhti.sh`: Puhti launcher for a persistent vLLM server job
-- `demo_agent.py`: CLI agent with simple RAG + a Slurm template tool
+- `run_vllm_demo.sh`: primary LUMI launcher (persistent vLLM server job)
+- `demo_agent.py`: CLI agent with simple RAG + Slurm template tool
 - `benchmarks/benchmark_openai.py`: OpenAI-compatible benchmark runner
-- `benchmarks/run_benchmark.sh`: helper to benchmark against a running vLLM job
-- `benchmarks/run_saturation.sh`: helper for high-concurrency saturation sweep
-- `benchmarks/prompts.txt`: prompt set for repeatable benchmark runs
-- `benchmarks/summarize_results.py`: summarize and rank benchmark summaries
-- `lumi_docs/`: local demo docs used for retrieval
-- `examples/sample_questions.md`: demo prompts
+- `benchmarks/run_benchmark.sh`: run one benchmark profile against a running job
+- `benchmarks/run_saturation.sh`: run a concurrency sweep
+- `benchmarks/summarize_results.py`: summarize benchmark summaries
+- `benchmarks/prompts.txt`: prompt set for repeatable runs
+- `lumi_docs/`: local docs used for retrieval
 
-## Prerequisites
-- Access to a GPU partition on LUMI or Puhti
-- An Apptainer image with vLLM installed
-- A local or staged model path accessible inside the container
-- On LUMI, load module-provided Python before query/benchmark steps:
+## Prerequisites (LUMI)
+- GPU allocation on LUMI (`standard-g` or your project partition)
+- vLLM-capable Apptainer/Singularity image
+- Model path available from compute nodes
+- Module Python for query/benchmark commands:
   - `module use /appl/local/csc/modulefiles/`
   - `module load pytorch`
-- On Puhti, load module-provided Python before query/benchmark steps:
-  - `module load pytorch/2.9`
 
-## Quick Start
-1. Pick the script for your cluster:
-   - LUMI: `run_vllm_demo.sh`
-   - Puhti: `run_vllm_demo_puhti.sh`
-2. Edit the selected script:
-   - Set `CONTAINER` to your vLLM-enabled container path
-   - Set `MODEL` to your model path or model identifier
-   - Set `TP_SIZE` (default `1`) for tensor parallelism across multiple GPUs
-   - Optional for slow multi-GPU starts: increase `STARTUP_TIMEOUT_S` (default `900`)
-   - Update `#SBATCH` account/partition/GPU/time directives for your project
-3. Submit the job:
-   - LUMI: `sbatch run_vllm_demo.sh`
-   - Puhti: `sbatch run_vllm_demo_puhti.sh`
-4. Use the running server:
-   - LUMI: keep the server job running and query from another shell using `srun --jobid ... --overlap`
-   - Puhti: keep the server job running and query from another shell using `srun --jobid ... --overlap`
+## Quick Start (LUMI)
+1. Edit `run_vllm_demo.sh`:
+   - `CONTAINER`
+   - `MODEL`
+   - Slurm directives (`#SBATCH --account`, partition, time, GPU count)
+2. Submit:
+   - `sbatch run_vllm_demo.sh`
+3. Wait until `demo-<jobid>.out` shows:
+   - `vLLM server is ready at http://127.0.0.1:8000/v1`
+4. Query from another shell:
+   - `srun --jobid <jobid> --overlap --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
 
-## Multi-GPU (Tensor Parallel)
-Both launcher scripts support `TP_SIZE` for vLLM tensor parallelism.
+## Multi-GPU on LUMI (Tensor Parallel)
+Key rule: `TP_SIZE <= allocated GPUs`.
 
-1. Set `TP_SIZE` to match GPUs allocated.
-2. Request the same number of GPUs in Slurm:
-   - Puhti: `#SBATCH --gres=gpu:v100:4`
-   - LUMI: `#SBATCH --gpus-per-node=4`
-3. Keep `TP_SIZE` aligned with allocated GPUs (`TP_SIZE <= GPUs allocated`).
-4. LUMI (tested) example without editing the script:
-   - `sbatch --nodes=1 --gpus-per-node=4 --export=ALL,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 run_vllm_demo.sh`
-5. LUMI launcher defaults `ROCM_COMPAT_MODE=1` to improve TP>1 stability on ROCm stacks.
+Example (4 GPUs, TP=4):
+- `sbatch --nodes=1 --gpus-per-node=4 --export=ALL,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 run_vllm_demo.sh`
 
-## Query A Running Server
-If vLLM is already running inside a Slurm job, run queries from another step with `srun --jobid ... --overlap`.
+Useful launcher knobs in `run_vllm_demo.sh`:
+- `TP_SIZE` (default `1`)
+- `STARTUP_TIMEOUT_S` (default `900`)
+- `ROCM_COMPAT_MODE` (default `1`, safer TP>1 on some ROCm stacks)
+- `ENFORCE_EAGER` (default `1`)
 
-Puhti example:
-`srun --jobid <jobid> --overlap --export=ALL python3 /scratch/project_2014553/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
-
-LUMI example:
-`srun --jobid <jobid> --overlap --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
-
-These commands assume prerequisites were loaded once in the current shell. Use module-provided `python` on LUMI and `python3` on Puhti.
-
-## Benchmark Plan
-Use the same model and same prompt file for all runs. Change one variable at a time.
-
-1. Smoke test:
-   - `requests=20`, `concurrency=1`, `max_tokens=64`
-2. Concurrency sweep:
-   - `requests=80`, `concurrency=1,2,4,8`, `max_tokens=128`
-3. Output length sweep:
-   - `requests=60`, `concurrency=4`, `max_tokens=64,256,512`
-4. Stability check:
-   - Repeat one mid-load case (`requests=80`, `concurrency=4`, `max_tokens=128`) 3 times
-5. Saturation check:
-   - `requests=120`, `concurrency=8,10,12,16`, `max_tokens=128`
-6. Plateau check:
-   - extend saturation to `concurrency=20,24` (and optionally 28)
-   - stop increasing concurrency when throughput gain is small and latency cost is high
-
-Record and compare:
-- request throughput (`throughput_req_s`)
-- latency (`latency_p50_s`, `latency_p95_s`, `latency_p99_s`)
-- token throughput (`throughput_tokens_s`, `throughput_completion_tokens_s`)
-- failure rate (`requests_failed`)
-
-## Run Benchmarks
-From repo root, against a running vLLM job:
+## Benchmark Workflow (LUMI)
+Run from repo root after the server is ready.
 
 1. Single run:
    - `benchmarks/run_benchmark.sh <jobid> 40 4 128`
 2. Concurrency sweep:
    - `for c in 1 2 4 8; do benchmarks/run_benchmark.sh <jobid> 80 "$c" 128; done`
-3. Token-length sweep:
-   - `for t in 64 256 512; do benchmarks/run_benchmark.sh <jobid> 60 4 "$t"; done`
-4. Saturation sweep:
-   - `benchmarks/run_saturation.sh <jobid> 120 128 "8 10 12 16"`
-5. Summarize one job directory:
-   - `python3 benchmarks/summarize_results.py --job-dir benchmarks/results/job_<jobid>`
-6. Plateau extension:
-   - `benchmarks/run_saturation.sh <jobid> 120 128 "16 20 24"`
-7. Optional: tune startup wait if model load is slow:
-   - `python3 benchmarks/benchmark_openai.py --base-url http://127.0.0.1:8000/v1 --requests 40 --concurrency 4 --max-tokens 128 --startup-wait-s 300 --startup-poll-s 2`
+3. Saturation sweep:
+   - `benchmarks/run_saturation.sh <jobid> 120 128 "8 10 12 16 20 24"`
+4. Summarize:
+   - `python benchmarks/summarize_results.py --job-dir benchmarks/results/job_<jobid>`
 
-Results are written to:
-- `benchmarks/results/job_<jobid>/summary_*.json`
-- `benchmarks/results/job_<jobid>/raw_*.json`
-
-Wrapper note:
-- `benchmarks/run_benchmark.sh` uses `PYTHON_BIN` env var (default `python3`).
-- Example for LUMI module Python: `PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
-
-## Plateau Decision Rule
-Use this to decide when concurrency is no longer worth increasing.
-
-1. Run at least 3 adjacent points (for example `16,20,24`) with same `requests` and `max_tokens`.
-2. Compare each point to the previous point using `throughput_completion_tokens_s` and `latency_p95_s`.
-3. Treat it as plateau if both are true:
-   - throughput gain is below 5% (`new/old < 1.05`)
-   - p95 latency increase is above 10% (`new/old > 1.10`)
-4. Also stop if failures appear (`requests_failed > 0`), even if throughput still rises.
-5. Pick the highest concurrency before plateau/failures as the production throughput profile.
-
-## Operating Profiles (Puhti, final)
-Based on your final benchmark set (plateau around `concurrency=128` for `max_tokens=128`).
-Note: these plateau findings were measured with `requests=120`; rerun with larger request counts for stronger confidence.
-
-1. Throughput profile:
-   - `concurrency=128`, `max_tokens=128`
-   - observed `throughput_completion_tokens_s=1688.517`
-   - observed `latency_p95_s=7.960`
-   - run: `benchmarks/run_benchmark.sh <jobid> 120 128 128`
-2. Peak throughput profile:
-   - `concurrency=256`, `max_tokens=128`
-   - observed `throughput_completion_tokens_s=1690.424`
-   - observed `latency_p95_s=7.960`
-   - run: `benchmarks/run_benchmark.sh <jobid> 120 256 128`
-3. Interactive profile:
-   - `concurrency=4`, `max_tokens=64`
-   - observed `latency_p95_s=1.680`
-   - observed `throughput_completion_tokens_s=153.394`
-   - run: `benchmarks/run_benchmark.sh <jobid> 60 4 64`
-
-## Post-Plateau Checklist
-Once plateau is found, use this sequence:
-
-1. Soak test throughput profile:
-   - run 3 long tests (for example `requests=2000` or higher) at `concurrency=128`, `max_tokens=128`
-   - confirm `requests_failed=0` and stable p95/p99
-2. Define SLO guardrails:
-   - set target p95 and max error rate for production
-   - if breached, step down to a safer profile (for example `concurrency=64` or `96`)
-3. Capacity sizing:
-   - use measured throughput to estimate required GPUs:
-   - `required_gpus = target_completion_tokens_per_second / 1688.517`
-4. Regression baseline:
-   - keep this profile as baseline and rerun after model, container, or driver changes
-
-## What the Demo Does
-- Starts a vLLM OpenAI-compatible server bound to `127.0.0.1` only
-- Runs `demo_agent.py` which:
-  - Retrieves top-k docs from `./lumi_docs`
-  - Calls the model via `/v1/chat/completions`
-  - Adds a simple Slurm template tool when it detects Slurm-related questions
-
-## Optional: Non-interactive Mode
-You can run questions from a file or a single question:
-- `python demo_agent.py --question-file examples/sample_questions.md`
-- `python demo_agent.py --question "How do I request a GPU?"`
-
-## Tool Template Defaults
-The Slurm template tool uses these env vars if set:
-- `ACCOUNT`, `PARTITION`, `GPUS`, `HOURS`
-
-If not set, it falls back to placeholders.
+Notes:
+- `benchmarks/run_benchmark.sh` uses `PYTHON_BIN` (default `python3`).
+- On LUMI module Python, use:
+  - `PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
 
 ## Logs
-- Slurm output: `demo-%j.out`
-- Slurm error: `demo-%j.err`
-- vLLM server log (inside container): `/runtime/vllm_server.log`
-- Host path (Puhti): `/scratch/project_2014553/<user>/vllm_runtime/<jobid>/vllm_server.log`
-- Host path (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
+- Slurm out/err: `demo-%j.out`, `demo-%j.err`
+- Server log inside container: `/runtime/vllm_server.log`
+- Server log on host (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
+
+## Optional Agent Usage
+- Single question:
+  - `python demo_agent.py --question "How do I request a GPU?"`
+- Question file:
+  - `python demo_agent.py --question-file examples/sample_questions.md`
+
+## Supplemental: Puhti
+Use `run_vllm_demo_puhti.sh` if you want the same demo flow on Puhti.
+
+Puhti-specific prerequisites:
+- `module load pytorch/2.9`
+
+Puhti launch/query pattern:
+1. `sbatch run_vllm_demo_puhti.sh`
+2. Query with overlap step (same pattern as LUMI):
+   - `srun --jobid <jobid> --overlap --export=ALL python3 /scratch/project_2014553/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
+
+Puhti log path (current script configuration):
+- `/scratch/project_2014553/anisrahm/vllm_runtime/<jobid>/vllm_server.log`
 
 ## Notes
-- `run_vllm_demo.sh` (LUMI) starts vLLM and keeps the job alive for external `srun --jobid ... --overlap` query/benchmark steps.
-- `run_vllm_demo_puhti.sh` (Puhti) starts vLLM and keeps the job alive for external `srun --jobid ... --overlap` query/benchmark steps.
-- In both scripts, if `MODEL` points to a local directory, it is bind-mounted into the container automatically.
-- Both scripts create a per-job runtime/cache directory on scratch and mount it at `/runtime`.
-- This is a demo only; the docs in `lumi_docs/` are minimal and not authoritative.
-- The retrieval is TF-IDF based and designed to be dependency-light.
+- Both launchers keep vLLM alive and expect query/benchmark commands from a separate `srun --jobid ... --overlap` step.
+- If `MODEL` is a local directory, it is bind-mounted into the container.
+- This is a demo only; retrieval docs are minimal and not authoritative.
