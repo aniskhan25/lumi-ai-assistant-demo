@@ -116,6 +116,12 @@ srun --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 --kill-on-bad-
   bash -lc '
 set -euo pipefail
 NODE_RANK="${SLURM_PROCID}"
+LAUNCH_LOG="${RUNTIME_DIR}/launcher_rank${NODE_RANK}.log"
+exec > "${LAUNCH_LOG}" 2>&1
+echo "=== launcher rank ${NODE_RANK} on host $(hostname) ==="
+echo "WORKDIR=${WORKDIR}"
+echo "RUNTIME_DIR=${RUNTIME_DIR}"
+
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
@@ -126,6 +132,7 @@ set -euo pipefail
 cd /work
 
 NODE_RANK="${SLURM_PROCID}"
+echo "=== container rank ${NODE_RANK} on host $(hostname) ==="
 export HOME="/runtime"
 export XDG_CACHE_HOME="/runtime/.cache"
 export HF_HOME="/runtime/.cache/huggingface"
@@ -164,9 +171,10 @@ if [ "${ENFORCE_EAGER}" = "1" ]; then
   VLLM_CMD+=(--enforce-eager)
 fi
 
+echo "Starting: ${VLLM_CMD[*]}"
 exec "${VLLM_CMD[@]}" > "${LOG_PATH}" 2>&1
 EOS
-' &
+' > "${RUNTIME_DIR}/srun_step.log" 2>&1 &
 
 LAUNCH_PID=$!
 export LAUNCH_PID
@@ -212,8 +220,14 @@ raise SystemExit(f"vLLM did not become ready in time (timeout={timeout_s}s).")
 PY
 then
   echo "vLLM multi-node startup failed. Tail logs:" >&2
+  echo "--- ${RUNTIME_DIR}/srun_step.log ---" >&2
+  tail -n 80 "${RUNTIME_DIR}/srun_step.log" >&2 || true
+  echo "--- ${RUNTIME_DIR} (ls -lah) ---" >&2
+  ls -lah "${RUNTIME_DIR}" >&2 || true
   for rank in $(seq 0 $((NNODES - 1))); do
-    echo "--- /runtime/vllm_server_rank${rank}.log ---" >&2
+    echo "--- ${RUNTIME_DIR}/launcher_rank${rank}.log ---" >&2
+    tail -n 80 "${RUNTIME_DIR}/launcher_rank${rank}.log" >&2 || true
+    echo "--- ${RUNTIME_DIR}/vllm_server_rank${rank}.log ---" >&2
     tail -n 80 "${RUNTIME_DIR}/vllm_server_rank${rank}.log" >&2 || true
   done
   exit 1
@@ -224,6 +238,9 @@ echo "Head node: ${HEAD_NODE}"
 echo "Run queries from another shell pinned to head node:"
 echo "  srun --jobid ${SLURM_JOB_ID} --overlap -w ${HEAD_NODE} --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:${PORT}/v1 --question \"test\""
 echo "Logs:"
+echo "  ${RUNTIME_DIR}/srun_step.log"
+echo "  ${RUNTIME_DIR}/launcher_rank0.log"
+echo "  ${RUNTIME_DIR}/launcher_rank1.log ... (one per node rank)"
 echo "  ${RUNTIME_DIR}/vllm_server_rank0.log"
 echo "  ${RUNTIME_DIR}/vllm_server_rank1.log ... (one per node rank)"
 echo "Keeping this job alive until the multi-node vLLM step exits."
