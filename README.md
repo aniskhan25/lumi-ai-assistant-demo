@@ -1,119 +1,84 @@
-# LUMI AI Assistant Demo (vLLM + Local RAG)
+# LUMI vLLM Demo Runbook
 
-This repo is a minimal, local-only HPC demo:
-- Start a vLLM OpenAI-compatible server in a Slurm job.
-- Query it from another shell with `demo_agent.py`.
-- Optionally run repeatable load benchmarks.
+Minimal runbook to launch vLLM on LUMI (single-node or multi-node), query it, and benchmark it.
 
-## Contents
-- `run_vllm_demo.sh`: primary LUMI launcher (persistent vLLM server job)
-- `run_vllm_demo_multinode.sh`: LUMI multi-node launcher (vLLM mp backend)
-- `demo_agent.py`: CLI agent with simple RAG + Slurm template tool
-- `benchmarks/benchmark_openai.py`: OpenAI-compatible benchmark runner
-- `benchmarks/run_benchmark.sh`: run one benchmark profile against a running job
-- `benchmarks/run_saturation.sh`: run a concurrency sweep
-- `benchmarks/summarize_results.py`: summarize benchmark summaries
-- `benchmarks/prompts.txt`: prompt set for repeatable runs
-- `lumi_docs/`: local docs used for retrieval
-
-## Prerequisites (LUMI)
-- GPU allocation on LUMI (`standard-g` or your project partition)
-- vLLM-capable Apptainer/Singularity image
-- Model path available from compute nodes
-- Module Python for query/benchmark commands:
+## 1) Prerequisites
+- LUMI GPU project/account access
+- Working container path in launcher scripts
+- Model path available on compute nodes
+- Recommended once per shell:
   - `module use /appl/local/csc/modulefiles/`
   - `module load pytorch`
-- Launcher/benchmark scripts also try to auto-load `pytorch` if host Python is missing.
 
-## Quick Start (LUMI)
+Notes:
+- Scripts also try to auto-load `pytorch` if host Python is missing.
+- Run commands from repo root: `/scratch/project_462000131/<user>/lumi-ai-assistant-demo`
+
+## 2) Single-Node vLLM
 1. Edit `run_vllm_demo.sh`:
    - `CONTAINER`
    - `MODEL`
-   - Slurm directives (`#SBATCH --account`, partition, time, GPU count)
+   - `#SBATCH --account` (and other Slurm settings if needed)
 2. Submit:
    - `sbatch run_vllm_demo.sh`
-3. Wait until `demo-<jobid>.out` shows:
-   - `vLLM server is ready at http://127.0.0.1:8000/v1`
-4. Query from another shell:
-   - `srun --jobid <jobid> --overlap --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
+3. Save job id:
+   - `JOBID=<jobid>`
+4. Query:
+   - `srun --jobid "$JOBID" --overlap --export=ALL python demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
 
-## Multi-GPU on LUMI (Single Node)
-Key rule: `TP_SIZE <= allocated GPUs`.
-
-Example (4 GPUs, TP=4):
+Single-node multi-GPU example (TP=4):
 - `sbatch --nodes=1 --gpus-per-node=4 --export=ALL,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 run_vllm_demo.sh`
 
-Useful launcher knobs in `run_vllm_demo.sh`:
-- `TP_SIZE` (default `1`)
-- `STARTUP_TIMEOUT_S` (default `900`)
-- `ROCM_COMPAT_MODE` (default `1`, safer TP>1 on some ROCm stacks)
-- `ENFORCE_EAGER` (default `1`)
+## 3) Multi-Node vLLM
+1. Edit `run_vllm_demo_multinode.sh`:
+   - `CONTAINER`
+   - `MODEL`
+   - `#SBATCH --account`
+2. Submit (example 2 nodes x 4 GPUs):
+   - `sbatch --nodes=2 --gpus-per-node=4 --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 run_vllm_demo_multinode.sh`
+3. Save job id:
+   - `JOBID=<jobid>`
+4. Get NodeList and head node:
+   - `NODELIST=$(squeue -j "$JOBID" -h -o %N)`
+   - `HEAD_NODE=$(scontrol show hostnames "$NODELIST" | head -n1)`
+   - `echo "NODELIST=$NODELIST"`
+   - `echo "HEAD_NODE=$HEAD_NODE"`
+5. Query (must be pinned to head node):
+   - `srun --jobid "$JOBID" --overlap -w "$HEAD_NODE" --export=ALL python demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
 
-## Multi-Node Testing on LUMI
-Use `run_vllm_demo_multinode.sh` for one vLLM server spanning multiple nodes.
+## 4) Benchmarks
+### Single-node
+- `JOBID=<jobid>`
+- `PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128`
+- `for c in 1 2 4 8 16 32; do PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128; done`
 
-Default script behavior:
-- `#SBATCH --nodes=2`
-- `#SBATCH --ntasks-per-node=1` (one launcher rank per node)
-- `#SBATCH --gpus-per-node=4`
-- `TP_SIZE` defaults to GPUs per node
-- `PP_SIZE` defaults to number of nodes
-- `MASTER_PORT` defaults from job id (can be overridden)
+### Multi-node (pin benchmark step to head node)
+- `JOBID=<jobid>`
+- `HEAD_NODE=<head-node>`
+- `SRUN_NODELIST="$HEAD_NODE" PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128`
+- `SRUN_NODELIST="$HEAD_NODE" PYTHON_BIN=python benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"`
 
-Example submit:
-- `sbatch --nodes=2 --gpus-per-node=4 --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 run_vllm_demo_multinode.sh`
+### Summarize
+- `python benchmarks/summarize_results.py --job-dir benchmarks/results/job_$JOBID`
 
-After readiness, query pinned to the reported head node:
-- `srun --jobid <jobid> --overlap -w <head_node> --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on LUMI?"`
+## 5) Logs and Debugging
+Slurm logs:
+- `demo-<jobid>.out`
+- `demo-<jobid>.err`
+- `demo-mn-<jobid>.out`
+- `demo-mn-<jobid>.err`
 
-Benchmark on multi-node job (pin to head node so `127.0.0.1` resolves to API node):
-- `SRUN_NODELIST=<head_node> PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
+Runtime logs:
+- Single-node: `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
+- Multi-node:
+  - `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/srun_step.log`
+  - `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/launcher_rank*.log`
+  - `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log`
 
-## Benchmark Workflow (LUMI)
-Run from repo root after the server is ready.
+## 6) Supplemental: Puhti
+Use `run_vllm_demo_puhti.sh`.
 
-1. Single run:
-   - `benchmarks/run_benchmark.sh <jobid> 40 4 128`
-2. Concurrency sweep:
-   - `for c in 1 2 4 8; do benchmarks/run_benchmark.sh <jobid> 80 "$c" 128; done`
-3. Saturation sweep:
-   - `benchmarks/run_saturation.sh <jobid> 120 128 "8 10 12 16 20 24"`
-4. Summarize:
-   - `python benchmarks/summarize_results.py --job-dir benchmarks/results/job_<jobid>`
-
-Notes:
-- `benchmarks/run_benchmark.sh` uses `PYTHON_BIN` (default `python3`).
-- `benchmarks/run_benchmark.sh` supports `SRUN_NODELIST=<node>` to pin benchmarking to a specific node.
-- On LUMI module Python, use:
-  - `PYTHON_BIN=python benchmarks/run_benchmark.sh <jobid> 40 4 128`
-
-## Logs
-- Slurm out/err: `demo-%j.out`, `demo-%j.err`
-- Server log inside container: `/runtime/vllm_server.log`
-- Server log on host (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log`
-- Multi-node per-rank logs (LUMI): `/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log`
-
-## Optional Agent Usage
-- Single question:
-  - `python demo_agent.py --question "How do I request a GPU?"`
-- Question file:
-  - `python demo_agent.py --question-file examples/sample_questions.md`
-
-## Supplemental: Puhti
-Use `run_vllm_demo_puhti.sh` if you want the same demo flow on Puhti.
-
-Puhti-specific prerequisites:
-- `module load pytorch/2.9`
-
-Puhti launch/query pattern:
-1. `sbatch run_vllm_demo_puhti.sh`
-2. Query with overlap step (same pattern as LUMI):
-   - `srun --jobid <jobid> --overlap --export=ALL python3 /scratch/project_2014553/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
-
-Puhti log path (current script configuration):
-- `/scratch/project_2014553/anisrahm/vllm_runtime/<jobid>/vllm_server.log`
-
-## Notes
-- Both launchers keep vLLM alive and expect query/benchmark commands from a separate `srun --jobid ... --overlap` step.
-- If `MODEL` is a local directory, it is bind-mounted into the container.
-- This is a demo only; retrieval docs are minimal and not authoritative.
+- Load module: `module load pytorch/2.9`
+- Submit: `sbatch run_vllm_demo_puhti.sh`
+- Query:
+  - `srun --jobid <jobid> --overlap --export=ALL python3 demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
