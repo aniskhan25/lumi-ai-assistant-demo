@@ -12,13 +12,15 @@
 
 set -euo pipefail
 
-CONTAINER="/appl/soft/ai/wrap/pytorch-2.9/container.sif"
-MODEL="/scratch/project_2014553/anisrahm/models/Mistral-7B-Instruct-v0.2"
-PORT="8000"
-TP_SIZE="1"
+CONTAINER="${CONTAINER:-/appl/soft/ai/wrap/pytorch-2.9/container.sif}"
+MODEL="${MODEL:-/scratch/project_2014553/${USER}/models/Mistral-7B-Instruct-v0.2}"
+PORT="${PORT:-8000}"
+TP_SIZE="${TP_SIZE:-1}"
+STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-120}"
+STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 
-WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNTIME_BASE="/scratch/project_2014553/anisrahm/vllm_runtime"
+WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+RUNTIME_BASE="/scratch/project_2014553/${USER}/vllm_runtime"
 RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
 mkdir -p "${RUNTIME_DIR}"
 
@@ -27,7 +29,7 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT TP_SIZE
+export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S
 
 apptainer exec --nv "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
@@ -60,8 +62,11 @@ import sys
 
 port = int(os.environ["PORT"])
 base_url = f"http://127.0.0.1:{port}/v1/models"
+timeout_s = int(os.environ.get("STARTUP_TIMEOUT_S", "120"))
+poll_s = float(os.environ.get("STARTUP_POLL_S", "2"))
+deadline = time.time() + timeout_s
 
-for attempt in range(60):
+while time.time() < deadline:
     try:
         with urllib.request.urlopen(base_url, timeout=5) as resp:
             if resp.status == 200:
@@ -69,10 +74,9 @@ for attempt in range(60):
                 sys.exit(0)
     except Exception:
         pass
-    if attempt == 59:
-        raise SystemExit("vLLM did not become ready in time.")
-    else:
-        time.sleep(2)
+    time.sleep(poll_s)
+
+raise SystemExit(f"vLLM did not become ready in time (timeout={timeout_s}s).")
 PY
 then
   echo "vLLM failed to start. Last server log lines:" >&2

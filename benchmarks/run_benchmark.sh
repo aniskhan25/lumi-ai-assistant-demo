@@ -13,6 +13,8 @@ MAX_TOKENS="${4:-128}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SRUN_NODELIST="${SRUN_NODELIST:-}"
+STARTUP_WAIT_S="${STARTUP_WAIT_S:-180}"
+STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -62,6 +64,7 @@ mkdir -p "${OUT_DIR}"
 echo "Running benchmark on job ${JOBID}"
 echo "Base URL: ${BASE_URL}"
 echo "Requests=${REQUESTS}, Concurrency=${CONCURRENCY}, MaxTokens=${MAX_TOKENS}"
+echo "Startup wait: ${STARTUP_WAIT_S}s (poll ${STARTUP_POLL_S}s)"
 if [ -n "${SRUN_NODELIST}" ]; then
   echo "Pinned to node: ${SRUN_NODELIST}"
 fi
@@ -78,5 +81,7 @@ srun "${srun_args[@]}" \
   --requests "${REQUESTS}" \
   --concurrency "${CONCURRENCY}" \
   --max-tokens "${MAX_TOKENS}" \
+  --startup-wait-s "${STARTUP_WAIT_S}" \
+  --startup-poll-s "${STARTUP_POLL_S}" \
   --output-json "${OUT_DIR}/summary_r${REQUESTS}_c${CONCURRENCY}_t${MAX_TOKENS}.json" \
   --output-raw-json "${OUT_DIR}/raw_r${REQUESTS}_c${CONCURRENCY}_t${MAX_TOKENS}.json"

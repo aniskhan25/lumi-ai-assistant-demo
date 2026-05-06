@@ -13,6 +13,7 @@ Minimal runbook to launch vLLM on LUMI (single-node or multi-node), query it, an
 Notes:
 - Scripts also try to auto-load `pytorch` if host Python is missing.
 - Run commands from repo root: `/scratch/project_462000131/<user>/lumi-ai-assistant-demo`
+- Benchmark outputs under `benchmarks/results/` are generated artifacts (ignored by git).
 
 ## 2) Single-Node vLLM
 1. Edit `run_vllm_demo.sh`:
@@ -58,6 +59,9 @@ Single-node multi-GPU example (TP=4):
 - `SRUN_NODELIST="$HEAD_NODE" PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128`
 - `SRUN_NODELIST="$HEAD_NODE" PYTHON_BIN=python benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"`
 
+If startup is slow, increase benchmark readiness wait:
+- `STARTUP_WAIT_S=600 STARTUP_POLL_S=2 PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128`
+
 ### Summarize
 - `python benchmarks/summarize_results.py --job-dir benchmarks/results/job_$JOBID`
 
@@ -80,5 +84,7 @@ Use `run_vllm_demo_puhti.sh`.
 
 - Load module: `module load pytorch/2.9`
 - Submit: `sbatch run_vllm_demo_puhti.sh`
+- Optional overrides at submit time:
+  - `sbatch --export=ALL,MODEL=/scratch/project_2014553/<user>/models/<model-dir>,TP_SIZE=1 run_vllm_demo_puhti.sh`
 - Query:
   - `srun --jobid <jobid> --overlap --export=ALL python3 demo_agent.py --base-url http://127.0.0.1:8000/v1 --question "How do I request 1 GPU on Puhti?"`
