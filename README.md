@@ -132,7 +132,50 @@ Runtime logs:
 /scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log
 ```
 
-## 6) Supplemental: Puhti
+## 6) Benchmark Results and Analysis
+The following results use `max_tokens=128` and had `0` failed requests in all shown runs.
+
+### One Node
+```text
+file,requests,concurrency,max_tokens,ok,failed,p50_s,p95_s,throughput_req_s,throughput_tokens_s,throughput_completion_tokens_s
+summary_r120_c32_t128.json,120,32,128,120,0,4.027,4.062,7.443,1138.549,952.668
+summary_r120_c16_t128.json,120,16,128,120,0,4.004,4.856,3.649,558.175,467.046
+summary_r120_c8_t128.json,120,8,128,120,0,3.991,4.016,2.004,306.528,256.484
+summary_r120_c4_t128.json,120,4,128,120,0,3.226,3.249,1.239,189.531,158.588
+summary_r40_c4_t128.json,40,4,128,40,0,3.287,4.411,1.176,179.744,150.522
+summary_r120_c2_t128.json,120,2,128,120,0,3.212,3.230,0.623,95.264,79.711
+summary_r120_c1_t128.json,120,1,128,120,0,3.169,3.197,0.316,48.274,40.393
+```
+
+Best one-node profile:
+```text
+concurrency=32, p95=4.062s, throughput_completion_tokens_s=952.668
+```
+
+### Two Node
+```text
+file,requests,concurrency,max_tokens,ok,failed,p50_s,p95_s,throughput_req_s,throughput_tokens_s,throughput_completion_tokens_s
+summary_r120_c128_t128.json,120,128,128,120,0,21.209,21.393,5.601,856.772,716.893
+summary_r120_c64_t128.json,120,64,128,120,0,21.427,21.651,2.795,427.516,357.719
+summary_r120_c32_t128.json,120,32,128,120,0,20.542,20.985,1.447,221.384,185.240
+summary_r120_c16_t128.json,120,16,128,120,0,20.482,26.727,0.710,108.590,90.861
+summary_r120_c8_t128.json,120,8,128,120,0,20.184,20.655,0.395,60.468,50.596
+summary_r40_c4_t128.json,40,4,128,40,0,16.996,24.077,0.226,34.503,28.894
+```
+
+Best two-node profile:
+```text
+concurrency=128, p95=21.393s, throughput_completion_tokens_s=716.893
+```
+
+### Interpretation
+- One-node currently outperforms two-node for this setup.
+- Best one-node completion throughput (`952.668`) is about `1.33x` the best two-node throughput (`716.893`).
+- One-node p95 latency (`4.062s`) is about `5.3x` lower than two-node p95 latency (`21.393s`).
+- This indicates distributed overhead dominates for the current model/runtime configuration.
+- Current recommendation: use one-node for this model unless you need multi-node for memory/model-size reasons.
+
+## 7) Supplemental: Puhti
 Use `run_vllm_demo_puhti.sh`.
 
 Load module:
