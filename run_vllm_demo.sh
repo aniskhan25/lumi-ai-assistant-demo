@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r64f21m43t29-20260124_092648/lumi-multitorch-full-u24r64f21m43t29-20260124_092648.sif}"
+CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
 MODEL="${MODEL:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
 PORT="${PORT:-8000}"
 TP_SIZE="${TP_SIZE:-1}"
