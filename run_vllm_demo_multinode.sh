@@ -20,6 +20,11 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-1800}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
+DTYPE="${DTYPE:-bfloat16}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
 
 ensure_host_python() {
   if command -v python >/dev/null 2>&1; then
@@ -94,6 +99,7 @@ fi
 
 MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
 export CONTAINER MODEL PORT TP_SIZE PP_SIZE VLLM_USE_V1 ENFORCE_EAGER STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
+export DTYPE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE
 
 if command -v apptainer >/dev/null 2>&1; then
@@ -157,6 +163,7 @@ VLLM_CMD=(
   vllm serve "${MODEL}"
   --host 127.0.0.1
   --port "${PORT}"
+  --dtype "${DTYPE}"
   --tensor-parallel-size "${TP_SIZE}"
   --pipeline-parallel-size "${PP_SIZE}"
   --nnodes "${NNODES}"
@@ -169,6 +176,18 @@ if [ "${NODE_RANK}" != "0" ]; then
 fi
 if [ "${ENFORCE_EAGER}" = "1" ]; then
   VLLM_CMD+=(--enforce-eager)
+fi
+if [ -n "${GPU_MEMORY_UTILIZATION}" ]; then
+  VLLM_CMD+=(--gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}")
+fi
+if [ -n "${MAX_MODEL_LEN}" ]; then
+  VLLM_CMD+=(--max-model-len "${MAX_MODEL_LEN}")
+fi
+if [ -n "${MAX_NUM_BATCHED_TOKENS}" ]; then
+  VLLM_CMD+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
+fi
+if [ -n "${MAX_NUM_SEQS}" ]; then
+  VLLM_CMD+=(--max-num-seqs "${MAX_NUM_SEQS}")
 fi
 
 echo "Starting: ${VLLM_CMD[*]}"

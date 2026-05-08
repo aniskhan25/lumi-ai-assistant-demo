@@ -20,6 +20,11 @@ ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
+DTYPE="${DTYPE:-bfloat16}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
@@ -32,6 +37,7 @@ if [ -d "${MODEL}" ]; then
 fi
 
 export MODEL PORT TP_SIZE VLLM_USE_V1 ENFORCE_EAGER STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
+export DTYPE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
 
 GPU_COUNT="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
 if [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] && [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
@@ -78,10 +84,23 @@ VLLM_CMD=(
   --model "${MODEL}"
   --host 127.0.0.1
   --port "${PORT}"
+  --dtype "${DTYPE}"
   --tensor-parallel-size "${TP_SIZE}"
 )
 if [ "${ENFORCE_EAGER}" = "1" ]; then
   VLLM_CMD+=(--enforce-eager)
+fi
+if [ -n "${GPU_MEMORY_UTILIZATION}" ]; then
+  VLLM_CMD+=(--gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}")
+fi
+if [ -n "${MAX_MODEL_LEN}" ]; then
+  VLLM_CMD+=(--max-model-len "${MAX_MODEL_LEN}")
+fi
+if [ -n "${MAX_NUM_BATCHED_TOKENS}" ]; then
+  VLLM_CMD+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
+fi
+if [ -n "${MAX_NUM_SEQS}" ]; then
+  VLLM_CMD+=(--max-num-seqs "${MAX_NUM_SEQS}")
 fi
 
 "${VLLM_CMD[@]}" > "${LOG_PATH}" 2>&1 &

@@ -49,6 +49,13 @@ sbatch --nodes=1 --gpus-per-node=4 \
   run_vllm_demo.sh
 ```
 
+Single-node tuned example (full node, higher batching):
+```bash
+sbatch --nodes=1 --gpus-per-node=8 \
+  --export=ALL,TP_SIZE=8,STARTUP_TIMEOUT_S=1800,GPU_MEMORY_UTILIZATION=0.95,MAX_NUM_BATCHED_TOKENS=8192,MAX_NUM_SEQS=256 \
+  run_vllm_demo.sh
+```
+
 ## 3) Multi-Node vLLM
 1. Edit `run_vllm_demo_multinode.sh`:
 - `CONTAINER`
@@ -59,6 +66,13 @@ sbatch --nodes=1 --gpus-per-node=4 \
 ```bash
 sbatch --nodes=2 --gpus-per-node=4 \
   --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 \
+  run_vllm_demo_multinode.sh
+```
+
+2-node tuned example:
+```bash
+sbatch --nodes=2 --gpus-per-node=4 \
+  --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400,GPU_MEMORY_UTILIZATION=0.95,MAX_NUM_BATCHED_TOKENS=8192,MAX_NUM_SEQS=256 \
   run_vllm_demo_multinode.sh
 ```
 
@@ -132,7 +146,23 @@ Runtime logs:
 /scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log
 ```
 
-## 6) Benchmark Results and Analysis
+## 6) LUMI Tuning Knobs
+Both launchers accept optional tuning vars through `--export=ALL,...`:
+```bash
+DTYPE=bfloat16
+GPU_MEMORY_UTILIZATION=0.95
+MAX_MODEL_LEN=4096
+MAX_NUM_BATCHED_TOKENS=8192
+MAX_NUM_SEQS=256
+ROCM_COMPAT_MODE=1
+```
+
+Notes:
+- `ROCM_COMPAT_MODE=1` is the stable default (helps avoid ROCm Triton/Inductor TP crashes).
+- Try `ROCM_COMPAT_MODE=0` only for performance experiments after stability is confirmed.
+- Increase `MAX_NUM_BATCHED_TOKENS` and `MAX_NUM_SEQS` gradually while watching p95 latency and failures.
+
+## 7) Benchmark Results and Analysis
 The following results use `max_tokens=128` and had `0` failed requests in all shown runs.
 
 ### One Node
