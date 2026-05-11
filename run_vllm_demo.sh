@@ -12,7 +12,7 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
-MODEL="${MODEL:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
+MODEL="${MODEL:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
 TP_SIZE="${TP_SIZE:-1}"
 VLLM_USE_V1="${VLLM_USE_V1:-0}"
@@ -21,6 +21,8 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 DTYPE="${DTYPE:-bfloat16}"
+LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
@@ -37,7 +39,7 @@ if [ -d "${MODEL}" ]; then
 fi
 
 export MODEL PORT TP_SIZE VLLM_USE_V1 ENFORCE_EAGER STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
-export DTYPE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
+export DTYPE LOAD_FORMAT TRUST_REMOTE_CODE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
 
 GPU_COUNT="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
 if [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] && [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
@@ -80,15 +82,18 @@ if [ "${ROCM_COMPAT_MODE}" = "1" ]; then
 fi
 
 VLLM_CMD=(
-  python -m vllm.entrypoints.openai.api_server
-  --model "${MODEL}"
+  vllm serve "${MODEL}"
   --host 127.0.0.1
   --port "${PORT}"
   --dtype "${DTYPE}"
+  --load-format "${LOAD_FORMAT}"
   --tensor-parallel-size "${TP_SIZE}"
 )
 if [ "${ENFORCE_EAGER}" = "1" ]; then
   VLLM_CMD+=(--enforce-eager)
+fi
+if [ "${TRUST_REMOTE_CODE}" = "1" ]; then
+  VLLM_CMD+=(--trust-remote-code)
 fi
 if [ -n "${GPU_MEMORY_UTILIZATION}" ]; then
   VLLM_CMD+=(--gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}")

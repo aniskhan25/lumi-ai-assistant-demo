@@ -56,6 +56,13 @@ sbatch --nodes=1 --gpus-per-node=8 \
   run_vllm_demo.sh
 ```
 
+Qwen example:
+```bash
+sbatch --nodes=1 --gpus-per-node=1 \
+  --export=ALL,TRUST_REMOTE_CODE=1,LOAD_FORMAT=runai_streamer \
+  run_vllm_demo.sh
+```
+
 ## 3) Multi-Node vLLM
 1. Edit `run_vllm_demo_multinode.sh`:
 - `CONTAINER`
@@ -150,6 +157,8 @@ Runtime logs:
 Both launchers accept optional tuning vars through `--export=ALL,...`:
 ```bash
 DTYPE=bfloat16
+LOAD_FORMAT=runai_streamer
+TRUST_REMOTE_CODE=0
 GPU_MEMORY_UTILIZATION=0.95
 MAX_MODEL_LEN=4096
 MAX_NUM_BATCHED_TOKENS=8192
@@ -160,6 +169,7 @@ ROCM_COMPAT_MODE=1
 Notes:
 - `ROCM_COMPAT_MODE=1` is the stable default (helps avoid ROCm Triton/Inductor TP crashes).
 - Try `ROCM_COMPAT_MODE=0` only for performance experiments after stability is confirmed.
+- For Qwen-family models, use `TRUST_REMOTE_CODE=1` if model loading fails.
 - Increase `MAX_NUM_BATCHED_TOKENS` and `MAX_NUM_SEQS` gradually while watching p95 latency and failures.
 
 ## 7) Benchmark Results and Analysis
