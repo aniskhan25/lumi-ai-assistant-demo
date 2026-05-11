@@ -15,10 +15,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 SRUN_NODELIST="${SRUN_NODELIST:-}"
 STARTUP_WAIT_S="${STARTUP_WAIT_S:-180}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
+BENCH_PROFILE="${BENCH_PROFILE:-default}"  # e.g. small, large
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-OUT_DIR="${REPO_ROOT}/benchmarks/results/job_${JOBID}"
+OUT_DIR="${REPO_ROOT}/benchmarks/results/${BENCH_PROFILE}/job_${JOBID}"
 
 ensure_python_bin() {
   local bin="$1"
@@ -63,6 +64,7 @@ mkdir -p "${OUT_DIR}"
 
 echo "Running benchmark on job ${JOBID}"
 echo "Base URL: ${BASE_URL}"
+echo "Benchmark profile: ${BENCH_PROFILE}"
 echo "Requests=${REQUESTS}, Concurrency=${CONCURRENCY}, MaxTokens=${MAX_TOKENS}"
 echo "Startup wait: ${STARTUP_WAIT_S}s (poll ${STARTUP_POLL_S}s)"
 if [ -n "${SRUN_NODELIST}" ]; then

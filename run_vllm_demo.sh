@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=lumi-vllm-demo
 #SBATCH --account=project_462000131
-#SBATCH --partition=standard-g
+#SBATCH --partition=dev-g
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1
@@ -12,7 +12,10 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
-MODEL="${MODEL:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
+MISTRAL_MODEL_DEFAULT="${MISTRAL_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
+QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
+MODEL="${MODEL:-}"
+MODEL_PROFILE="${MODEL_PROFILE:-auto}"  # small | large | auto
 PORT="${PORT:-8000}"
 TP_SIZE="${TP_SIZE:-1}"
 VLLM_USE_V1="${VLLM_USE_V1:-0}"
@@ -21,8 +24,8 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 DTYPE="${DTYPE:-bfloat16}"
-LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
-TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
+LOAD_FORMAT="${LOAD_FORMAT:-}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
@@ -33,20 +36,75 @@ RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
 RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
 mkdir -p "${RUNTIME_DIR}"
 
+GPU_COUNT="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-1}}"
+if [[ "${GPU_COUNT}" =~ ^([0-9]+) ]]; then
+  GPU_COUNT="${BASH_REMATCH[1]}"
+else
+  GPU_COUNT="1"
+fi
+
+if [ -z "${MODEL}" ]; then
+  case "${MODEL_PROFILE}" in
+    small)
+      MODEL="${MISTRAL_MODEL_DEFAULT}"
+      ;;
+    large)
+      MODEL="${QWEN_MODEL_DEFAULT}"
+      ;;
+    auto)
+      if [ "${GPU_COUNT}" -ge 4 ]; then
+        MODEL="${QWEN_MODEL_DEFAULT}"
+        MODEL_PROFILE="large"
+      else
+        MODEL="${MISTRAL_MODEL_DEFAULT}"
+        MODEL_PROFILE="small"
+      fi
+      ;;
+    *)
+      echo "Invalid MODEL_PROFILE='${MODEL_PROFILE}'. Use: small | large | auto." >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [ "${MODEL_PROFILE}" = "auto" ]; then
+  case "${MODEL}" in
+    *Qwen*|*qwen*)
+      MODEL_PROFILE="large"
+      ;;
+    *)
+      MODEL_PROFILE="small"
+      ;;
+  esac
+fi
+
+if [ -z "${LOAD_FORMAT}" ]; then
+  LOAD_FORMAT="runai_streamer"
+fi
+if [ -z "${TRUST_REMOTE_CODE}" ]; then
+  if [ "${MODEL_PROFILE}" = "large" ]; then
+    TRUST_REMOTE_CODE="1"
+  else
+    TRUST_REMOTE_CODE="0"
+  fi
+fi
+
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
 export MODEL PORT TP_SIZE VLLM_USE_V1 ENFORCE_EAGER STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
-export DTYPE LOAD_FORMAT TRUST_REMOTE_CODE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
+export MODEL_PROFILE DTYPE LOAD_FORMAT TRUST_REMOTE_CODE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
 
-GPU_COUNT="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
-if [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] && [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
+if [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
   echo "TP_SIZE=${TP_SIZE} exceeds allocated GPUs (${GPU_COUNT})." >&2
   echo "Increase Slurm GPU allocation or lower TP_SIZE." >&2
   exit 2
 fi
+
+echo "Selected model profile: ${MODEL_PROFILE}"
+echo "Selected model path: ${MODEL}"
 
 if command -v apptainer >/dev/null 2>&1; then
   CONTAINER_RUNTIME="apptainer"

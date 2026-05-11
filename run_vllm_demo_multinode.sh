@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=lumi-vllm-mn-demo
 #SBATCH --account=project_462000131
-#SBATCH --partition=standard-g
+#SBATCH --partition=dev-g
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
@@ -12,7 +12,10 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
-MODEL="${MODEL:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
+MISTRAL_MODEL_DEFAULT="${MISTRAL_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
+QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
+MODEL="${MODEL:-}"
+MODEL_PROFILE="${MODEL_PROFILE:-auto}"  # small | large | auto
 PORT="${PORT:-8000}"
 VLLM_USE_V1="${VLLM_USE_V1:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
@@ -21,8 +24,8 @@ STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
 DTYPE="${DTYPE:-bfloat16}"
-LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
-TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
+LOAD_FORMAT="${LOAD_FORMAT:-}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
@@ -88,6 +91,44 @@ fi
 TP_SIZE="${TP_SIZE:-${GPUS_PER_NODE}}"
 PP_SIZE="${PP_SIZE:-${NNODES}}"
 
+if [ -z "${MODEL}" ]; then
+  case "${MODEL_PROFILE}" in
+    small)
+      MODEL="${MISTRAL_MODEL_DEFAULT}"
+      ;;
+    large|auto)
+      MODEL="${QWEN_MODEL_DEFAULT}"
+      MODEL_PROFILE="large"
+      ;;
+    *)
+      echo "Invalid MODEL_PROFILE='${MODEL_PROFILE}'. Use: small | large | auto." >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [ "${MODEL_PROFILE}" = "auto" ]; then
+  case "${MODEL}" in
+    *Qwen*|*qwen*)
+      MODEL_PROFILE="large"
+      ;;
+    *)
+      MODEL_PROFILE="small"
+      ;;
+  esac
+fi
+
+if [ -z "${LOAD_FORMAT}" ]; then
+  LOAD_FORMAT="runai_streamer"
+fi
+if [ -z "${TRUST_REMOTE_CODE}" ]; then
+  if [ "${MODEL_PROFILE}" = "large" ]; then
+    TRUST_REMOTE_CODE="1"
+  else
+    TRUST_REMOTE_CODE="0"
+  fi
+fi
+
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_BASE="/scratch/project_462000131/${USER}/vllm_runtime"
 RUNTIME_DIR="${RUNTIME_BASE}/${SLURM_JOB_ID}"
@@ -101,7 +142,7 @@ fi
 
 MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
 export CONTAINER MODEL PORT TP_SIZE PP_SIZE VLLM_USE_V1 ENFORCE_EAGER STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
-export DTYPE LOAD_FORMAT TRUST_REMOTE_CODE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
+export MODEL_PROFILE DTYPE LOAD_FORMAT TRUST_REMOTE_CODE GPU_MEMORY_UTILIZATION MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE
 
 if command -v apptainer >/dev/null 2>&1; then
@@ -116,6 +157,8 @@ fi
 export CONTAINER_RUNTIME
 
 echo "Launching multi-node vLLM:"
+echo "  model_profile=${MODEL_PROFILE}"
+echo "  model=${MODEL}"
 echo "  nodes=${NNODES}, gpus_per_node=${GPUS_PER_NODE}, TP_SIZE=${TP_SIZE}, PP_SIZE=${PP_SIZE}"
 echo "  head node=${HEAD_NODE}, master addr=${MASTER_ADDR}, master port=${MASTER_PORT}"
 

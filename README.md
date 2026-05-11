@@ -16,17 +16,25 @@ module load pytorch
 Notes:
 - Scripts also try to auto-load `pytorch` if host Python is missing.
 - Run commands from repo root: `/scratch/project_462000131/<user>/lumi-ai-assistant-demo`.
-- Benchmark outputs under `benchmarks/results/` are generated artifacts (ignored by git).
+- Benchmark outputs under `benchmarks/results/<bench_profile>/job_<jobid>/` are generated artifacts (ignored by git).
+- Launch scripts default to `#SBATCH --partition=dev-g`.
 
 ## 2) Single-Node vLLM
 1. Edit `run_vllm_demo.sh`:
 - `CONTAINER`
-- `MODEL`
+- `MISTRAL_MODEL_DEFAULT` / `QWEN_MODEL_DEFAULT` (or pass `MODEL=...`)
 - `#SBATCH --account` (and other Slurm settings if needed)
 
 2. Submit:
 ```bash
 sbatch run_vllm_demo.sh
+```
+
+Model profile behavior:
+```bash
+# MODEL_PROFILE=small -> Mistral default
+# MODEL_PROFILE=large -> Qwen default
+# MODEL_PROFILE=auto  -> small for <4 GPUs, large for >=4 GPUs
 ```
 
 3. Save job id:
@@ -45,7 +53,7 @@ srun --jobid "$JOBID" --overlap --export=ALL \
 Single-node multi-GPU example (TP=4):
 ```bash
 sbatch --nodes=1 --gpus-per-node=4 \
-  --export=ALL,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 \
   run_vllm_demo.sh
 ```
 
@@ -59,20 +67,20 @@ sbatch --nodes=1 --gpus-per-node=8 \
 Qwen example:
 ```bash
 sbatch --nodes=1 --gpus-per-node=1 \
-  --export=ALL,TRUST_REMOTE_CODE=1,LOAD_FORMAT=runai_streamer \
+  --export=ALL,MODEL_PROFILE=large,TRUST_REMOTE_CODE=1,LOAD_FORMAT=runai_streamer \
   run_vllm_demo.sh
 ```
 
 ## 3) Multi-Node vLLM
 1. Edit `run_vllm_demo_multinode.sh`:
 - `CONTAINER`
-- `MODEL`
+- `MISTRAL_MODEL_DEFAULT` / `QWEN_MODEL_DEFAULT` (or pass `MODEL=...`)
 - `#SBATCH --account`
 
 2. Submit (example: 2 nodes x 4 GPUs):
 ```bash
 sbatch --nodes=2 --gpus-per-node=4 \
-  --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 \
   run_vllm_demo_multinode.sh
 ```
 
@@ -108,9 +116,9 @@ srun --jobid "$JOBID" --overlap -w "$HEAD_NODE" --export=ALL \
 ### Single-node
 ```bash
 JOBID=<jobid>
-PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
+BENCH_PROFILE=small PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
 for c in 1 2 4 8 16 32; do
-  PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128
+  BENCH_PROFILE=small PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128
 done
 ```
 
@@ -118,19 +126,20 @@ done
 ```bash
 JOBID=<jobid>
 HEAD_NODE=<head-node>
-SRUN_NODELIST="$HEAD_NODE" PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
-SRUN_NODELIST="$HEAD_NODE" PYTHON_BIN=python benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large PYTHON_BIN=python benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
 ```
 
 If startup is slow, increase benchmark readiness wait:
 ```bash
 STARTUP_WAIT_S=600 STARTUP_POLL_S=2 \
-  PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
+  BENCH_PROFILE=small PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
 ```
 
 ### Summarize
 ```bash
-python benchmarks/summarize_results.py --job-dir benchmarks/results/job_$JOBID
+python benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile small
+python benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile large
 ```
 
 ## 5) Logs and Debugging
@@ -159,6 +168,7 @@ Both launchers accept optional tuning vars through `--export=ALL,...`:
 DTYPE=bfloat16
 LOAD_FORMAT=runai_streamer
 TRUST_REMOTE_CODE=0
+MODEL_PROFILE=auto
 GPU_MEMORY_UTILIZATION=0.95
 MAX_MODEL_LEN=4096
 MAX_NUM_BATCHED_TOKENS=8192

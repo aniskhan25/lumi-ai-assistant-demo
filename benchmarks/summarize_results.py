@@ -58,7 +58,9 @@ def print_table(rows: List[Dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Summarize benchmark summary_*.json files")
-    parser.add_argument("--job-dir", required=True, help="Path to benchmarks/results/job_<jobid>")
+    parser.add_argument("--job-dir", help="Path to benchmark results directory containing summary_*.json")
+    parser.add_argument("--job-id", help="Slurm job id (used with --bench-profile to build default job-dir)")
+    parser.add_argument("--bench-profile", default="default", help="Benchmark profile folder name (default: default)")
     parser.add_argument(
         "--sort-by",
         default="ctok_s",
@@ -67,9 +69,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rows = load_rows(args.job_dir)
+    if args.job_dir:
+        job_dir = args.job_dir
+    elif args.job_id:
+        job_dir = os.path.join("benchmarks", "results", args.bench_profile, f"job_{args.job_id}")
+    else:
+        parser.error("Provide either --job-dir or --job-id.")
+
+    rows = load_rows(job_dir)
     if not rows:
-        print(f"No summary_*.json files found in {args.job_dir}", file=sys.stderr)
+        print(f"No summary_*.json files found in {job_dir}", file=sys.stderr)
         return 2
 
     reverse = args.sort_by != "p95"
@@ -91,4 +100,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
