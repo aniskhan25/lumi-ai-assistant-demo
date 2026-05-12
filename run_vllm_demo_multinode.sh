@@ -17,11 +17,13 @@ QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/mo
 MODEL="${MODEL:-}"
 MODEL_PROFILE="${MODEL_PROFILE:-auto}"  # small | large | auto
 PORT="${PORT:-8000}"
-STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-2400}"
+STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-5400}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
+LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-}"
 
 ensure_host_python() {
   if command -v python >/dev/null 2>&1; then
@@ -114,6 +116,13 @@ if [ -z "${TRUST_REMOTE_CODE}" ]; then
     TRUST_REMOTE_CODE="0"
   fi
 fi
+if [ -z "${LANGUAGE_MODEL_ONLY}" ]; then
+  if [ "${MODEL_PROFILE}" = "large" ]; then
+    LANGUAGE_MODEL_ONLY="1"
+  else
+    LANGUAGE_MODEL_ONLY="0"
+  fi
+fi
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_DIR="/scratch/project_462000131/${USER}/vllm_runtime/${SLURM_JOB_ID}"
@@ -135,7 +144,7 @@ else
   exit 127
 fi
 
-export CONTAINER MODEL PORT TP_SIZE PP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
+export CONTAINER MODEL PORT TP_SIZE PP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE MAX_MODEL_LEN LANGUAGE_MODEL_ONLY
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE CONTAINER_RUNTIME
 
 echo "Launching multi-node vLLM:"
@@ -199,6 +208,12 @@ fi
 if [ "${TRUST_REMOTE_CODE}" = "1" ]; then
   VLLM_CMD+=(--trust-remote-code)
 fi
+if [ -n "${MAX_MODEL_LEN}" ]; then
+  VLLM_CMD+=(--max-model-len "${MAX_MODEL_LEN}")
+fi
+if [ "${LANGUAGE_MODEL_ONLY}" = "1" ]; then
+  VLLM_CMD+=(--language-model-only)
+fi
 
 echo "Starting: ${VLLM_CMD[*]}"
 exec "${VLLM_CMD[@]}" > "${LOG_PATH}" 2>&1
@@ -222,7 +237,7 @@ import urllib.request
 head = os.environ["HEAD_NODE"]
 port = int(os.environ["PORT"])
 launch_pid = int(os.environ["LAUNCH_PID"])
-timeout_s = int(os.environ.get("STARTUP_TIMEOUT_S", "2400"))
+timeout_s = int(os.environ.get("STARTUP_TIMEOUT_S", "5400"))
 poll_s = float(os.environ.get("STARTUP_POLL_S", "2"))
 deadline = time.time() + timeout_s
 urls = [f"http://{head}:{port}/v1/models", f"http://127.0.0.1:{port}/v1/models"]

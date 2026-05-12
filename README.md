@@ -80,14 +80,14 @@ sbatch --nodes=1 --gpus-per-node=1 \
 2. Submit (example: 2 nodes x 4 GPUs):
 ```bash
 sbatch --nodes=2 --gpus-per-node=4 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=5400 \
   run_vllm_demo_multinode.sh
 ```
 
 2-node tuned example:
 ```bash
 sbatch --nodes=2 --gpus-per-node=4 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=5400,MAX_MODEL_LEN=131072,LANGUAGE_MODEL_ONLY=1 \
   run_vllm_demo_multinode.sh
 ```
 
@@ -171,12 +171,15 @@ PP_SIZE=2
 TRUST_REMOTE_CODE=0
 STARTUP_TIMEOUT_S=900
 ROCM_COMPAT_MODE=1
+MAX_MODEL_LEN=131072
+LANGUAGE_MODEL_ONLY=1
 ```
 
 Notes:
 - For Qwen-family models, use `TRUST_REMOTE_CODE=1` if model loading fails.
 - `ROCM_COMPAT_MODE=1` is the stable default (helps avoid ROCm Triton/Inductor TP crashes).
 - For multi-node client steps, pin one task on head node: `srun --overlap --exact -N1 -n1 -w <head-node> ...`.
+- For Qwen multi-node runs, startup can take a long time; use `STARTUP_TIMEOUT_S=5400` (or higher) and set `MAX_MODEL_LEN` explicitly if needed.
 
 ## 7) Benchmark Results and Analysis
 The following results use `max_tokens=128` and had `0` failed requests in all shown runs.
