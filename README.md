@@ -50,24 +50,17 @@ srun --jobid "$JOBID" --overlap --export=ALL \
   --question "How do I request 1 GPU on LUMI?"
 ```
 
-Single-node multi-GPU example (TP=4):
+Single-node large-model example:
 ```bash
 sbatch --nodes=1 --gpus-per-node=4 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,STARTUP_TIMEOUT_S=1800 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,STARTUP_TIMEOUT_S=2400 \
   run_vllm_demo.sh
 ```
 
-Single-node tuned example (full node, higher batching):
-```bash
-sbatch --nodes=1 --gpus-per-node=8 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=8,STARTUP_TIMEOUT_S=1800 \
-  run_vllm_demo.sh
-```
-
-Qwen example:
+Single-node Qwen example (1 GPU):
 ```bash
 sbatch --nodes=1 --gpus-per-node=1 \
-  --export=ALL,MODEL_PROFILE=large,TRUST_REMOTE_CODE=1,LOAD_FORMAT=runai_streamer \
+  --export=ALL,MODEL_PROFILE=large,TRUST_REMOTE_CODE=1,STARTUP_TIMEOUT_S=2400 \
   run_vllm_demo.sh
 ```
 
@@ -81,13 +74,6 @@ sbatch --nodes=1 --gpus-per-node=1 \
 ```bash
 sbatch --nodes=2 --gpus-per-node=4 \
   --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=5400 \
-  run_vllm_demo_multinode.sh
-```
-
-2-node tuned example:
-```bash
-sbatch --nodes=2 --gpus-per-node=4 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=5400,MAX_MODEL_LEN=131072,LANGUAGE_MODEL_ONLY=1 \
   run_vllm_demo_multinode.sh
 ```
 
@@ -106,7 +92,7 @@ echo "HEAD_NODE=$HEAD_NODE"
 
 5. Query (must be pinned to head node):
 ```bash
-srun --jobid "$JOBID" --overlap -w "$HEAD_NODE" --export=ALL \
+srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
   python demo_agent.py \
   --base-url http://127.0.0.1:8000/v1 \
   --question "How do I request 1 GPU on LUMI?"
@@ -163,7 +149,7 @@ Runtime logs:
 ```
 
 ## 6) LUMI Tuning Knobs
-Both launchers keep only minimal knobs:
+Use only these knobs for running and benchmarking:
 ```bash
 MODEL_PROFILE=auto
 TP_SIZE=1
@@ -176,10 +162,9 @@ LANGUAGE_MODEL_ONLY=1
 ```
 
 Notes:
-- For Qwen-family models, use `TRUST_REMOTE_CODE=1` if model loading fails.
-- `ROCM_COMPAT_MODE=1` is the stable default (helps avoid ROCm Triton/Inductor TP crashes).
-- For multi-node client steps, pin one task on head node: `srun --overlap --exact -N1 -n1 -w <head-node> ...`.
-- For Qwen multi-node runs, startup can take a long time; use `STARTUP_TIMEOUT_S=5400` (or higher) and set `MAX_MODEL_LEN` explicitly if needed.
+- For Qwen-family models, use `TRUST_REMOTE_CODE=1`.
+- For multi-node runs, set `STARTUP_TIMEOUT_S=5400` and keep `MAX_MODEL_LEN=131072,LANGUAGE_MODEL_ONLY=1` unless you explicitly need larger context or multimodal input.
+- For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis
 The following results use `max_tokens=128` and had `0` failed requests in all shown runs.
