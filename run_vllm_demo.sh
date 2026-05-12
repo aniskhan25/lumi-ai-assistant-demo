@@ -52,17 +52,21 @@ BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
+MIOPEN_DIR="$(mktemp -d)"
 
-export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S VLLM_EXTRA_ARGS
+export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S VLLM_EXTRA_ARGS MIOPEN_DIR
 
-singularity exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
+singularity run "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 
 cd /work
 export HOME="/runtime"
-export XDG_CACHE_HOME="/runtime/.cache"
-export HF_HOME="/runtime/.cache/huggingface"
-mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}"
+export XDG_CACHE_HOME="/scratch/${SLURM_JOB_ACCOUNT}/vllm-cache"
+export HF_HOME="/scratch/${SLURM_JOB_ACCOUNT}/hf-cache"
+export VLLM_CACHE_ROOT="/scratch/${SLURM_JOB_ACCOUNT}/vllm-cache"
+export MIOPEN_CUSTOM_CACHE_DIR="${MIOPEN_DIR}/cache"
+export MIOPEN_USER_DB="${MIOPEN_DIR}/config"
+mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_CACHE_DIR}" "${MIOPEN_USER_DB}"
 LOG_PATH="/runtime/vllm_server.log"
 
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
