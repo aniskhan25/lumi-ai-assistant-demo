@@ -35,7 +35,6 @@ PP_SIZE="${PP_SIZE:-${SLURM_NNODES}}"
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_DIR="/scratch/project_462000131/${USER}/vllm_runtime/${SLURM_JOB_ID}"
 mkdir -p "${RUNTIME_DIR}"
-MIOPEN_DIR="$(mktemp -d)"
 
 HEAD_NODE="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
 if [ -z "${HEAD_NODE}" ]; then
@@ -44,8 +43,13 @@ if [ -z "${HEAD_NODE}" ]; then
 fi
 MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
 
-export CONTAINER MODEL PORT TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND VLLM_EXTRA_ARGS MIOPEN_DIR
+export MODEL PORT TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND VLLM_EXTRA_ARGS
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE
+
+BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
+if [ -d "${MODEL}" ]; then
+  BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
+fi
 
 echo "Launching multi-node vLLM:"
 echo "  model=${MODEL}"
@@ -54,7 +58,7 @@ echo "  head node=${HEAD_NODE}, master addr=${MASTER_ADDR}, master port=${MASTER
 echo "  distributed executor backend=${DISTRIBUTED_EXECUTOR_BACKEND}"
 
 srun --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 --kill-on-bad-exit=1 --export=ALL \
-  bash "${WORKDIR}/launch_vllm_rank.sh" &
+  singularity run "${BIND_ARGS[@]}" "${CONTAINER}" bash /work/launch_vllm_rank.sh &
 
 LAUNCH_PID=$!
 export LAUNCH_PID
