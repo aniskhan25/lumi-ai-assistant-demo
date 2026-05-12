@@ -149,15 +149,13 @@ Most runs should use the launcher defaults. Override only when needed:
 MODEL=/path/to/model
 TP_SIZE=<gpus-per-node>
 PP_SIZE=<nodes>
-MAX_MODEL_LEN=<context-length>
-VLLM_EXTRA_ARGS="--max-num-seqs 128 --gpu-memory-utilization 0.9"
+VLLM_EXTRA_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilization 0.9"
 ```
 
 Notes:
 - Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
 - Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
-- Multi-node defaults to Qwen with `TRUST_REMOTE_CODE=1` and `LANGUAGE_MODEL_ONLY=1`.
-- Set `MAX_MODEL_LEN` only if you explicitly want to cap the context length.
+- Use `VLLM_EXTRA_ARGS` for optional vLLM flags such as `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
 - For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis

@@ -16,10 +16,8 @@ MISTRAL_MODEL_DEFAULT="${MISTRAL_MODEL_DEFAULT:-/scratch/project_462000131/anisr
 QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
 MODEL="${MODEL:-}"
 PORT="${PORT:-8000}"
-TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
-ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
@@ -42,13 +40,6 @@ if [ -z "${MODEL}" ]; then
   fi
 fi
 
-if [ -z "${TRUST_REMOTE_CODE}" ]; then
-  case "${MODEL}" in
-    *Qwen*|*qwen*) TRUST_REMOTE_CODE="1" ;;
-    *) TRUST_REMOTE_CODE="0" ;;
-  esac
-fi
-
 if [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
   echo "TP_SIZE=${TP_SIZE} exceeds allocated GPUs (${GPU_COUNT})." >&2
   exit 2
@@ -62,7 +53,7 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT TP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE VLLM_EXTRA_ARGS
+export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S VLLM_EXTRA_ARGS
 
 singularity exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
@@ -74,16 +65,7 @@ export HF_HOME="/runtime/.cache/huggingface"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}"
 LOG_PATH="/runtime/vllm_server.log"
 
-if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
-  export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
-fi
-unset ROCR_VISIBLE_DEVICES
-
-if [ "${ROCM_COMPAT_MODE}" = "1" ]; then
-  export TORCH_COMPILE_DISABLE=1
-  export VLLM_USE_TRITON_FLASH_ATTN=0
-  export VLLM_WORKER_MULTIPROC_METHOD=spawn
-fi
+export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 
 VLLM_CMD=(
   vllm serve "${MODEL}"
@@ -92,9 +74,6 @@ VLLM_CMD=(
   --tensor-parallel-size "${TP_SIZE}"
   --load-format runai_streamer
 )
-if [ "${TRUST_REMOTE_CODE}" = "1" ]; then
-  VLLM_CMD+=(--trust-remote-code)
-fi
 if [ -n "${VLLM_EXTRA_ARGS}" ]; then
   read -r -a EXTRA_ARGS <<< "${VLLM_EXTRA_ARGS}"
   VLLM_CMD+=("${EXTRA_ARGS[@]}")

@@ -22,15 +22,7 @@ export XDG_CACHE_HOME="/runtime/.cache"
 export HF_HOME="/runtime/.cache/huggingface"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}"
 
-if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
-  export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
-fi
-unset ROCR_VISIBLE_DEVICES
-
-if [ "${ROCM_COMPAT_MODE}" = "1" ]; then
-  export TORCH_COMPILE_DISABLE=1
-  export VLLM_WORKER_MULTIPROC_METHOD=spawn
-fi
+export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 
 VLLM_CMD=(
   vllm serve "${MODEL}"
@@ -47,15 +39,6 @@ VLLM_CMD=(
 )
 if [ "${NODE_RANK}" != "0" ]; then
   VLLM_CMD+=(--headless)
-fi
-if [ "${TRUST_REMOTE_CODE}" = "1" ]; then
-  VLLM_CMD+=(--trust-remote-code)
-fi
-if [ -n "${MAX_MODEL_LEN}" ]; then
-  VLLM_CMD+=(--max-model-len "${MAX_MODEL_LEN}")
-fi
-if [ "${LANGUAGE_MODEL_ONLY}" = "1" ]; then
-  VLLM_CMD+=(--language-model-only)
 fi
 if [ -n "${VLLM_EXTRA_ARGS}" ]; then
   read -r -a EXTRA_ARGS <<< "${VLLM_EXTRA_ARGS}"
