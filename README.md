@@ -60,7 +60,7 @@ sbatch --nodes=1 --gpus-per-node=4 \
 Single-node tuned example (full node, higher batching):
 ```bash
 sbatch --nodes=1 --gpus-per-node=8 \
-  --export=ALL,TP_SIZE=8,STARTUP_TIMEOUT_S=1800,GPU_MEMORY_UTILIZATION=0.95,MAX_NUM_BATCHED_TOKENS=8192,MAX_NUM_SEQS=256 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=8,STARTUP_TIMEOUT_S=1800 \
   run_vllm_demo.sh
 ```
 
@@ -87,7 +87,7 @@ sbatch --nodes=2 --gpus-per-node=4 \
 2-node tuned example:
 ```bash
 sbatch --nodes=2 --gpus-per-node=4 \
-  --export=ALL,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400,GPU_MEMORY_UTILIZATION=0.95,MAX_NUM_BATCHED_TOKENS=8192,MAX_NUM_SEQS=256 \
+  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=2400 \
   run_vllm_demo_multinode.sh
 ```
 
@@ -163,24 +163,20 @@ Runtime logs:
 ```
 
 ## 6) LUMI Tuning Knobs
-Both launchers accept optional tuning vars through `--export=ALL,...`:
+Both launchers keep only minimal knobs:
 ```bash
-DTYPE=bfloat16
-LOAD_FORMAT=runai_streamer
-TRUST_REMOTE_CODE=0
 MODEL_PROFILE=auto
-GPU_MEMORY_UTILIZATION=0.95
-MAX_MODEL_LEN=4096
-MAX_NUM_BATCHED_TOKENS=8192
-MAX_NUM_SEQS=256
+TP_SIZE=1
+PP_SIZE=2
+TRUST_REMOTE_CODE=0
+STARTUP_TIMEOUT_S=900
 ROCM_COMPAT_MODE=1
 ```
 
 Notes:
-- `ROCM_COMPAT_MODE=1` is the stable default (helps avoid ROCm Triton/Inductor TP crashes).
-- Try `ROCM_COMPAT_MODE=0` only for performance experiments after stability is confirmed.
 - For Qwen-family models, use `TRUST_REMOTE_CODE=1` if model loading fails.
-- Increase `MAX_NUM_BATCHED_TOKENS` and `MAX_NUM_SEQS` gradually while watching p95 latency and failures.
+- `ROCM_COMPAT_MODE=1` is the stable default (helps avoid ROCm Triton/Inductor TP crashes).
+- For multi-node client steps, pin one task on head node: `srun --overlap --exact -N1 -n1 -w <head-node> ...`.
 
 ## 7) Benchmark Results and Analysis
 The following results use `max_tokens=128` and had `0` failed requests in all shown runs.
