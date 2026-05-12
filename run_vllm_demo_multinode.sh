@@ -24,6 +24,7 @@ MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-}"
+DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 
 ensure_host_python() {
   if command -v python >/dev/null 2>&1; then
@@ -144,7 +145,7 @@ else
   exit 127
 fi
 
-export CONTAINER MODEL PORT TP_SIZE PP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE MAX_MODEL_LEN LANGUAGE_MODEL_ONLY
+export CONTAINER MODEL PORT TP_SIZE PP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE MAX_MODEL_LEN LANGUAGE_MODEL_ONLY DISTRIBUTED_EXECUTOR_BACKEND
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE CONTAINER_RUNTIME
 
 echo "Launching multi-node vLLM:"
@@ -152,6 +153,7 @@ echo "  model_profile=${MODEL_PROFILE}"
 echo "  model=${MODEL}"
 echo "  nodes=${NNODES}, gpus_per_node=${GPUS_PER_NODE}, TP_SIZE=${TP_SIZE}, PP_SIZE=${PP_SIZE}"
 echo "  head node=${HEAD_NODE}, master addr=${MASTER_ADDR}, master port=${MASTER_PORT}"
+echo "  distributed executor backend=${DISTRIBUTED_EXECUTOR_BACKEND}"
 
 srun --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 --kill-on-bad-exit=1 --export=ALL \
   bash -lc '
@@ -197,6 +199,7 @@ VLLM_CMD=(
   --load-format runai_streamer
   --tensor-parallel-size "${TP_SIZE}"
   --pipeline-parallel-size "${PP_SIZE}"
+  --distributed-executor-backend "${DISTRIBUTED_EXECUTOR_BACKEND}"
   --nnodes "${NNODES}"
   --node-rank "${NODE_RANK}"
   --master-addr "${MASTER_ADDR}"
