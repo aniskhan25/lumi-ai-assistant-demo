@@ -15,13 +15,12 @@ CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m5
 MISTRAL_MODEL_DEFAULT="${MISTRAL_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
 QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
 MODEL="${MODEL:-}"
-MODEL_PROFILE="${MODEL_PROFILE:-auto}"  # small | large | auto
 PORT="${PORT:-8000}"
-TP_SIZE="${TP_SIZE:-1}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 ROCM_COMPAT_MODE="${ROCM_COMPAT_MODE:-1}"
+VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_DIR="/scratch/project_462000131/${USER}/vllm_runtime/${SLURM_JOB_ID}"
@@ -33,44 +32,21 @@ if [[ "${GPU_COUNT}" =~ ^([0-9]+) ]]; then
 else
   GPU_COUNT="1"
 fi
+TP_SIZE="${TP_SIZE:-${GPU_COUNT}}"
 
 if [ -z "${MODEL}" ]; then
-  case "${MODEL_PROFILE}" in
-    small)
-      MODEL="${MISTRAL_MODEL_DEFAULT}"
-      ;;
-    large)
-      MODEL="${QWEN_MODEL_DEFAULT}"
-      ;;
-    auto)
-      if [ "${GPU_COUNT}" -ge 4 ]; then
-        MODEL="${QWEN_MODEL_DEFAULT}"
-        MODEL_PROFILE="large"
-      else
-        MODEL="${MISTRAL_MODEL_DEFAULT}"
-        MODEL_PROFILE="small"
-      fi
-      ;;
-    *)
-      echo "Invalid MODEL_PROFILE='${MODEL_PROFILE}'. Use: small | large | auto." >&2
-      exit 2
-      ;;
-  esac
-fi
-
-if [ "${MODEL_PROFILE}" = "auto" ]; then
-  case "${MODEL}" in
-    *Qwen*|*qwen*) MODEL_PROFILE="large" ;;
-    *) MODEL_PROFILE="small" ;;
-  esac
+  if [ "${GPU_COUNT}" -gt 1 ]; then
+    MODEL="${QWEN_MODEL_DEFAULT}"
+  else
+    MODEL="${MISTRAL_MODEL_DEFAULT}"
+  fi
 fi
 
 if [ -z "${TRUST_REMOTE_CODE}" ]; then
-  if [ "${MODEL_PROFILE}" = "large" ]; then
-    TRUST_REMOTE_CODE="1"
-  else
-    TRUST_REMOTE_CODE="0"
-  fi
+  case "${MODEL}" in
+    *Qwen*|*qwen*) TRUST_REMOTE_CODE="1" ;;
+    *) TRUST_REMOTE_CODE="0" ;;
+  esac
 fi
 
 if [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
@@ -78,16 +54,6 @@ if [ "${TP_SIZE}" -gt "${GPU_COUNT}" ]; then
   exit 2
 fi
 
-if command -v apptainer >/dev/null 2>&1; then
-  CONTAINER_RUNTIME="apptainer"
-elif command -v singularity >/dev/null 2>&1; then
-  CONTAINER_RUNTIME="singularity"
-else
-  echo "No container runtime found (expected apptainer or singularity)." >&2
-  exit 127
-fi
-
-echo "Model profile: ${MODEL_PROFILE}"
 echo "Model: ${MODEL}"
 echo "Port: ${PORT}  TP_SIZE: ${TP_SIZE}"
 
@@ -96,9 +62,9 @@ if [ -d "${MODEL}" ]; then
   BIND_ARGS+=(--bind "${MODEL}:${MODEL}")
 fi
 
-export MODEL PORT TP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE
+export MODEL PORT TP_SIZE TRUST_REMOTE_CODE STARTUP_TIMEOUT_S STARTUP_POLL_S ROCM_COMPAT_MODE VLLM_EXTRA_ARGS
 
-"${CONTAINER_RUNTIME}" exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
+singularity exec --rocm "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
 
 cd /work
@@ -128,6 +94,10 @@ VLLM_CMD=(
 )
 if [ "${TRUST_REMOTE_CODE}" = "1" ]; then
   VLLM_CMD+=(--trust-remote-code)
+fi
+if [ -n "${VLLM_EXTRA_ARGS}" ]; then
+  read -r -a EXTRA_ARGS <<< "${VLLM_EXTRA_ARGS}"
+  VLLM_CMD+=("${EXTRA_ARGS[@]}")
 fi
 
 "${VLLM_CMD[@]}" > "${LOG_PATH}" 2>&1 &

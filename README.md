@@ -14,7 +14,7 @@ module load pytorch
 ```
 
 Notes:
-- Scripts also try to auto-load `pytorch` if host Python is missing.
+- The multi-node launcher loads both `pytorch` and `lumi-aif-singularity-bindings`.
 - Run commands from repo root: `/scratch/project_462000131/<user>/lumi-ai-assistant-demo`.
 - Benchmark outputs under `benchmarks/results/<bench_profile>/job_<jobid>/` are generated artifacts (ignored by git).
 - Launch scripts default to `#SBATCH --partition=dev-g`.
@@ -30,11 +30,11 @@ Notes:
 sbatch run_vllm_demo.sh
 ```
 
-Model profile behavior:
+Default model behavior:
 ```bash
-# MODEL_PROFILE=small -> Mistral default
-# MODEL_PROFILE=large -> Qwen default
-# MODEL_PROFILE=auto  -> small for <4 GPUs, large for >=4 GPUs
+# 1 GPU      -> Mistral default
+# multi-GPU -> Qwen default
+# MODEL=... -> explicit override
 ```
 
 3. Save job id:
@@ -52,16 +52,7 @@ srun --jobid "$JOBID" --overlap --export=ALL \
 
 Single-node large-model example:
 ```bash
-sbatch --nodes=1 --gpus-per-node=4 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,STARTUP_TIMEOUT_S=2400 \
-  run_vllm_demo.sh
-```
-
-Single-node Qwen example (1 GPU):
-```bash
-sbatch --nodes=1 --gpus-per-node=1 \
-  --export=ALL,MODEL_PROFILE=large,TRUST_REMOTE_CODE=1,STARTUP_TIMEOUT_S=2400 \
-  run_vllm_demo.sh
+sbatch --nodes=1 --gpus-per-node=4 run_vllm_demo.sh
 ```
 
 ## 3) Multi-Node vLLM
@@ -72,9 +63,15 @@ sbatch --nodes=1 --gpus-per-node=1 \
 
 2. Submit (example: 2 nodes x 4 GPUs):
 ```bash
-sbatch --nodes=2 --gpus-per-node=4 \
-  --export=ALL,MODEL_PROFILE=large,TP_SIZE=4,PP_SIZE=2,MASTER_PORT=29501,STARTUP_TIMEOUT_S=5400 \
-  run_vllm_demo_multinode.sh
+sbatch --nodes=2 --gpus-per-node=4 run_vllm_demo_multinode.sh
+```
+
+Defaults used by the multi-node launcher:
+```bash
+MODEL=$QWEN_MODEL_DEFAULT   # Qwen default for multi-node
+TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
+PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
+STARTUP_TIMEOUT_S=5400
 ```
 
 3. Save job id:
@@ -143,28 +140,24 @@ Runtime logs:
 /scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log
 
 # Multi-node
-/scratch/project_462000131/<user>/vllm_runtime/<jobid>/srun_step.log
-/scratch/project_462000131/<user>/vllm_runtime/<jobid>/launcher_rank*.log
 /scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log
 ```
 
 ## 6) LUMI Tuning Knobs
-Use only these knobs for running and benchmarking:
+Most runs should use the launcher defaults. Override only when needed:
 ```bash
-MODEL_PROFILE=auto
-TP_SIZE=1
-PP_SIZE=2
-TRUST_REMOTE_CODE=0
-STARTUP_TIMEOUT_S=900
-ROCM_COMPAT_MODE=1
-MAX_MODEL_LEN=131072
-LANGUAGE_MODEL_ONLY=1
-DISTRIBUTED_EXECUTOR_BACKEND=mp
+MODEL=/path/to/model
+TP_SIZE=<gpus-per-node>
+PP_SIZE=<nodes>
+MAX_MODEL_LEN=<context-length>
+VLLM_EXTRA_ARGS="--max-num-seqs 128 --gpu-memory-utilization 0.9"
 ```
 
 Notes:
-- For Qwen-family models, use `TRUST_REMOTE_CODE=1`.
-- For multi-node runs, set `STARTUP_TIMEOUT_S=5400` and keep `MAX_MODEL_LEN=131072,LANGUAGE_MODEL_ONLY=1` unless you explicitly need larger context or multimodal input.
+- Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
+- Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
+- Multi-node defaults to Qwen with `TRUST_REMOTE_CODE=1` and `LANGUAGE_MODEL_ONLY=1`.
+- Set `MAX_MODEL_LEN` only if you explicitly want to cap the context length.
 - For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis
