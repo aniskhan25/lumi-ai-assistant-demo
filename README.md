@@ -73,7 +73,6 @@ TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
 ENABLE_EXPERT_PARALLEL=1
 ALL2ALL_BACKEND=deepep_low_latency
-GLOO_SOCKET_IFNAME=eth0
 SBATCH --nodes=2
 SBATCH --gpus-per-node=8
 SBATCH --cpus-per-task=56
