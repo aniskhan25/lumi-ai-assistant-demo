@@ -125,8 +125,8 @@ def http_request_json(method: str, url: str, payload: dict = None, timeout: floa
         return json.loads(body)
 
 
-def get_model_id(base_url: str) -> str:
-    models = http_request_json("GET", f"{base_url}/models")
+def get_model_id(base_url: str, timeout: float) -> str:
+    models = http_request_json("GET", f"{base_url}/models", timeout=timeout)
     data = models.get("data", [])
     if not data:
         raise RuntimeError("No models returned from /v1/models")
@@ -196,14 +196,21 @@ Question:
     ]
 
 
-def chat(base_url: str, model: str, messages: List[dict], temperature: float = 0.2, max_tokens: int = 512) -> str:
+def chat(
+    base_url: str,
+    model: str,
+    messages: List[dict],
+    temperature: float,
+    max_tokens: int,
+    timeout: float,
+) -> str:
     payload = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    resp = http_request_json("POST", f"{base_url}/chat/completions", payload)
+    resp = http_request_json("POST", f"{base_url}/chat/completions", payload, timeout=timeout)
     choices = resp.get("choices", [])
     if not choices:
         raise RuntimeError("No choices returned from chat completion")
@@ -221,7 +228,16 @@ def read_questions_from_file(path: str) -> List[str]:
     return questions
 
 
-def run_single_question(question: str, docs: List[Doc], idf: Dict[str, float], base_url: str, model: str, k: int):
+def run_single_question(
+    question: str,
+    docs: List[Doc],
+    idf: Dict[str, float],
+    base_url: str,
+    model: str,
+    k: int,
+    max_tokens: int,
+    timeout: float,
+):
     retrieved = retrieve(docs, idf, question, k)
     tool_output = detect_tool_output(question)
 
@@ -230,7 +246,7 @@ def run_single_question(question: str, docs: List[Doc], idf: Dict[str, float], b
     print("\nRetrieved docs:", ", ".join(d.name for d in retrieved) if retrieved else "(none)")
 
     messages = build_prompt(question, retrieved, tool_output)
-    answer = chat(base_url, model, messages)
+    answer = chat(base_url, model, messages, temperature=0.2, max_tokens=max_tokens, timeout=timeout)
 
     if tool_output:
         print("\n--- Tool Output (Slurm Template) ---")
@@ -246,6 +262,8 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1", help="vLLM OpenAI base URL")
     parser.add_argument("--model", default=os.environ.get("MODEL"), help="Model ID override")
     parser.add_argument("--top-k", type=int, default=3, help="Number of docs to retrieve")
+    parser.add_argument("--max-tokens", type=int, default=512, help="Maximum generated tokens")
+    parser.add_argument("--timeout", type=float, default=30.0, help="HTTP request timeout in seconds")
     parser.add_argument("--question", help="Single question to answer")
     parser.add_argument("--question-file", help="File with one question per line")
     args = parser.parse_args()
@@ -257,7 +275,7 @@ def main() -> int:
         return 2
 
     try:
-        model = args.model or get_model_id(args.base_url)
+        model = args.model or get_model_id(args.base_url, args.timeout)
     except Exception as e:
         print(f"Error: failed to get model id from {args.base_url}: {e}")
         return 3
@@ -270,11 +288,11 @@ def main() -> int:
             print("Error: no questions found in question file")
             return 4
         for q in questions:
-            run_single_question(q, docs, idf, args.base_url, model, args.top_k)
+            run_single_question(q, docs, idf, args.base_url, model, args.top_k, args.max_tokens, args.timeout)
         return 0
 
     if args.question:
-        run_single_question(args.question, docs, idf, args.base_url, model, args.top_k)
+        run_single_question(args.question, docs, idf, args.base_url, model, args.top_k, args.max_tokens, args.timeout)
         return 0
 
     print("Enter questions (type 'exit' to quit).")
@@ -287,7 +305,7 @@ def main() -> int:
             continue
         if q.lower() in {"exit", "quit"}:
             break
-        run_single_question(q, docs, idf, args.base_url, model, args.top_k)
+        run_single_question(q, docs, idf, args.base_url, model, args.top_k, args.max_tokens, args.timeout)
     return 0
 
 
