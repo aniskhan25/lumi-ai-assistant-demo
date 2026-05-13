@@ -57,10 +57,15 @@ Start vLLM:
 sbatch run_vllm_demo_multinode.sh
 ```
 
-Set the job id and head node once:
+Set the job id once:
 
 ```bash
 JOBID=<jobid>
+```
+
+Set the head node once:
+
+```bash
 NODELIST=$(squeue -j "$JOBID" -h -o %N)
 HEAD_NODE=$(scontrol show hostnames "$NODELIST" | head -n1)
 echo "$HEAD_NODE"
