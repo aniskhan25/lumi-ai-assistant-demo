@@ -71,6 +71,9 @@ Defaults used by the multi-node launcher:
 MODEL=$QWEN_MODEL_DEFAULT   # Qwen default for multi-node
 TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
+ENABLE_EXPERT_PARALLEL=1
+ALL2ALL_BACKEND=deepep_low_latency
+GLOO_SOCKET_IFNAME=eth0
 SBATCH --nodes=2
 SBATCH --gpus-per-node=8
 SBATCH --cpus-per-task=56
@@ -153,12 +156,15 @@ Most runs should use the launcher defaults. Override only when needed:
 MODEL=/path/to/model
 TP_SIZE=<gpus-per-node>
 PP_SIZE=<nodes>
+ENABLE_EXPERT_PARALLEL=0
+ALL2ALL_BACKEND=<backend>
 VLLM_EXTRA_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilization 0.9"
 ```
 
 Notes:
 - Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
 - Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
+- Multi-node defaults to expert parallel with `ALL2ALL_BACKEND=deepep_low_latency`.
 - Use `VLLM_EXTRA_ARGS` for optional vLLM flags such as `--load-format runai_streamer`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
 - For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
