@@ -6,6 +6,7 @@ Run commands from the repository root on LUMI:
 
 ```bash
 cd /scratch/project_462000131/$USER/lumi-ai-assistant-demo
+module load cray-python
 ```
 
 ## Prerequisites
@@ -40,8 +41,6 @@ JOBID=<jobid>
 Query the server:
 
 ```bash
-module load cray-python
-
 srun --jobid "$JOBID" --overlap --export=ALL \
   python3 demo_agent.py \
   --base-url http://127.0.0.1:8000/v1 \
@@ -70,8 +69,6 @@ echo "$HEAD_NODE"
 Query the server from the head node:
 
 ```bash
-module load cray-python
-
 srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
   python3 demo_agent.py \
   --base-url http://127.0.0.1:8000/v1 \
@@ -85,8 +82,6 @@ srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
 Single-node benchmark:
 
 ```bash
-module load cray-python
-
 BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 40 4 128
 for c in 1 2 4 8 16 32; do
   BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128
@@ -98,8 +93,6 @@ python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile small
 Multi-node benchmark:
 
 ```bash
-module load cray-python
-
 SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_benchmark.sh "$JOBID" 40 4 128
 SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
 
