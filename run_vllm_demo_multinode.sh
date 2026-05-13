@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-latest.sif}"
+CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
 MODEL="${MODEL:-deepseek-ai/DeepSeek-R1-0528}"
 PORT="${PORT:-8000}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-5400}"
