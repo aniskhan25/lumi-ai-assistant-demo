@@ -16,9 +16,10 @@ set -euo pipefail
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
 MODEL="${MODEL:-deepseek-ai/DeepSeek-R1-0528}"
 PORT="${PORT:-8000}"
+SOCKET_FILE="${SOCKET_FILE:-/tmp/vllm-${SLURM_JOB_ACCOUNT}.sock}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-5400}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
-MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
+MASTER_PORT="${MASTER_PORT:-9999}"
 DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 ALL2ALL_BACKEND="${ALL2ALL_BACKEND:-deepep_low_latency}"
 ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-1}"
@@ -46,7 +47,7 @@ if [ -z "${HEAD_NODE}" ]; then
 fi
 MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
 
-export MODEL PORT TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND ALL2ALL_BACKEND ENABLE_EXPERT_PARALLEL EXTRA_VLLM_ARGS
+export MODEL PORT SOCKET_FILE TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND ALL2ALL_BACKEND ENABLE_EXPERT_PARALLEL EXTRA_VLLM_ARGS
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE
 
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
@@ -58,6 +59,7 @@ echo "Launching multi-node vLLM:"
 echo "  model=${MODEL}"
 echo "  nodes=${NNODES}, gpus_per_node=${SLURM_GPUS_ON_NODE}, TP_SIZE=${TP_SIZE}, PP_SIZE=${PP_SIZE}"
 echo "  head node=${HEAD_NODE}, master addr=${MASTER_ADDR}, master port=${MASTER_PORT}"
+echo "  socket file=${SOCKET_FILE:-disabled}"
 echo "  distributed executor backend=${DISTRIBUTED_EXECUTOR_BACKEND}"
 echo "  expert parallel=${ENABLE_EXPERT_PARALLEL}, all2all backend=${ALL2ALL_BACKEND}"
 
@@ -72,7 +74,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-READY_URL="http://127.0.0.1:${PORT}/v1/models"
 READY=0
 SECONDS=0
 while [ "${SECONDS}" -lt "${STARTUP_TIMEOUT_S}" ]; do
@@ -80,7 +81,12 @@ while [ "${SECONDS}" -lt "${STARTUP_TIMEOUT_S}" ]; do
     echo "vLLM launcher step exited before readiness check passed." >&2
     break
   fi
-  if "${HOST_PYTHON}" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5).close()' "${READY_URL}" >/dev/null 2>&1; then
+  if [ -n "${SOCKET_FILE}" ] && [ -S "${SOCKET_FILE}" ]; then
+    echo "vLLM ready."
+    READY=1
+    break
+  fi
+  if [ -z "${SOCKET_FILE}" ] && "${HOST_PYTHON}" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5).close()' "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
     echo "vLLM ready."
     READY=1
     break
@@ -97,10 +103,14 @@ if [ "${READY}" != "1" ]; then
   exit 1
 fi
 
-echo "vLLM multi-node server is ready at http://127.0.0.1:${PORT}/v1 (job ${SLURM_JOB_ID})."
+echo "vLLM multi-node server is ready (job ${SLURM_JOB_ID})."
 echo "Head node: ${HEAD_NODE}"
-echo "Run queries from another shell pinned to head node:"
-echo "  srun --jobid ${SLURM_JOB_ID} --overlap --exact -N1 -n1 -w ${HEAD_NODE} --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:${PORT}/v1 --question \"test\""
+if [ -n "${SOCKET_FILE}" ]; then
+  echo "Socket: ${SOCKET_FILE}"
+else
+  echo "Run queries from another shell pinned to head node:"
+  echo "  srun --jobid ${SLURM_JOB_ID} --overlap --exact -N1 -n1 -w ${HEAD_NODE} --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:${PORT}/v1 --question \"test\""
+fi
 echo "Logs:"
 echo "  ${RUNTIME_DIR}/vllm_server_rank*.log"
 
