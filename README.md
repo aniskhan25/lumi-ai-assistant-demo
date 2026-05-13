@@ -67,21 +67,25 @@ sbatch --nodes=1 --gpus-per-node=4 run_vllm_demo.sh
 sbatch run_vllm_demo_multinode.sh
 ```
 
-The multi-node launcher follows the LUMI reference and starts vLLM on a Unix socket. Query/chat support for this mode will be added separately after startup is confirmed.
+The default multi-node launch uses a Unix socket to match the LUMI reference. If you want to query with `demo_agent.py` or run the benchmark scripts over HTTP, submit with:
+```bash
+sbatch --export=ALL,SOCKET_FILE= run_vllm_demo_multinode.sh
+```
 
 Defaults used by the multi-node launcher:
 ```bash
 MODEL=deepseek-ai/DeepSeek-R1-0528
---tensor-parallel-size $SLURM_GPUS_ON_NODE
---pipeline-parallel-size $SLURM_NNODES
+TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
+PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
 SOCKET_FILE=/tmp/vllm-$SLURM_JOB_ACCOUNT.sock
 MASTER_PORT=9999
---enable-expert-parallel
---all2all-backend deepep_low_latency
+ENABLE_EXPERT_PARALLEL=1
+ALL2ALL_BACKEND=deepep_low_latency
 SBATCH --nodes=2
 SBATCH --gpus-per-node=8
 SBATCH --cpus-per-task=56
 SBATCH --mem=460G
+STARTUP_TIMEOUT_S=5400
 ```
 
 3. Save job id:
@@ -89,16 +93,20 @@ SBATCH --mem=460G
 JOBID=<jobid>
 ```
 
-4. Watch startup:
+4. Get NodeList and head node:
 ```bash
-tail -f demo-mn-${JOBID}.out
+NODELIST=$(squeue -j "$JOBID" -h -o %N)
+HEAD_NODE=$(scontrol show hostnames "$NODELIST" | head -n1)
+echo "NODELIST=$NODELIST"
+echo "HEAD_NODE=$HEAD_NODE"
 ```
 
-Expected successful startup progresses past NCCL initialization and reaches model loading:
+5. Query (must be pinned to head node):
 ```bash
-vLLM is using nccl==...
-rank ... is assigned as ...
-Starting to load model ...
+srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
+  python demo_agent.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --question "How do I request 1 GPU on LUMI?"
 ```
 
 ## 4) Benchmarks
@@ -111,7 +119,13 @@ for c in 1 2 4 8 16 32; do
 done
 ```
 
-Multi-node benchmarking will be added after the reference-style UDS startup is confirmed.
+### Multi-node (pin benchmark step to head node)
+```bash
+JOBID=<jobid>
+HEAD_NODE=<head-node>
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large PYTHON_BIN=python benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
+```
 
 If startup is slow, increase benchmark readiness wait:
 ```bash
@@ -140,22 +154,26 @@ Runtime logs:
 /scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log
 
 # Multi-node
-demo-mn-<jobid>.out
-demo-mn-<jobid>.err
+/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log
 ```
 
 ## 6) LUMI Tuning Knobs
 Most runs should use the launcher defaults. Override only when needed:
 ```bash
 MODEL=/path/to/model
+TP_SIZE=<gpus-per-node>
+PP_SIZE=<nodes>
+ENABLE_EXPERT_PARALLEL=0
+ALL2ALL_BACKEND=<backend>
 EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilization 0.9"
 ```
 
 Notes:
 - Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
-- Multi-node follows the LUMI reference launcher: tensor parallelism uses all GPUs on each node and pipeline parallelism uses all nodes.
-- Multi-node defaults to expert parallel with `--all2all-backend deepep_low_latency`.
+- Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
+- Multi-node defaults to expert parallel with `ALL2ALL_BACKEND=deepep_low_latency`.
 - Use `EXTRA_VLLM_ARGS` for optional vLLM flags such as `--load-format runai_streamer`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
+- For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis
 The following results use `max_tokens=128` and had `0` failed requests in all shown runs.
