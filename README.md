@@ -5,7 +5,7 @@ Minimal runbook to launch vLLM on LUMI (single-node or multi-node), query it, an
 ## 1) Prerequisites
 - LUMI GPU project/account access
 - Working container path in launcher scripts
-- Model path available on compute nodes
+- Hugging Face access for models that are not already cached
 
 Recommended once per shell:
 ```bash
@@ -18,6 +18,7 @@ Notes:
 - Run commands from repo root: `/scratch/project_462000131/<user>/lumi-ai-assistant-demo`.
 - Benchmark outputs under `benchmarks/results/<bench_profile>/job_<jobid>/` are generated artifacts (ignored by git).
 - Launch scripts default to `#SBATCH --partition=dev-g`.
+- Models are cached under `/scratch/$SLURM_JOB_ACCOUNT/hf-cache`; first use may download the model, later runs reuse the cache.
 
 ## 2) Single-Node vLLM
 1. Edit `run_vllm_demo.sh`:
@@ -58,7 +59,7 @@ sbatch --nodes=1 --gpus-per-node=4 run_vllm_demo.sh
 ## 3) Multi-Node vLLM
 1. Edit `run_vllm_demo_multinode.sh`:
 - `CONTAINER`
-- `MISTRAL_MODEL_DEFAULT` / `QWEN_MODEL_DEFAULT` (or pass `MODEL=...`)
+- `MODEL` if you want a different Hugging Face model ID or local model path
 - `#SBATCH --account`
 
 2. Submit (example: 2 full GPU nodes):
@@ -68,7 +69,7 @@ sbatch run_vllm_demo_multinode.sh
 
 Defaults used by the multi-node launcher:
 ```bash
-MODEL=$QWEN_MODEL_DEFAULT   # Qwen default for multi-node
+MODEL=Qwen/Qwen3.6-35B-A3B
 TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
 ENABLE_EXPERT_PARALLEL=1

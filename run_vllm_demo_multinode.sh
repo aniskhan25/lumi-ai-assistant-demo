@@ -14,8 +14,7 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
-QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
-MODEL="${MODEL:-${QWEN_MODEL_DEFAULT}}"
+MODEL="${MODEL:-Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-5400}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
