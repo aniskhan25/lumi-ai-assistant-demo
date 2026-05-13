@@ -61,9 +61,9 @@ sbatch --nodes=1 --gpus-per-node=4 run_vllm_demo.sh
 - `MISTRAL_MODEL_DEFAULT` / `QWEN_MODEL_DEFAULT` (or pass `MODEL=...`)
 - `#SBATCH --account`
 
-2. Submit (example: 2 nodes x 4 GPUs):
+2. Submit (example: 2 full GPU nodes):
 ```bash
-sbatch --nodes=2 --gpus-per-node=4 run_vllm_demo_multinode.sh
+sbatch run_vllm_demo_multinode.sh
 ```
 
 Defaults used by the multi-node launcher:
@@ -71,6 +71,10 @@ Defaults used by the multi-node launcher:
 MODEL=$QWEN_MODEL_DEFAULT   # Qwen default for multi-node
 TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
+SBATCH --nodes=2
+SBATCH --gpus-per-node=8
+SBATCH --cpus-per-task=56
+SBATCH --mem=460G
 STARTUP_TIMEOUT_S=5400
 ```
 

@@ -4,7 +4,9 @@
 #SBATCH --partition=dev-g
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=56
+#SBATCH --gpus-per-node=8
+#SBATCH --mem=460G
 #SBATCH --time=02:00:00
 #SBATCH --output=demo-mn-%j.out
 #SBATCH --error=demo-mn-%j.err
