@@ -22,6 +22,8 @@ export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 
 VLLM_CMD=(
   vllm serve "${MODEL}"
+  --host 127.0.0.1
+  --port "${PORT}"
   --tensor-parallel-size "${TP_SIZE}"
   --pipeline-parallel-size "${PP_SIZE}"
   --distributed-executor-backend "${DISTRIBUTED_EXECUTOR_BACKEND}"
@@ -30,11 +32,6 @@ VLLM_CMD=(
   --master-addr "${MASTER_ADDR}"
   --master-port "${MASTER_PORT}"
 )
-if [ -n "${SOCKET_FILE}" ]; then
-  VLLM_CMD+=(--uds "${SOCKET_FILE}")
-else
-  VLLM_CMD+=(--host 127.0.0.1 --port "${PORT}")
-fi
 if [ "${ENABLE_EXPERT_PARALLEL}" = "1" ]; then
   VLLM_CMD+=(--enable-expert-parallel --all2all-backend "${ALL2ALL_BACKEND}")
 fi

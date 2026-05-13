@@ -67,18 +67,11 @@ sbatch --nodes=1 --gpus-per-node=4 run_vllm_demo.sh
 sbatch run_vllm_demo_multinode.sh
 ```
 
-The default multi-node launch uses a Unix socket to match the LUMI reference. If you want to query with `demo_agent.py` or run the benchmark scripts over HTTP, submit with:
-```bash
-sbatch --export=ALL,SOCKET_FILE= run_vllm_demo_multinode.sh
-```
-
 Defaults used by the multi-node launcher:
 ```bash
 MODEL=deepseek-ai/DeepSeek-R1-0528
 TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
-SOCKET_FILE=/tmp/vllm-$SLURM_JOB_ACCOUNT.sock
-MASTER_PORT=9999
 ENABLE_EXPERT_PARALLEL=1
 ALL2ALL_BACKEND=deepep_low_latency
 SBATCH --nodes=2
