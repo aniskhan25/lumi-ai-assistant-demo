@@ -7,14 +7,14 @@ Minimal runbook to launch vLLM on LUMI (single-node or multi-node), query it, an
 - Working container path in launcher scripts
 - Hugging Face access for models that are not already cached
 
-Recommended once per shell:
+Recommended once per shell before running query or benchmark commands:
 ```bash
 module use /appl/local/csc/modulefiles/
 module load pytorch
 ```
 
 Notes:
-- The multi-node launcher loads both `pytorch` and `lumi-aif-singularity-bindings`.
+- The multi-node launcher loads `lumi-aif-singularity-bindings` and intentionally does not load `pytorch`; loading `pytorch` inside the launcher can override the container bindings.
 - Run commands from repo root: `/scratch/project_462000131/<user>/lumi-ai-assistant-demo`.
 - Benchmark outputs under `benchmarks/results/<bench_profile>/job_<jobid>/` are generated artifacts (ignored by git).
 - Launch scripts default to `#SBATCH --partition=dev-g`.
@@ -72,8 +72,7 @@ Defaults used by the multi-node launcher:
 MODEL=deepseek-ai/DeepSeek-R1-0528
 TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
-ENABLE_EXPERT_PARALLEL=1
-ALL2ALL_BACKEND=deepep_low_latency
+EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_low_latency"
 SBATCH --nodes=2
 SBATCH --gpus-per-node=8
 SBATCH --cpus-per-task=56
@@ -156,16 +155,13 @@ Most runs should use the launcher defaults. Override only when needed:
 MODEL=/path/to/model
 TP_SIZE=<gpus-per-node>
 PP_SIZE=<nodes>
-ENABLE_EXPERT_PARALLEL=0
-ALL2ALL_BACKEND=<backend>
 EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilization 0.9"
 ```
 
 Notes:
 - Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
 - Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
-- Multi-node defaults to expert parallel with `ALL2ALL_BACKEND=deepep_low_latency`.
-- Use `EXTRA_VLLM_ARGS` for optional vLLM flags such as `--load-format runai_streamer`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
+- Multi-node uses `EXTRA_VLLM_ARGS` for optional vLLM flags such as `--enable-expert-parallel`, `--all2all-backend`, `--load-format`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
 - For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis

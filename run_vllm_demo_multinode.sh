@@ -20,16 +20,10 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-5400}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 MASTER_PORT="${MASTER_PORT:-$((20000 + (SLURM_JOB_ID % 10000)))}"
 DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
-ALL2ALL_BACKEND="${ALL2ALL_BACKEND:-deepep_low_latency}"
-ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-1}"
-EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
+EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---enable-expert-parallel --all2all-backend deepep_low_latency}"
 
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
-
-module use /appl/local/csc/modulefiles/
-module load pytorch
-HOST_PYTHON=python
 
 NNODES="${SLURM_NNODES}"
 TP_SIZE="${TP_SIZE:-${SLURM_GPUS_ON_NODE}}"
@@ -46,7 +40,7 @@ if [ -z "${HEAD_NODE}" ]; then
 fi
 MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
 
-export MODEL PORT TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND ALL2ALL_BACKEND ENABLE_EXPERT_PARALLEL EXTRA_VLLM_ARGS
+export MODEL PORT TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND EXTRA_VLLM_ARGS
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE
 
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
@@ -59,7 +53,7 @@ echo "  model=${MODEL}"
 echo "  nodes=${NNODES}, gpus_per_node=${SLURM_GPUS_ON_NODE}, TP_SIZE=${TP_SIZE}, PP_SIZE=${PP_SIZE}"
 echo "  head node=${HEAD_NODE}, master addr=${MASTER_ADDR}, master port=${MASTER_PORT}"
 echo "  distributed executor backend=${DISTRIBUTED_EXECUTOR_BACKEND}"
-echo "  expert parallel=${ENABLE_EXPERT_PARALLEL}, all2all backend=${ALL2ALL_BACKEND}"
+echo "  extra vLLM args=${EXTRA_VLLM_ARGS}"
 
 srun --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 --kill-on-bad-exit=1 --export=ALL \
   singularity run "${BIND_ARGS[@]}" "${CONTAINER}" bash /work/launch_vllm_rank.sh &
@@ -80,7 +74,7 @@ while [ "${SECONDS}" -lt "${STARTUP_TIMEOUT_S}" ]; do
     echo "vLLM launcher step exited before readiness check passed." >&2
     break
   fi
-  if "${HOST_PYTHON}" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5).close()' "${READY_URL}" >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 "${READY_URL}" >/dev/null 2>&1; then
     echo "vLLM ready."
     READY=1
     break

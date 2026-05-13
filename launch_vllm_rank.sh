@@ -32,9 +32,6 @@ VLLM_CMD=(
   --master-addr "${MASTER_ADDR}"
   --master-port "${MASTER_PORT}"
 )
-if [ "${ENABLE_EXPERT_PARALLEL}" = "1" ]; then
-  VLLM_CMD+=(--enable-expert-parallel --all2all-backend "${ALL2ALL_BACKEND}")
-fi
 if [ "${NODE_RANK}" != "0" ]; then
   VLLM_CMD+=(--headless)
 fi
