@@ -155,7 +155,7 @@ VLLM_EXTRA_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilizati
 Notes:
 - Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
 - Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
-- Use `VLLM_EXTRA_ARGS` for optional vLLM flags such as `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
+- Use `VLLM_EXTRA_ARGS` for optional vLLM flags such as `--load-format runai_streamer`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
 - For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis

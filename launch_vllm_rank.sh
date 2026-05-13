@@ -24,7 +24,6 @@ VLLM_CMD=(
   vllm serve "${MODEL}"
   --host 127.0.0.1
   --port "${PORT}"
-  --load-format runai_streamer
   --tensor-parallel-size "${TP_SIZE}"
   --pipeline-parallel-size "${PP_SIZE}"
   --distributed-executor-backend "${DISTRIBUTED_EXECUTOR_BACKEND}"
