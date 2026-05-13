@@ -138,10 +138,6 @@ Runtime logs:
 ```bash
 # Single-node
 /scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log
-
-# Multi-node
-demo-mn-<jobid>.out
-demo-mn-<jobid>.err
 ```
 
 ## 6) LUMI Tuning Knobs
