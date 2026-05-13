@@ -1,11 +1,11 @@
-# LUMI vLLM Demo
+# Serving LLMs on LUMI with vLLM
 
 Minimal runbook to launch vLLM on LUMI, query it with `demo_agent.py`, and run simple benchmarks.
 
 Run commands from the repository root on LUMI:
 
 ```bash
-cd /scratch/project_462000131/<user>/lumi-ai-assistant-demo
+cd /scratch/project_462000131/$USER/lumi-ai-assistant-demo
 ```
 
 ## Prerequisites
@@ -133,6 +133,6 @@ demo-mn-<jobid>.err
 vLLM logs:
 
 ```bash
-/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server.log
-/scratch/project_462000131/<user>/vllm_runtime/<jobid>/vllm_server_rank*.log
+/scratch/project_462000131/$USER/vllm_runtime/<jobid>/vllm_server.log
+/scratch/project_462000131/$USER/vllm_runtime/<jobid>/vllm_server_rank*.log
 ```
