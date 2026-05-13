@@ -94,7 +94,7 @@ fi
 echo "vLLM multi-node server is ready at http://127.0.0.1:${PORT}/v1 (job ${SLURM_JOB_ID})."
 echo "Head node: ${HEAD_NODE}"
 echo "Run queries from another shell pinned to head node:"
-echo "  srun --jobid ${SLURM_JOB_ID} --overlap --exact -N1 -n1 -w ${HEAD_NODE} --export=ALL python /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:${PORT}/v1 --question \"test\""
+echo "  srun --jobid ${SLURM_JOB_ID} --overlap --exact -N1 -n1 -w ${HEAD_NODE} --export=ALL python3 /scratch/project_462000131/<user>/lumi-ai-assistant-demo/demo_agent.py --base-url http://127.0.0.1:${PORT}/v1 --question \"test\""
 echo "Logs:"
 echo "  ${RUNTIME_DIR}/vllm_server_rank*.log"
 

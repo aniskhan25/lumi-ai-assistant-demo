@@ -148,7 +148,7 @@ def slurm_template(account: str, partition: str, gpus: int, hours: int) -> str:
 # Load modules / set env as needed
 # module load ...
 
-srun python demo_agent.py
+srun python3 demo_agent.py
 """.strip()
 
 

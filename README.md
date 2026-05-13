@@ -40,11 +40,8 @@ JOBID=<jobid>
 Query the server:
 
 ```bash
-module use /appl/local/csc/modulefiles/
-module load pytorch
-
 srun --jobid "$JOBID" --overlap --export=ALL \
-  python demo_agent.py \
+  python3 demo_agent.py \
   --base-url http://127.0.0.1:8000/v1 \
   --question "How do I request 1 GPU on LUMI?" \
   --max-tokens 512 \
@@ -71,11 +68,8 @@ echo "$HEAD_NODE"
 Query the server from the head node:
 
 ```bash
-module use /appl/local/csc/modulefiles/
-module load pytorch
-
 srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
-  python demo_agent.py \
+  python3 demo_agent.py \
   --base-url http://127.0.0.1:8000/v1 \
   --question "How do I request 1 GPU on LUMI?" \
   --max-tokens 512 \
@@ -87,27 +81,21 @@ srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
 Single-node benchmark:
 
 ```bash
-module use /appl/local/csc/modulefiles/
-module load pytorch
-
-BENCH_PROFILE=small PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
+BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 40 4 128
 for c in 1 2 4 8 16 32; do
-  BENCH_PROFILE=small PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128
+  BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128
 done
 
-python benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile small
+python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile small
 ```
 
 Multi-node benchmark:
 
 ```bash
-module use /appl/local/csc/modulefiles/
-module load pytorch
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_benchmark.sh "$JOBID" 40 4 128
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
 
-SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large PYTHON_BIN=python benchmarks/run_benchmark.sh "$JOBID" 40 4 128
-SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large PYTHON_BIN=python benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
-
-python benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile large
+python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile large
 ```
 
 ## Common Overrides
