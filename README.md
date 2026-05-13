@@ -69,7 +69,7 @@ sbatch run_vllm_demo_multinode.sh
 
 Defaults used by the multi-node launcher:
 ```bash
-MODEL=Qwen/Qwen3.6-35B-A3B
+MODEL=deepseek-ai/DeepSeek-R1-0528
 TP_SIZE=$SLURM_GPUS_ON_NODE # tensor parallelism within each node
 PP_SIZE=$SLURM_NNODES       # pipeline parallelism across nodes
 ENABLE_EXPERT_PARALLEL=1
@@ -158,14 +158,14 @@ TP_SIZE=<gpus-per-node>
 PP_SIZE=<nodes>
 ENABLE_EXPERT_PARALLEL=0
 ALL2ALL_BACKEND=<backend>
-VLLM_EXTRA_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilization 0.9"
+EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --gpu-memory-utilization 0.9"
 ```
 
 Notes:
 - Single-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE`.
 - Multi-node defaults to `TP_SIZE=$SLURM_GPUS_ON_NODE` and `PP_SIZE=$SLURM_NNODES`.
 - Multi-node defaults to expert parallel with `ALL2ALL_BACKEND=deepep_low_latency`.
-- Use `VLLM_EXTRA_ARGS` for optional vLLM flags such as `--load-format runai_streamer`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
+- Use `EXTRA_VLLM_ARGS` for optional vLLM flags such as `--load-format runai_streamer`, `--max-model-len`, `--language-model-only`, or `--trust-remote-code`.
 - For multi-node client steps, always use `--exact -N1 -n1 -w <head-node>`.
 
 ## 7) Benchmark Results and Analysis

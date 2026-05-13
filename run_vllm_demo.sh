@@ -18,7 +18,7 @@ MODEL="${MODEL:-}"
 PORT="${PORT:-8000}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
-VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
+EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_DIR="/scratch/project_462000131/${USER}/vllm_runtime/${SLURM_JOB_ID}"
@@ -54,7 +54,7 @@ if [ -d "${MODEL}" ]; then
 fi
 MIOPEN_DIR="$(mktemp -d)"
 
-export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S VLLM_EXTRA_ARGS MIOPEN_DIR
+export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S EXTRA_VLLM_ARGS MIOPEN_DIR
 
 singularity run "${BIND_ARGS[@]}" "${CONTAINER}" bash -s <<'EOS'
 set -euo pipefail
@@ -78,8 +78,8 @@ VLLM_CMD=(
   --tensor-parallel-size "${TP_SIZE}"
   --load-format runai_streamer
 )
-if [ -n "${VLLM_EXTRA_ARGS}" ]; then
-  read -r -a EXTRA_ARGS <<< "${VLLM_EXTRA_ARGS}"
+if [ -n "${EXTRA_VLLM_ARGS}" ]; then
+  read -r -a EXTRA_ARGS <<< "${EXTRA_VLLM_ARGS}"
   VLLM_CMD+=("${EXTRA_ARGS[@]}")
 fi
 

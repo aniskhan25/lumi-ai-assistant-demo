@@ -38,8 +38,8 @@ fi
 if [ "${NODE_RANK}" != "0" ]; then
   VLLM_CMD+=(--headless)
 fi
-if [ -n "${VLLM_EXTRA_ARGS}" ]; then
-  read -r -a EXTRA_ARGS <<< "${VLLM_EXTRA_ARGS}"
+if [ -n "${EXTRA_VLLM_ARGS}" ]; then
+  read -r -a EXTRA_ARGS <<< "${EXTRA_VLLM_ARGS}"
   VLLM_CMD+=("${EXTRA_ARGS[@]}")
 fi
 
