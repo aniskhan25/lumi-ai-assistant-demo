@@ -26,8 +26,11 @@ module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
 
 NNODES="${SLURM_NNODES}"
-TP_SIZE="${TP_SIZE:-${SLURM_GPUS_ON_NODE}}"
-PP_SIZE="${PP_SIZE:-${SLURM_NNODES}}"
+GPUS_PER_NODE="${SLURM_GPUS_ON_NODE}"
+TP_SIZE="${TP_SIZE:-2}"
+PP_SIZE="${PP_SIZE:-1}"
+DP_LOCAL_SIZE="${DP_LOCAL_SIZE:-$((GPUS_PER_NODE / TP_SIZE / PP_SIZE))}"
+DP_SIZE="${DP_SIZE:-$((DP_LOCAL_SIZE * NNODES))}"
 
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_DIR="/scratch/project_462000131/${USER}/vllm_runtime/${SLURM_JOB_ID}"
@@ -40,7 +43,7 @@ if [ -z "${HEAD_NODE}" ]; then
 fi
 MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
 
-export MODEL PORT TP_SIZE PP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND EXTRA_VLLM_ARGS
+export MODEL PORT TP_SIZE PP_SIZE DP_SIZE DP_LOCAL_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S DISTRIBUTED_EXECUTOR_BACKEND EXTRA_VLLM_ARGS
 export NNODES MASTER_ADDR MASTER_PORT WORKDIR RUNTIME_DIR HEAD_NODE
 
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
@@ -50,7 +53,7 @@ fi
 
 echo "Launching multi-node vLLM:"
 echo "  model=${MODEL}"
-echo "  nodes=${NNODES}, gpus_per_node=${SLURM_GPUS_ON_NODE}, TP_SIZE=${TP_SIZE}, PP_SIZE=${PP_SIZE}"
+echo "  nodes=${NNODES}, gpus_per_node=${GPUS_PER_NODE}, TP_SIZE=${TP_SIZE}, PP_SIZE=${PP_SIZE}, DP_SIZE=${DP_SIZE}, DP_LOCAL_SIZE=${DP_LOCAL_SIZE}"
 echo "  head node=${HEAD_NODE}, master addr=${MASTER_ADDR}, master port=${MASTER_PORT}"
 echo "  distributed executor backend=${DISTRIBUTED_EXECUTOR_BACKEND}"
 echo "  extra vLLM args=${EXTRA_VLLM_ARGS}"

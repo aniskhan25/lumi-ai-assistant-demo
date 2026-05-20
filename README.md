@@ -110,8 +110,9 @@ Set these at submit time when needed:
 
 ```bash
 MODEL=<model-id-or-local-path> \
-TP_SIZE=<gpus-per-node> \
-PP_SIZE=<nodes> \
+TP_SIZE=<tensor-parallel-size> \
+PP_SIZE=<pipeline-parallel-size> \
+DP_LOCAL_SIZE=<data-parallel-ranks-per-node> \
 EXTRA_VLLM_ARGS="--max-model-len 32768" \
 sbatch run_vllm_demo_multinode.sh
 ```
@@ -120,8 +121,10 @@ The multi-node default uses:
 
 ```bash
 MODEL=deepseek-ai/DeepSeek-R1-0528
-TP_SIZE=$SLURM_GPUS_ON_NODE
-PP_SIZE=$SLURM_NNODES
+TP_SIZE=2
+PP_SIZE=1
+DP_LOCAL_SIZE=$((SLURM_GPUS_ON_NODE / TP_SIZE / PP_SIZE))
+DP_SIZE=$((DP_LOCAL_SIZE * SLURM_NNODES))
 EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_low_latency"
 ```
 

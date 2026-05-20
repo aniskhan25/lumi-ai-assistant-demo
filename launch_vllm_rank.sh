@@ -27,13 +27,13 @@ VLLM_CMD=(
   --tensor-parallel-size "${TP_SIZE}"
   --pipeline-parallel-size "${PP_SIZE}"
   --distributed-executor-backend "${DISTRIBUTED_EXECUTOR_BACKEND}"
-  --nnodes "${NNODES}"
-  --node-rank "${NODE_RANK}"
-  --master-addr "${MASTER_ADDR}"
-  --master-port "${MASTER_PORT}"
+  --data-parallel-size "${DP_SIZE}"
+  --data-parallel-size-local "${DP_LOCAL_SIZE}"
+  --data-parallel-address "${MASTER_ADDR}"
+  --data-parallel-rpc-port "${MASTER_PORT}"
 )
 if [ "${NODE_RANK}" != "0" ]; then
-  VLLM_CMD+=(--headless)
+  VLLM_CMD+=(--headless --data-parallel-start-rank "$((NODE_RANK * DP_LOCAL_SIZE))")
 fi
 if [ -n "${EXTRA_VLLM_ARGS}" ]; then
   read -r -a EXTRA_ARGS <<< "${EXTRA_VLLM_ARGS}"
