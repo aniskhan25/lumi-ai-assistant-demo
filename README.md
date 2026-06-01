@@ -104,6 +104,12 @@ SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JO
 python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile large
 ```
 
+For slow models, increase the per-request timeout:
+
+```bash
+REQUEST_TIMEOUT_S=600 SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "1 2 4 8 16"
+```
+
 ## Common Overrides
 
 Set these at submit time when needed:
