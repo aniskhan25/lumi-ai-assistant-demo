@@ -20,6 +20,9 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 
+module use /appl/local/laifs/modules
+module load lumi-aif-singularity-bindings
+
 WORKDIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 RUNTIME_DIR="/scratch/project_462000131/${USER}/vllm_runtime/${SLURM_JOB_ID}"
 mkdir -p "${RUNTIME_DIR}"
