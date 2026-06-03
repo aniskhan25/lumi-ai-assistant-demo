@@ -61,9 +61,9 @@ set -euo pipefail
 
 cd /work
 export HOME="/runtime"
-export XDG_CACHE_HOME="/scratch/${SLURM_JOB_ACCOUNT}/vllm-cache"
-export HF_HOME="/scratch/${SLURM_JOB_ACCOUNT}/hf-cache"
-export VLLM_CACHE_ROOT="/scratch/${SLURM_JOB_ACCOUNT}/vllm-cache"
+export XDG_CACHE_HOME="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/vllm-cache"
+export HF_HOME="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache"
+export VLLM_CACHE_ROOT="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/vllm-cache"
 export MIOPEN_CUSTOM_CACHE_DIR="${MIOPEN_DIR}/cache"
 export MIOPEN_USER_DB="${MIOPEN_DIR}/config"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_CACHE_DIR}" "${MIOPEN_USER_DB}"
