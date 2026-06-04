@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m50t210-20260415_130625/lumi-multitorch-full-u24r70f21m50t210-20260415_130625.sif}"
+CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-latest.sif}"
 MISTRAL_MODEL_DEFAULT="${MISTRAL_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Mistral-7B-Instruct-v0.2}"
 QWEN_MODEL_DEFAULT="${QWEN_MODEL_DEFAULT:-/scratch/project_462000131/anisrahm/models/Qwen/Qwen3.6-35B-A3B}"
 MODEL="${MODEL:-}"
