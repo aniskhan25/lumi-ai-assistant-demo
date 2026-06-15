@@ -1,5 +1,5 @@
 # Short operational questions
-How do I request 1 GPU on Puhti?
+How do I request 1 GPU on LUMI?
 What is the difference between --ntasks and --cpus-per-task in Slurm?
 How can I see why my Slurm job is pending?
 Give me a minimal sbatch script for one GPU job.

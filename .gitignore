@@ -2,5 +2,3 @@
 benchmarks/.DS_Store
 benchmarks/results/
 vllm_runtime/
-sglang_runtime/
-
