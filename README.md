@@ -131,6 +131,40 @@ PP_SIZE=$SLURM_NNODES
 EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_low_latency"
 ```
 
+## Known Working Multi-Node Launches
+
+DeepSeek-R1:
+
+```bash
+MODEL=deepseek-ai/DeepSeek-R1-0528 \
+TP_SIZE=8 \
+PP_SIZE=2 \
+EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_low_latency" \
+sbatch run_vllm_demo_multinode.sh
+```
+
+GPT-OSS 120B:
+
+```bash
+MODEL=openai/gpt-oss-120b \
+TP_SIZE=8 \
+PP_SIZE=2 \
+EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching" \
+sbatch run_vllm_demo_multinode.sh
+```
+
+Kimi-K2:
+
+```bash
+MODEL=moonshotai/Kimi-K2-Instruct-0905 \
+TP_SIZE=8 \
+PP_SIZE=2 \
+EXTRA_VLLM_ARGS="--trust-remote-code --load-format runai_streamer --quantization fp8 --kv-cache-dtype fp8 --max-model-len 1024 --max-num-seqs 1 --max-num-batched-tokens 512 --gpu-memory-utilization 0.98" \
+sbatch run_vllm_demo_multinode.sh
+```
+
+The Kimi-K2 launch starts, but `--max-num-seqs 1` limits throughput.
+
 ## Logs
 
 Slurm logs:
