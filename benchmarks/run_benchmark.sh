@@ -22,11 +22,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUT_DIR="${REPO_ROOT}/benchmarks/results/${BENCH_PROFILE}/job_${JOBID}"
 
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  echo "Could not find ${PYTHON_BIN}. Set PYTHON_BIN if needed." >&2
-  exit 127
-fi
-
 mkdir -p "${OUT_DIR}"
 
 echo "Running benchmark on job ${JOBID}"
@@ -54,5 +49,4 @@ srun "${srun_args[@]}" \
   --timeout "${REQUEST_TIMEOUT_S}" \
   --startup-wait-s "${STARTUP_WAIT_S}" \
   --startup-poll-s "${STARTUP_POLL_S}" \
-  --output-json "${OUT_DIR}/summary_r${REQUESTS}_c${CONCURRENCY}_t${MAX_TOKENS}.json" \
-  --output-raw-json "${OUT_DIR}/raw_r${REQUESTS}_c${CONCURRENCY}_t${MAX_TOKENS}.json"
+  --output-json "${OUT_DIR}/summary_r${REQUESTS}_c${CONCURRENCY}_t${MAX_TOKENS}.json"

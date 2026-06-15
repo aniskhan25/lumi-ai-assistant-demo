@@ -4,13 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
-import statistics
 import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
 
 
 def load_prompts(path: str) -> list[str]:
@@ -26,7 +23,7 @@ def load_prompts(path: str) -> list[str]:
     return prompts
 
 
-def request_json(method: str, url: str, payload: Optional[dict], timeout: float) -> dict:
+def request_json(method: str, url: str, payload: dict | None, timeout: float) -> dict:
     data = None
     headers = {"Content-Type": "application/json"}
     if payload is not None:
@@ -77,8 +74,6 @@ def model_id_from_models_response(models_body: dict, base_url: str) -> str:
 def percentile(values: list[float], p: float) -> float:
     if not values:
         return 0.0
-    if len(values) == 1:
-        return values[0]
     idx = round((p / 100.0) * (len(values) - 1))
     return sorted(values)[idx]
 
@@ -103,7 +98,7 @@ def run_one(
     try:
         body = request_json("POST", url, payload, timeout)
         elapsed = time.perf_counter() - start
-        usage = body.get("usage", {}) if isinstance(body, dict) else {}
+        usage = body.get("usage", {})
         return {
             "request_id": request_id,
             "ok": True,
@@ -146,8 +141,6 @@ def summarize(results: list[dict], total_elapsed_s: float, concurrency: int) -> 
         "throughput_req_s": (success_count / total_elapsed_s) if total_elapsed_s > 0 else 0.0,
         "latency_p50_s": percentile(latencies, 50.0),
         "latency_p95_s": percentile(latencies, 95.0),
-        "latency_p99_s": percentile(latencies, 99.0),
-        "latency_mean_s": statistics.mean(latencies) if latencies else 0.0,
         "tokens_prompt_total": prompt_tokens,
         "tokens_completion_total": completion_tokens,
         "tokens_total": total_tokens,
@@ -172,7 +165,6 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--startup-wait-s",
         type=float,
@@ -190,42 +182,17 @@ def main() -> int:
         default="benchmarks/results/latest_summary.json",
         help="Summary output path on local filesystem",
     )
-    parser.add_argument(
-        "--output-raw-json",
-        default="benchmarks/results/latest_raw.json",
-        help="Per-request output path on local filesystem",
-    )
     args = parser.parse_args()
 
-    if args.requests <= 0:
-        raise ValueError("--requests must be > 0")
-    if args.concurrency <= 0:
-        raise ValueError("--concurrency must be > 0")
-
-    random.seed(args.seed)
     prompts = load_prompts(args.prompts_file)
 
-    if args.startup_wait_s < 0:
-        raise ValueError("--startup-wait-s must be >= 0")
-    if args.startup_poll_s <= 0:
-        raise ValueError("--startup-poll-s must be > 0")
-
-    # Graceful startup handling: wait for vLLM readiness instead of failing fast
-    # with connection-refused when the server is still loading weights.
     try:
-        if args.startup_wait_s > 0:
-            print(
-                f"Checking vLLM readiness at {args.base_url}/models "
-                f"(up to {args.startup_wait_s:.0f}s)..."
-            )
-            models_body = wait_for_models_endpoint(
-                args.base_url,
-                startup_wait_s=args.startup_wait_s,
-                poll_interval_s=args.startup_poll_s,
-                request_timeout_s=min(args.timeout, 10.0),
-            )
-        else:
-            models_body = request_json("GET", f"{args.base_url}/models", None, args.timeout)
+        models_body = wait_for_models_endpoint(
+            args.base_url,
+            startup_wait_s=args.startup_wait_s,
+            poll_interval_s=args.startup_poll_s,
+            request_timeout_s=min(args.timeout, 10.0),
+        )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -239,25 +206,21 @@ def main() -> int:
     )
 
     start_all = time.perf_counter()
-    results = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        futures = []
-        for i in range(args.requests):
-            prompt = random.choice(prompts)
-            futures.append(
-                pool.submit(
-                    run_one,
-                    i,
-                    args.base_url,
-                    model,
-                    prompt,
-                    args.max_tokens,
-                    args.temperature,
-                    args.timeout,
-                )
+        futures = [
+            pool.submit(
+                run_one,
+                i,
+                args.base_url,
+                model,
+                prompts[i % len(prompts)],
+                args.max_tokens,
+                args.temperature,
+                args.timeout,
             )
-        for future in as_completed(futures):
-            results.append(future.result())
+            for i in range(args.requests)
+        ]
+        results = [future.result() for future in as_completed(futures)]
     elapsed = time.perf_counter() - start_all
 
     summary = summarize(results, elapsed, args.concurrency)
@@ -267,20 +230,14 @@ def main() -> int:
     summary["temperature"] = args.temperature
 
     out_json_dir = os.path.dirname(args.output_json)
-    out_raw_dir = os.path.dirname(args.output_raw_json)
     if out_json_dir:
         os.makedirs(out_json_dir, exist_ok=True)
-    if out_raw_dir:
-        os.makedirs(out_raw_dir, exist_ok=True)
     with open(args.output_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    with open(args.output_raw_json, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
 
     print("\n=== Summary ===")
     print(json.dumps(summary, indent=2))
     print(f"\nWrote summary: {args.output_json}")
-    print(f"Wrote raw results: {args.output_raw_json}")
 
     return 0 if summary["requests_failed"] == 0 else 1
 

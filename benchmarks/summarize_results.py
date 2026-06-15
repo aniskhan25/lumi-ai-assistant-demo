@@ -5,13 +5,12 @@ import json
 import os
 import re
 import sys
-from typing import List, Dict
 
 
 NAME_RE = re.compile(r"summary_r(\d+)_c(\d+)_t(\d+)\.json$")
 
 
-def load_rows(job_dir: str) -> List[Dict]:
+def load_rows(job_dir: str) -> list[dict]:
     rows = []
     for path in sorted(glob.glob(os.path.join(job_dir, "summary_*.json"))):
         with open(path, "r", encoding="utf-8") as f:
@@ -33,7 +32,6 @@ def load_rows(job_dir: str) -> List[Dict]:
                 "requests_failed": int(data.get("requests_failed", 0)),
                 "p50": float(data.get("latency_p50_s", 0.0)),
                 "p95": float(data.get("latency_p95_s", 0.0)),
-                "p99": float(data.get("latency_p99_s", 0.0)),
                 "req_s": float(data.get("throughput_req_s", 0.0)),
                 "tok_s": float(data.get("throughput_tokens_s", 0.0)),
                 "ctok_s": float(data.get("throughput_completion_tokens_s", 0.0)),
@@ -42,7 +40,7 @@ def load_rows(job_dir: str) -> List[Dict]:
     return rows
 
 
-def print_table(rows: List[Dict]) -> None:
+def print_table(rows: list[dict]) -> None:
     header = (
         "file,requests,concurrency,max_tokens,ok,failed,"
         "p50_s,p95_s,throughput_req_s,throughput_tokens_s,throughput_completion_tokens_s"
@@ -58,31 +56,17 @@ def print_table(rows: List[Dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Summarize benchmark summary_*.json files")
-    parser.add_argument("--job-dir", help="Path to benchmark results directory containing summary_*.json")
-    parser.add_argument("--job-id", help="Slurm job id (used with --bench-profile to build default job-dir)")
+    parser.add_argument("--job-id", required=True, help="Slurm job id")
     parser.add_argument("--bench-profile", default="default", help="Benchmark profile folder name (default: default)")
-    parser.add_argument(
-        "--sort-by",
-        default="ctok_s",
-        choices=["ctok_s", "tok_s", "req_s", "p95"],
-        help="Metric to sort by",
-    )
     args = parser.parse_args()
 
-    if args.job_dir:
-        job_dir = args.job_dir
-    elif args.job_id:
-        job_dir = os.path.join("benchmarks", "results", args.bench_profile, f"job_{args.job_id}")
-    else:
-        parser.error("Provide either --job-dir or --job-id.")
-
+    job_dir = os.path.join("benchmarks", "results", args.bench_profile, f"job_{args.job_id}")
     rows = load_rows(job_dir)
     if not rows:
         print(f"No summary_*.json files found in {job_dir}", file=sys.stderr)
         return 2
 
-    reverse = args.sort_by != "p95"
-    rows = sorted(rows, key=lambda x: x[args.sort_by], reverse=reverse)
+    rows = sorted(rows, key=lambda x: x["ctok_s"], reverse=True)
     print_table(rows)
 
     no_fail = [r for r in rows if r["requests_failed"] == 0]
