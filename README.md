@@ -1,6 +1,6 @@
-# Serving LLMs on LUMI with vLLM
+# Benchmarking LLM Serving on LUMI with vLLM
 
-Minimal runbook to launch vLLM on LUMI, query it with `demo_agent.py`, and run simple benchmarks.
+Minimal runbook to launch vLLM on LUMI and run simple benchmarks.
 
 Run commands from the repository root on LUMI:
 
@@ -38,17 +38,6 @@ Set the job id once:
 JOBID=<jobid>
 ```
 
-Query the server:
-
-```bash
-srun --jobid "$JOBID" --overlap --export=ALL \
-  python3 demo_agent.py \
-  --base-url http://127.0.0.1:8000/v1 \
-  --question "How do I request 1 GPU on LUMI?" \
-  --max-tokens 512 \
-  --timeout 300
-```
-
 ## Multi Node
 
 Start vLLM:
@@ -69,17 +58,6 @@ Set the head node once:
 NODELIST=$(squeue -j "$JOBID" -h -o %N)
 HEAD_NODE=$(scontrol show hostnames "$NODELIST" | head -n1)
 echo "$HEAD_NODE"
-```
-
-Query the server from the head node:
-
-```bash
-srun --jobid "$JOBID" --overlap --exact -N1 -n1 -w "$HEAD_NODE" --export=ALL \
-  python3 demo_agent.py \
-  --base-url http://127.0.0.1:8000/v1 \
-  --question "How do I request 1 GPU on LUMI?" \
-  --max-tokens 512 \
-  --timeout 300
 ```
 
 ## Benchmarks
