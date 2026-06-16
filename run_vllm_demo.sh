@@ -5,6 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1
+#SBATCH --mem=460G
 #SBATCH --time=01:00:00
 #SBATCH --output=demo-%j.out
 #SBATCH --error=demo-%j.err
@@ -18,6 +19,7 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-900}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 TP_SIZE="${TP_SIZE:-1}"
+LOAD_FORMAT="${LOAD_FORMAT:-}"
 
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
@@ -32,7 +34,7 @@ echo "Port: ${PORT}  TP_SIZE: ${TP_SIZE}"
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
 MIOPEN_DIR="$(mktemp -d)"
 
-export MODEL PORT TP_SIZE STARTUP_TIMEOUT_S STARTUP_POLL_S EXTRA_VLLM_ARGS MIOPEN_DIR
+export MODEL PORT TP_SIZE LOAD_FORMAT STARTUP_TIMEOUT_S STARTUP_POLL_S EXTRA_VLLM_ARGS MIOPEN_DIR
 
 singularity run "${BIND_ARGS[@]}" "${CONTAINER}" bash /work/launch_vllm_single.sh &
 VLLM_PID=$!

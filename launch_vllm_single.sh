@@ -16,12 +16,18 @@ mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_
 
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 
+# Serialize RunAI streamer tensor loading to prevent concurrent buffer spikes
+# that exhaust memory when TP workers load in parallel (especially for large models).
+export RUNAI_STREAMER_CONCURRENCY="${RUNAI_STREAMER_CONCURRENCY:-1}"
+
+LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
+
 VLLM_CMD=(
   vllm serve "${MODEL}"
   --host 127.0.0.1
   --port "${PORT}"
   --tensor-parallel-size "${TP_SIZE}"
-  --load-format runai_streamer
+  --load-format "${LOAD_FORMAT}"
 )
 if [ -n "${EXTRA_VLLM_ARGS}" ]; then
   read -r -a EXTRA_ARGS <<< "${EXTRA_VLLM_ARGS}"
