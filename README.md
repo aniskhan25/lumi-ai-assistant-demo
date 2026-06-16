@@ -111,10 +111,10 @@ sbatch run_vllm_demo_multinode.sh
 The multi-node default uses:
 
 ```bash
-MODEL=deepseek-ai/DeepSeek-R1-0528
+MODEL=openai/gpt-oss-120b
 TP_SIZE=$SLURM_GPUS_ON_NODE
-PP_SIZE=$SLURM_NNODES
-EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_low_latency"
+PP_SIZE=$SLURM_JOB_NUM_NODES
+EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching"
 ```
 
 ## Known Working Multi-Node Launches

@@ -14,13 +14,13 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-latest.sif}"
-MODEL="${MODEL:-deepseek-ai/DeepSeek-R1-0528}"
+MODEL="${MODEL:-openai/gpt-oss-120b}"
 PORT="${PORT:-8000}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-5400}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 MASTER_PORT="${MASTER_PORT:-1${SLURM_JOB_ID: -4}}"
 DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
-EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---enable-expert-parallel --all2all-backend deepep_low_latency}"
+EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching}"
 
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
