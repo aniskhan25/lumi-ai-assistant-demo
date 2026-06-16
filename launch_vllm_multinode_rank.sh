@@ -20,6 +20,13 @@ mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_
 
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 
+# Cap RunAI streamer RAM buffer to prevent OOM on large checkpoints.
+# Without a limit the streamer accumulates all loaded tensors in RAM before
+# transferring to GPU; for checkpoints exceeding per-node RAM this fills
+# memory and triggers the OOM killer.
+export RUNAI_STREAMER_CONCURRENCY="${RUNAI_STREAMER_CONCURRENCY:-1}"
+export RUNAI_STREAMER_MEMORY_LIMIT="${RUNAI_STREAMER_MEMORY_LIMIT:-8}"
+
 VLLM_CMD=(
   vllm serve "${MODEL}"
   --host 127.0.0.1

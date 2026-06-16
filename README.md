@@ -182,11 +182,11 @@ vLLM logs:
 
 ## Benchmark Results
 
-| Scenario | Model | Resources | Best concurrency | p95 latency (s) | Completion throughput (tokens/s) |
-|---|---|---:|---:|---:|---:|
-| Single GCD default | `mistralai/Mistral-7B-Instruct-v0.2` | 1 GCD | 32 | 2.923 | 1340.821 |
-| Multi-node default | `openai/gpt-oss-120b` | 2 nodes, 16 GCDs | 128 | 10.395 | 1473.234 |
-| Single node, 2 GCDs | `Qwen/Qwen2.5-32B-Instruct` | 2 GCDs | 64 | 26.397 | 293.506 |
-| Single node, 4 GCDs | `Qwen/Qwen2.5-72B-Instruct` | 4 GCDs | 64 | 3.336 | 2319.813 |
-| Single node, 8 GCDs | `mistralai/Mixtral-8x22B-Instruct-v0.1` | 8 GCDs | 96 | 25.226 | 455.677 |
-| Two full nodes | `deepseek-ai/DeepSeek-R1-0528` | 2 nodes, 16 GCDs | 32 | 64.133 | 60.773 |
+| Scenario | Model | Resources | Best concurrency | p95 latency (s) | Completion throughput (tokens/s) | Completion throughput/GCD (tokens/s) |
+|---|---|---:|---:|---:|---:|---:|
+| Single GCD default | `mistralai/Mistral-7B-Instruct-v0.2` | 1 GCD | 32 | 2.923 | 1340.821 | 1340.821 |
+| Multi-node default | `openai/gpt-oss-120b` | 2 nodes, 16 GCDs | 128 | 10.395 | 1473.234 | 92.077 |
+| Single node, 2 GCDs | `Qwen/Qwen2.5-32B-Instruct` | 2 GCDs | 64 | 26.397 | 293.506 | 146.753 |
+| Single node, 4 GCDs | `Qwen/Qwen2.5-72B-Instruct` | 4 GCDs | 64 | 3.336 | 2319.813 | 579.953 |
+| Single node, 8 GCDs | `mistralai/Mixtral-8x22B-Instruct-v0.1` | 8 GCDs | 96 | 25.226 | 455.677 | 56.960 |
+| Two full nodes | `deepseek-ai/DeepSeek-R1-0528` | 2 nodes, 16 GCDs | 32 | 64.133 | 60.773 | 3.798 |

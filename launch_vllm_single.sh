@@ -19,6 +19,7 @@ export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 # Serialize RunAI streamer tensor loading to prevent concurrent buffer spikes
 # that exhaust memory when TP workers load in parallel (especially for large models).
 export RUNAI_STREAMER_CONCURRENCY="${RUNAI_STREAMER_CONCURRENCY:-1}"
+export RUNAI_STREAMER_MEMORY_LIMIT="${RUNAI_STREAMER_MEMORY_LIMIT:-8}"
 
 LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
 
