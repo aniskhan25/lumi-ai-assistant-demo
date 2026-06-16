@@ -69,7 +69,7 @@ BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 40 4 128
 ```
 
 ```bash
-BENCH_PROFILE=small benchmarks/run_saturation.sh "$JOBID" 120 128 "1 2 4 8 16 32"
+BENCH_PROFILE=small benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 96"
 ```
 
 ```bash
@@ -117,39 +117,50 @@ PP_SIZE=$SLURM_JOB_NUM_NODES
 EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching"
 ```
 
-## Known Working Multi-Node Launches
+## Successful Launch Commands
 
-DeepSeek-R1:
+Single node, 2 GCDs:
 
 ```bash
+MODEL=Qwen/Qwen2.5-32B-Instruct \
+TP_SIZE=2 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--dtype bfloat16 --max-model-len 16384 --max-num-seqs 16 --gpu-memory-utilization 0.90" \
+sbatch --gpus-per-node=2 run_vllm_demo.sh
+```
+
+Single node, 4 GCDs:
+
+```bash
+MODEL=Qwen/Qwen2.5-72B-Instruct \
+TP_SIZE=4 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--dtype bfloat16 --max-model-len 32768 --max-num-seqs 32 --gpu-memory-utilization 0.90" \
+sbatch --gpus-per-node=4 run_vllm_demo.sh
+```
+
+Single node, 8 GCDs:
+
+```bash
+STARTUP_TIMEOUT_S=1800 \
+MODEL=mistralai/Mixtral-8x22B-Instruct-v0.1 \
+TP_SIZE=8 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--dtype bfloat16 --max-model-len 32768 --max-num-seqs 32 --gpu-memory-utilization 0.90" \
+sbatch --gpus-per-node=8 run_vllm_demo.sh
+```
+
+Two full nodes:
+
+```bash
+STARTUP_TIMEOUT_S=2700 \
 MODEL=deepseek-ai/DeepSeek-R1-0528 \
 TP_SIZE=8 \
 PP_SIZE=2 \
-EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_low_latency" \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughput --max-model-len 32768 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
 sbatch run_vllm_demo_multinode.sh
 ```
-
-GPT-OSS 120B:
-
-```bash
-MODEL=openai/gpt-oss-120b \
-TP_SIZE=8 \
-PP_SIZE=2 \
-EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-Kimi-K2:
-
-```bash
-MODEL=moonshotai/Kimi-K2-Instruct-0905 \
-TP_SIZE=8 \
-PP_SIZE=2 \
-EXTRA_VLLM_ARGS="--trust-remote-code --load-format runai_streamer --quantization fp8 --kv-cache-dtype fp8 --max-model-len 1024 --max-num-seqs 1 --max-num-batched-tokens 512 --gpu-memory-utilization 0.98" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-The Kimi-K2 launch starts, but `--max-num-seqs 1` limits throughput.
 
 ## Logs
 
@@ -168,3 +179,14 @@ vLLM logs:
 /scratch/project_462000131/$USER/vllm_runtime/<jobid>/vllm_server.log
 /scratch/project_462000131/$USER/vllm_runtime/<jobid>/vllm_server_rank*.log
 ```
+
+## Benchmark Results
+
+| Scenario | Model | Resources | Best concurrency | p95 latency (s) | Completion throughput (tokens/s) |
+|---|---|---:|---:|---:|---:|
+| Single GCD default | `mistralai/Mistral-7B-Instruct-v0.2` | 1 GCD | 32 | 2.923 | 1340.821 |
+| Multi-node default | `openai/gpt-oss-120b` | 2 nodes, 16 GCDs | 128 | 10.395 | 1473.234 |
+| Single node, 2 GCDs | `Qwen/Qwen2.5-32B-Instruct` | 2 GCDs | 64 | 26.397 | 293.506 |
+| Single node, 4 GCDs | `Qwen/Qwen2.5-72B-Instruct` | 4 GCDs | 64 | 3.336 | 2319.813 |
+| Single node, 8 GCDs | `mistralai/Mixtral-8x22B-Instruct-v0.1` | 8 GCDs | 96 | 25.226 | 455.677 |
+| Two full nodes | `deepseek-ai/DeepSeek-R1-0528` | 2 nodes, 16 GCDs | 32 | 64.133 | 60.773 |
