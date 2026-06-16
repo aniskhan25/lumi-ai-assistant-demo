@@ -66,10 +66,13 @@ Single-node benchmark:
 
 ```bash
 BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 40 4 128
-for c in 1 2 4 8 16 32; do
-  BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 120 "$c" 128
-done
+```
 
+```bash
+BENCH_PROFILE=small benchmarks/run_saturation.sh "$JOBID" 120 128 "1 2 4 8 16 32"
+```
+
+```bash
 python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile small
 ```
 
@@ -77,8 +80,13 @@ Multi-node benchmark:
 
 ```bash
 SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_benchmark.sh "$JOBID" 40 4 128
-SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
+```
 
+```bash
+SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
+```
+
+```bash
 python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile large
 ```
 
