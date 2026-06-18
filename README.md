@@ -250,4 +250,5 @@ vLLM logs:
 |  | `deepseek-ai/DeepSeek-R1-0528` (avoid PP bubble) | 2 nodes, 16 GCDs | 64 | 103.529 | 74.789 | 4.674 |
 |  | `deepseek-ai/DeepSeek-R1-0528` (larger micro-batches) | 2 nodes, 16 GCDs | 64 | 70.551 | 110.600 | 6.912 |
 |  | `meta-llama/Llama-3.1-405B-Instruct` | 2 nodes, 16 GCDs | 32 | 34.373 | 113.057 | 7.066 |
+|  | `meta-llama/Llama-3.1-405B-Instruct` | 4 nodes, 32 GCDs | 160 | 66.241 | 227.973 | 7.124 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` | 4 nodes, 32 GCDs | 64 | 121.763 | 62.749 | 1.961 |
