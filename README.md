@@ -162,6 +162,54 @@ EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughp
 sbatch run_vllm_demo_multinode.sh
 ```
 
+Two full nodes (avoid PP bubble):
+
+```bash
+STARTUP_TIMEOUT_S=2700 \
+MODEL=deepseek-ai/DeepSeek-R1-0528 \
+TP_SIZE=16 \
+PP_SIZE=1 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughput --max-model-len 32768 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
+sbatch run_vllm_demo_multinode.sh
+```
+
+Two full nodes (larger micro-batches):
+
+```bash
+STARTUP_TIMEOUT_S=2700 \
+MODEL=deepseek-ai/DeepSeek-R1-0528 \
+TP_SIZE=8 \
+PP_SIZE=2 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughput --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 16384 --gpu-memory-utilization 0.95" \
+sbatch run_vllm_demo_multinode.sh
+```
+
+Two full nodes
+
+```bash
+STARTUP_TIMEOUT_S=3600 \
+MODEL=meta-llama/Llama-3.1-405B-Instruct \
+TP_SIZE=8 \
+PP_SIZE=2 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--max-model-len 16384 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching" \
+sbatch run_vllm_demo_multinode.sh
+```
+
+Four full nodes:
+
+```bash
+STARTUP_TIMEOUT_S=14400 \
+MODEL=moonshotai/Kimi-K2-Instruct-0905 \
+TP_SIZE=8 \
+PP_SIZE=4 \
+RUNAI_STREAMER_CONCURRENCY=4 \
+EXTRA_VLLM_ARGS="--trust-remote-code --quantization fp8 --kv-cache-dtype fp8 --max-model-len 16384 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
+sbatch --nodes=4 --time=02:00:00 run_vllm_demo_multinode.sh
+```
+
 ## Logs
 
 Slurm logs:
@@ -190,3 +238,7 @@ vLLM logs:
 | Single node, 4 GCDs | `Qwen/Qwen2.5-72B-Instruct` | 4 GCDs | 64 | 3.336 | 2319.813 | 579.953 |
 | Single node, 8 GCDs | `mistralai/Mixtral-8x22B-Instruct-v0.1` | 8 GCDs | 96 | 25.226 | 455.677 | 56.960 |
 | Two full nodes | `deepseek-ai/DeepSeek-R1-0528` | 2 nodes, 16 GCDs | 32 | 64.133 | 60.773 | 3.798 |
+| Two full nodes | `deepseek-ai/DeepSeek-R1-0528` (avoid PP bubble) | 2 nodes, 16 GCDs | 64 | 103.529 | 74.789 | 4.674 |
+| Two full nodes | `deepseek-ai/DeepSeek-R1-0528` (larger micro-batches) | 2 nodes, 16 GCDs | 64 | 70.551 | 110.600 | 6.912 |
+| Two full nodes | `meta-llama/Llama-3.1-405B-Instruct` | 2 nodes, 16 GCDs | 32 | 34.373 | 113.057 | 7.066 |
+| Four full nodes | `moonshotai/Kimi-K2-Instruct-0905` | 4 nodes, 32 GCDs | 64 | 121.763 | 62.749 | 1.961 |
