@@ -217,6 +217,47 @@ so the varied phases are the signature of leaked state, and the varied-phase sym
 exactly what contamination would counterfeit. The reporter's symptom remains
 **unreproduced** in a clean pure-RCCL run.
 
+## Q3 ANSWERED: capping channels at 8 costs ~20% of collective bandwidth; capping at 16 costs nothing (job 21791400)
+
+8 nodes, world size 64, median of 20 reps with 5 discarded, bus bandwidth on the
+nccl-tests convention. This is the reporter's own scale.
+
+**Training band (128 MiB - 1 GiB), bus bandwidth GB/s** — where gradient all-reduce
+buckets in bandwidth-bound training sit:
+
+| variant | all_gather | all_reduce | reduce_scatter | bandwidth lost |
+| --- | --- | --- | --- | --- |
+| `default_channels` | 82.3 | 87.6 | 82.3 | reference |
+| `NCCL_MAX_NCHANNELS=16` | 82.5 | 87.6 | 82.5 | **none measurable (-0%)** |
+| `NCCL_MAX_NCHANNELS=8` | 74.1 | 70.5 | 77.3 | **20%** |
+| `NCCL_MAX_NCHANNELS=4` | 41.9 | 38.7 | 41.3 | **56%** |
+
+**Small messages (<= 1 MiB), bus bandwidth GB/s** — no measurable effect from any cap:
+
+| variant | all_gather | all_reduce | reduce_scatter |
+| --- | --- | --- | --- |
+| `default_channels` | 0.22 | 0.69 | 0.23 |
+| `NCCL_MAX_NCHANNELS=16` | 0.21 | 0.69 | 0.22 |
+| `NCCL_MAX_NCHANNELS=8` | 0.22 | 0.70 | 0.22 |
+| `NCCL_MAX_NCHANNELS=4` | 0.28 | 0.56 | 0.28 |
+
+Three things follow, and the second is the useful one:
+
+1. **The cost is entirely at large messages.** Small-message latency is untouched by any
+   cap. So an inference server, whose collectives are small per decode step, would
+   barely notice `NCCL_MAX_NCHANNELS=8`; a training job doing multi-hundred-MB gradient
+   all-reduce pays the full 20%. The reporter's instinct that this is the wrong knob for
+   bandwidth-bound training is correct.
+2. **`NCCL_MAX_NCHANNELS=16` is free.** Within measurement noise it is identical to
+   uncapped across all three collectives. If capping channels is what cures the stall,
+   the obvious thing to try is 16 rather than 8 — it may buy the fix at no bandwidth
+   cost at all. Whether 16 is *enough* to stop the stall is a separate question this
+   job does not answer, and it is worth testing before recommending.
+3. **The harness measures something real.** `README.md` set the sanity check in advance:
+   uncapped large-message all-reduce must land in the plausible range for 4x200 Gb/s of
+   Cassini per node, i.e. ~100 GB/s. Measured 87.6 GB/s. Close to the per-node NIC
+   ceiling without exceeding it, so the numbers can be trusted.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -241,6 +282,7 @@ Ordered by prior probability. Every row must resolve.
 | --- | --- | --- | --- | --- |
 | 21790359 | 1 | 2 / 16 | baseline, `socket_ifname`, `nchannels_8` | all FAST, no stall; cost concentrated in `world_first` |
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
+| 21791400 | 5 | 8 / 64 | bandwidth vs channel cap | cap 16 free, cap 8 costs 20%, cap 4 costs 56% in the training band |
 | 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 
 ## Answers to the four questions asked
@@ -260,8 +302,12 @@ answer either way.
 _pending._
 
 **3. What does capping to 8 cost in collective bandwidth?**
-_pending_ — from `results/bandwidth.md`, headline the 128 MiB - 1 GiB training band, and
-report small-message latency separately.
+**Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
+128 MiB - 1 GiB band that bandwidth-bound training uses — all_reduce falls from
+87.6 to 70.5 GB/s. Capping at **4** costs 56%. Capping at **16** costs nothing
+measurable. Small messages (<= 1 MiB) are unaffected by any cap, so inference is
+largely insensitive while training is not. Recommendation: try `NCCL_MAX_NCHANNELS=16`
+first — if it stops the stall, the fix is free.
 
 **4. Recommended `NCCL_*` / `FI_CXI_*` baseline?**
 _pending_ — `env_baseline.sh`. F6 means there is no existing measured baseline to point
