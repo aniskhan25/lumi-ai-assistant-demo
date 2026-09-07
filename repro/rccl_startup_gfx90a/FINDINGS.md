@@ -102,6 +102,68 @@ container, so the interface list has to come from `/sys/class/net`; and
 `/opt/venv/bin/fi_info` is a wrapper pointing at a non-existent path while shadowing a
 working `/usr/bin/fi_info` on `PATH`.
 
+## Rung 2: `NCCL_NET_GDR_LEVEL=PHB` hangs the first cross-node collective (jobs 21790392, 21790393)
+
+Reproducible at two scales, all ranks, every time:
+
+| nodes / world | variant | init | world_first | status |
+| --- | --- | --- | --- | --- |
+| 4 / 32 | `baseline` | 0.83 | 15.71 | ok |
+| 4 / 32 | `socket_ifname` | 0.49 | **9.63** | ok |
+| 4 / 32 | `gdr_level` | 0.70 | **300.00** | **STALL 32/32 in `world_first`** |
+| 8 / 64 | `baseline` | 0.85 | 15.82 | ok |
+| 8 / 64 | `socket_ifname` | 0.63 | **9.79** | ok |
+| 8 / 64 | `gdr_level` | 1.42 | **300.00** | **STALL 64/64 in `world_first`** |
+
+`NCCL_NET_GDR_LEVEL=PHB`, on its own, with nothing else changed, hangs the first
+cross-node collective indefinitely — 300.00 s is the watchdog timeout, not a
+measurement. `init` completes normally in the same runs, so the failure is in
+connection setup for the data path, not in the rendezvous.
+
+This is a setting **the LUMI AI Guide recommends**, in
+`5-experiment-tracking/run_*.sh`. Those are single-node jobs, where it is harmless. It
+is absent from `3-multi-gpu-and-node/`. The planning note for this case treated that
+absence as a gap in the guide; it is the opposite — lesson 3 is right to omit it, and
+copying it from lesson 5 into a multi-node job is actively harmful.
+
+It plugs into finding 11: RCCL reports no local path to the network for GCDs 1, 3 and 7.
+Forcing GPU-direct RDMA across the host bridge for GCDs that have no working path is a
+coherent mechanism for a hang rather than a fallback. Not yet proven to be *the*
+mechanism.
+
+### Why this is probably not the reporter's stall
+
+Checked before drawing any conclusion:
+
+| Fact | Evidence |
+| --- | --- |
+| The container sets no `NCCL_*`/`RCCL_*`/`FI_*` variable at all | `singularity exec ... env \| grep -E '^(NCCL_\|RCCL_\|FI_\|OFI_)'` is empty; `/.singularity.d/env/` has none |
+| Nothing under `/appl/local/laifs` sets `NCCL_NET_GDR_LEVEL` | `grep -rli` finds no file |
+
+So nobody gets this setting by accident from the platform — it has to be set
+deliberately. **The reporter never mentioned setting it.** Until they confirm whether
+their job environment carries it, this is a hazard this investigation found, and a
+guide bug, but *not* an established explanation of their stall. Worth asking them
+directly, because if they do set it, it explains their report end to end.
+
+### `socket_ifname` is a consistent, scale-independent win
+
+`world_first` drops from 15.7-15.8 s to 9.6-9.8 s — about 38% — at 16, 32 and 64 ranks
+alike, with `init` unchanged. Cheap, and independent of how the stall resolves.
+
+### The reporter's stall did not reproduce at their own scale
+
+`baseline` at 8 nodes / world 64 — the same geometry as the frozen job in the report —
+completed in 19.97 s with zero stalled ranks. And the cost is flat in rank count:
+`world_first` is 14.71 s at 16 ranks, 15.71 s at 32, 15.82 s at 64. So a pure RCCL
+workload does not exhibit the reported failure, and connection setup does not blow up
+with world size in the range that matters.
+
+That points away from "RCCL on LUMI is broken at 64 ranks" and toward either an extra
+setting in their environment (see above) or something specific to vLLM's startup —
+many more communicators, concurrent creation, or 8 unbound workers per task. The
+`many_comms` phase and the vLLM rung exist to test the latter.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -110,7 +172,7 @@ Ordered by prior probability. Every row must resolve.
 | --- | --- | --- | --- |
 | 1 | `NCCL_SOCKET_IFNAME` unset → RCCL bootstrap on a non-HSN interface (**H-A**) | job 21790359 — `init` is 0.76 s with or without the pin | **refuted as stated at 2 nodes**; revised form (interface choice affects data-path connection setup, -33% on `world_first`) still open |
 | 2 | RCCL lazy connection setup makes each new communicator pay a fresh burst (**H-B**) | job 21790359 — `fresh_world_first` 1.43 s vs `world_first` 14.71 s | **strong form not supported at 2 nodes**; setup is mostly one-time, per-comm increment ~1.3 s. Open whether it grows with ranks |
-| 3 | Burst cost scales with `channels x ranks`, so 8 is a dose effect and not a threshold | jobs 21790392 (4n), 21790393 (8n) | _pending_; at 2 nodes `nchannels_8` cut `world_first` 35% with no stall to fix |
+| 3 | Burst cost scales with `channels x ranks` | jobs 21790359, 21790392, 21790393 | **rank scaling refuted**: `world_first` is 14.71/15.71/15.82 s at 16/32/64 ranks — flat. Channel dose-response still pending |
 | 4 | `NCCL_NET_GDR_LEVEL` unset degrades the chosen path | rung 2 `gdr_level` variant | _pending_ |
 | 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | rung 2 + `cxi_*` counter deltas | _pending_ |
 | 6 | Missing CPU/NUMA/NIC affinity | rung 2 `cpu_bind` variant | _pending_ |
@@ -125,8 +187,8 @@ Ordered by prior probability. Every row must resolve.
 | job id | rung | nodes / world | what it was for | result |
 | --- | --- | --- | --- | --- |
 | 21790359 | 1 | 2 / 16 | baseline, `socket_ifname`, `nchannels_8` | all FAST, no stall; cost concentrated in `world_first` |
-| 21790392 | 2 | 4 / 32 | full variant table | _running_ |
-| 21790393 | 2 | 8 / 64 | full variant table | _running_ |
+| 21790392 | 2 | 4 / 32 | full variant table | `gdr_level` STALL 32/32; baseline and `socket_ifname` healthy; rest _running_ |
+| 21790393 | 2 | 8 / 64 | full variant table | `gdr_level` STALL 64/64; baseline healthy at the reporter's own scale; rest _running_ |
 
 ## Answers to the four questions asked
 
