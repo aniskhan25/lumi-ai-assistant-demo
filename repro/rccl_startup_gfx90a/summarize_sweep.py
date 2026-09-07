@@ -12,6 +12,7 @@ import glob
 import json
 import os
 import re
+import collections
 from collections import defaultdict
 
 # What a healthy variant lets us cross off. Kept next to the summariser so a reader of
@@ -55,6 +56,13 @@ PHASE_COLUMNS = [
 STARTUP_PHASES = [p for p in PHASE_COLUMNS if p != "world_second"]
 
 SLOW_FACTOR = 3.0
+
+# Repeated attempts are recorded as "<variant>-r<n>" so nothing is overwritten.
+REPEAT_SUFFIX = re.compile(r"-r\d+$")
+
+
+def base_variant(name: str) -> str:
+    return REPEAT_SUFFIX.sub("", name)
 
 
 def load(results_dir: str) -> dict[str, list[dict]]:
@@ -142,7 +150,8 @@ def render(rows: dict[str, dict], reference: float | None) -> str:
     out.append("| variant | verdict | rules out if healthy |")
     out.append("| --- | --- | --- |")
     for name, row in rows.items():
-        out.append(f"| `{name}` | {row['verdict']} | {WHAT_IT_RULES_OUT.get(name, '(undocumented)')} |")
+        rules = WHAT_IT_RULES_OUT.get(base_variant(name), "(undocumented)")
+        out.append(f"| `{name}` | {row['verdict']} | {rules} |")
 
     stalls = {n: r for n, r in rows.items() if r["stalled_phases"]}
     if stalls:
@@ -157,6 +166,23 @@ def render(rows: dict[str, dict], reference: float | None) -> str:
         for name, row in stalls.items():
             out.append(f"| `{name}` | {', '.join(row['stalled_phases'])} | "
                        f"{row['stalled_ranks']}/{row['ranks']} |")
+
+    repeats = collections.defaultdict(list)
+    for name, row in rows.items():
+        repeats[base_variant(name)].append(row)
+    if any(len(v) > 1 for v in repeats.values()):
+        out.append("\n## Stall rate across repeats\n")
+        out.append(
+            "A variant that stalls on some attempts and not others is a race, not an "
+            "effect of its setting. That distinction is the whole reason for repeating.\n"
+        )
+        out.append("| variant | attempts | stalled attempts | phases seen stalling |")
+        out.append("| --- | --- | --- | --- |")
+        for name, group in sorted(repeats.items()):
+            stalled = [r for r in group if r["stalled_ranks"]]
+            phases = sorted({p for r in group for p in r["stalled_phases"]})
+            out.append(f"| `{name}` | {len(group)} | {len(stalled)} | "
+                       f"{', '.join(phases) if phases else '-'} |")
 
     out.append("\n## Environment per variant\n")
     tracked = ("NCCL_SOCKET_IFNAME", "NCCL_NET_GDR_LEVEL", "NCCL_RUNTIME_CONNECT",
