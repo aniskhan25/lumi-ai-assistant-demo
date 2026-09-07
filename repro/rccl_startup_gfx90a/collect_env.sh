@@ -26,13 +26,20 @@ mkdir -p "$(dirname "${OUT}")" 2>/dev/null || true
   # The heart of hypothesis 1: several interfaces exist, and RCCL picks one itself
   # unless NCCL_SOCKET_IFNAME says otherwise.
   echo "--- interfaces ---"
-  ip -o link show 2>/dev/null | awk -F': ' '{print $2}' || echo "ip unavailable"
+  # iproute2 is not installed in the LAIF container, so read sysfs directly rather
+  # than reporting "ip unavailable" and losing the evidence hypothesis 1 needs.
+  ls /sys/class/net/ 2>/dev/null | tr '\n' ' ' || echo "no /sys/class/net"
+  echo
   echo "--- cxi devices ---"
   ls /sys/class/cxi/ 2>/dev/null || echo "no /sys/class/cxi"
   echo "--- libfabric cxi provider ---"
-  for fi in /opt/cray/libfabric/*/bin/fi_info "$(command -v fi_info 2>/dev/null)"; do
+  # /opt/venv/bin/fi_info is a wrapper pointing at a path that does not exist in this
+  # container, and it comes first on PATH -- so probe candidates explicitly and skip
+  # any that cannot even report a version.
+  for fi in /usr/bin/fi_info /opt/cray/libfabric/*/bin/fi_info /opt/venv/bin/fi_info; do
     [ -x "${fi}" ] || continue
-    echo "using ${fi}"
+    "${fi}" --version >/dev/null 2>&1 || { echo "skipping broken ${fi}"; continue; }
+    echo "using ${fi} ($("${fi}" --version 2>&1 | head -1))"
     "${fi}" -p cxi 2>&1 | head -40
     break
   done

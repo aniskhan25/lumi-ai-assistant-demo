@@ -38,8 +38,11 @@ PHASE_COLUMNS = [
     "init",
     "world_first",
     "world_second",
+    "fresh_world_first_create",
     "fresh_world_first",
+    "tp_like_create",
     "tp_like_first",
+    "pp_like_create",
     "pp_like_first",
 ]
 

@@ -15,7 +15,9 @@ mkdir -p "$(dirname "${OUT}")" 2>/dev/null || true
 
   echo
   echo "--- interfaces (which ones RCCL could pick) ---"
-  ip -o link show 2>/dev/null | awk -F': ' '{print $2}' || echo "ip unavailable"
+  # No iproute2 in the container; sysfs has the same list.
+  ls /sys/class/net/ 2>/dev/null | tr '\n' ' ' || echo "no /sys/class/net"
+  echo
   echo "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-unset}"
 
   echo

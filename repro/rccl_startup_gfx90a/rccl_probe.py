@@ -42,7 +42,9 @@ PHASE_ORDER = [
     "world_second",
     "fresh_world_first_create",
     "fresh_world_first",
+    "tp_like_create",
     "tp_like_first",
+    "pp_like_create",
     "pp_like_first",
 ]
 
@@ -52,7 +54,9 @@ WHAT_IT_MEASURES = {
     "world_second": "same comm, already warm -- control, must be fast",
     "fresh_world_first_create": "building a second comm object, before any traffic on it",
     "fresh_world_first": "a second comm over the same peers -- H-B lands here",
+    "tp_like_create": "building the intra-node groups",
     "tp_like_first": "intra-node group, mirrors vLLM's TP comm",
+    "pp_like_create": "building the cross-node groups",
     "pp_like_first": "cross-node group, mirrors vLLM's PP comm",
 }
 
@@ -203,21 +207,33 @@ def main() -> int:
     timer.run("fresh_world_first", lambda: allreduce(fresh))
 
     # Mirror vLLM's real split: TP within a node, PP across nodes at the same local rank.
+    # Group construction is itself timed, because dist.new_group is collective and can
+    # stall; running it outside a timed phase would mean no watchdog and a job that
+    # hangs to the wall clock.
     n_nodes = max(1, world_size // local_world)
-    tp_group = None
-    for node in range(n_nodes):
-        ranks = list(range(node * local_world, (node + 1) * local_world))
-        group = dist.new_group(ranks=ranks)
-        if rank in ranks:
-            tp_group = group
+
+    def build_tp():
+        mine = None
+        for node in range(n_nodes):
+            ranks = list(range(node * local_world, (node + 1) * local_world))
+            group = dist.new_group(ranks=ranks)
+            if rank in ranks:
+                mine = group
+        return mine
+
+    def build_pp():
+        mine = None
+        for slot in range(local_world):
+            ranks = [slot + node * local_world for node in range(n_nodes)]
+            group = dist.new_group(ranks=ranks)
+            if rank in ranks:
+                mine = group
+        return mine
+
+    tp_group = timer.run("tp_like_create", build_tp)
     timer.run("tp_like_first", lambda: allreduce(tp_group))
 
-    pp_group = None
-    for slot in range(local_world):
-        ranks = [slot + node * local_world for node in range(n_nodes)]
-        group = dist.new_group(ranks=ranks)
-        if rank in ranks:
-            pp_group = group
+    pp_group = timer.run("pp_like_create", build_pp)
     timer.run("pp_like_first", lambda: allreduce(pp_group))
 
     phases = timer.record["phases"]
@@ -239,7 +255,8 @@ def main() -> int:
                 print(f"  {name:24s} {phases[name]['seconds']:9.3f}   {WHAT_IT_MEASURES[name]}")
         print(f"  ratios vs warm all_reduce: {timer.record['ratios']}")
 
-    dist.barrier()
+    # No closing barrier on purpose: if any rank aborted on a stall, a barrier here
+    # would block every survivor with no watchdog left to rescue them.
     dist.destroy_process_group()
     return 0
 
