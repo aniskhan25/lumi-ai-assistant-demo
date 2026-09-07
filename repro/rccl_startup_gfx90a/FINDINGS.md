@@ -164,6 +164,59 @@ setting in their environment (see above) or something specific to vLLM's startup
 many more communicators, concurrent creation, or 8 unbound workers per task. The
 `many_comms` phase and the vLLM rung exist to test the latter.
 
+## RETRACTION: most of the 8-node sweep was a harness artefact, not a finding
+
+Job 21790393 (8 nodes) reported 11 of 13 variants stalling, in varied phases. That
+table is **invalid** and must not be quoted. Two things give it away:
+
+1. **The positive control failed.** `net_socket` stalled. `README.md` states the rule in
+   advance: `net_socket` takes RCCL off the CXI path entirely, so if it stalls, the
+   harness or the allocation is at fault rather than RCCL. That rule was written before
+   the run and it applies to the run.
+2. **58 of 64 ranks stalled in `world_second`** — a repeat all-reduce on an already-warm
+   communicator, which completes in 0.00 s whenever it is healthy. There is no physical
+   RCCL failure that hangs a warm collective while leaving `init` at 0.6 s. That is
+   leaked state, not a fabric problem.
+
+**Cause, found and fixed.** The probe passes `--kill-on-bad-exit=0` so that one stalled
+rank does not abort the whole job. The consequence, which the harness did not handle,
+is that when a variant stalls, the ranks that did *not* trip their watchdog stay alive
+and blocked inside RCCL, still holding their GCDs, while the next variant starts. The
+next variant then stalls for reasons that have nothing to do with its setting, and the
+cascade reads as a sweep full of discoveries. `run_vllm_startup.sh` had the same bug
+and it was fixed there; `run_rccl_probe.sh` was missed.
+
+The fix reaps leftover probe processes on every node after every attempt, and adds a
+**canary**: a plain 1 KiB all-reduce between variants that must stay healthy. When the
+canary fails, the log says the node set is contaminated and later rows are not valid,
+instead of printing numbers that look like measurements.
+
+### What survives the retraction
+
+Variant order is `baseline, socket_ifname, gdr_level, guide_pair, runtime_connect_off,
+nchannels_8, nchannels_4, nchannels_16, nchannels_per_peer, cxi_cq_and_sw_match,
+proto_simple, cpu_bind, net_socket`. Rows up to and including the **first** stall in a
+job cannot have been contaminated, because nothing had stalled yet.
+
+| Claim | Status |
+| --- | --- |
+| `baseline` healthy at 16, 32 and 64 ranks; `world_first` 14.71 / 15.71 / 15.82 s (flat in rank count) | **valid** — first variant in every job |
+| `socket_ifname` healthy and ~38% faster at all three scales | **valid** — second variant, before any stall |
+| `gdr_level` (`NCCL_NET_GDR_LEVEL=PHB`) stalls all ranks in `world_first` at 4 and 8 nodes | **valid** — third variant, the first stall in each job, so uncontaminated, and reproduced independently at two scales |
+| `guide_pair` also stalls | **probable but not clean** — it ran immediately after `gdr_level` stalled. Consistent at both scales and it contains the same poison, but it needs a re-run to be stated as fact |
+| everything from `runtime_connect_off` onward, at both scales | **retracted** — ran after a stall, contamination cannot be excluded |
+| the whole 2-node rung 1 table (job 21790359) | **valid** — no variant stalled, so there was nothing to contaminate |
+
+### A claim I made and now withdraw
+
+On the strength of the contaminated rows I reported that intermittent
+`fresh_world_first` stalls — `nchannels_16` at 4 nodes, `runtime_connect_off` at 8 —
+were the reproduction of the reporter's "stalls at different phases" symptom. **They
+are not.** Both ran after `gdr_level` and `guide_pair` had stalled on the same nodes,
+so the varied phases are the signature of leaked state, and the varied-phase symptom is
+exactly what contamination would counterfeit. The reporter's symptom remains
+**unreproduced** in a clean pure-RCCL run.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -171,11 +224,11 @@ Ordered by prior probability. Every row must resolve.
 | # | Hypothesis | Decided by | Status |
 | --- | --- | --- | --- |
 | 1 | `NCCL_SOCKET_IFNAME` unset → RCCL bootstrap on a non-HSN interface (**H-A**) | job 21790359 — `init` is 0.76 s with or without the pin | **refuted as stated at 2 nodes**; revised form (interface choice affects data-path connection setup, -33% on `world_first`) still open |
-| 2 | RCCL lazy connection setup makes each new communicator pay a fresh burst (**H-B**) | job 21790359 — `fresh_world_first` 1.43 s vs `world_first` 14.71 s | **strong form not supported at 2 nodes**; setup is mostly one-time, per-comm increment ~1.3 s. Open whether it grows with ranks |
+| 2 | RCCL lazy connection setup makes each new communicator pay a fresh burst (**H-B**) | job 21790359 (clean); 8-node evidence retracted as contaminated | **strong form not supported**; setup is mostly one-time, per-comm increment ~1.3 s. Needs a clean re-run at 64 ranks |
 | 3 | Burst cost scales with `channels x ranks` | jobs 21790359, 21790392, 21790393 | **rank scaling refuted**: `world_first` is 14.71/15.71/15.82 s at 16/32/64 ranks — flat. Channel dose-response still pending |
 | 4 | `NCCL_NET_GDR_LEVEL` unset degrades the chosen path | rung 2 `gdr_level` variant | _pending_ |
-| 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | rung 2 + `cxi_*` counter deltas | _pending_ |
-| 6 | Missing CPU/NUMA/NIC affinity | rung 2 `cpu_bind` variant | _pending_ |
+| 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | `cxi_cq_and_sw_match` rows retracted as contaminated | _pending a clean re-run_ |
+| 6 | Missing CPU/NUMA/NIC affinity | `cpu_bind` was healthy at 4 nodes but ran post-contamination; 8-node row retracted | _pending a clean re-run_ |
 | 7 | Symptom B is the RunAI streamer throttle, not RCCL | rung 7, single node | _pending_ |
 | 8 | Symptom B is Lustre read bandwidth on a 959 GB checkpoint | rung 7 `lustre_read.sh` | _pending_ |
 | 9 | Per-job MIOpen cache re-pays kernel compilation — a startup cost, not the stall | rungs 4-5 `graph_capture` gap | _pending_ |
@@ -187,8 +240,8 @@ Ordered by prior probability. Every row must resolve.
 | job id | rung | nodes / world | what it was for | result |
 | --- | --- | --- | --- | --- |
 | 21790359 | 1 | 2 / 16 | baseline, `socket_ifname`, `nchannels_8` | all FAST, no stall; cost concentrated in `world_first` |
-| 21790392 | 2 | 4 / 32 | full variant table | `gdr_level` STALL 32/32; baseline and `socket_ifname` healthy; rest _running_ |
-| 21790393 | 2 | 8 / 64 | full variant table | `gdr_level` STALL 64/64; baseline healthy at the reporter's own scale; rest _running_ |
+| 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
+| 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 
 ## Answers to the four questions asked
 

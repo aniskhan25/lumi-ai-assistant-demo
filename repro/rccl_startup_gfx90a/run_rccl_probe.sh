@@ -44,6 +44,8 @@ MANY_COMMS="${MANY_COMMS:-0}"
 # jobs 21790392/21790393 hit different variants at different scales, which is the
 # signature of a race rather than a setting. One run cannot tell those apart.
 REPEATS="${REPEATS:-1}"
+# Set CANARY=0 to skip the between-variant health check (faster, less safe).
+CANARY="${CANARY:-1}"
 VARIANTS_ONLY="${VARIANTS_ONLY:-}"
 
 # See https://docs.lumi-supercomputer.eu/runjobs/scheduled-jobs/distribution-binding/#gpu-binding
@@ -158,8 +160,6 @@ for row in "${VARIANTS[@]}"; do
   echo "=== variant ${name} ==="
 
   # A fresh port per variant, so a lingering rendezvous cannot bleed across runs.
-  export MASTER_PORT="$(( 20000 + (SLURM_JOB_ID % 10000) + RANDOM % 1000 ))"
-
   # Clear everything a previous row may have set, so one variable really does move.
   unset NCCL_SOCKET_IFNAME NCCL_NET_GDR_LEVEL NCCL_RUNTIME_CONNECT NCCL_MAX_NCHANNELS \
         NCCL_MIN_NCHANNELS NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
@@ -197,6 +197,39 @@ for row in "${VARIANTS[@]}"; do
     srun --kill-on-bad-exit=0 ${srun_extra} \
       singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
       bash /work/repro/rccl_startup_gfx90a/in_container_probe.sh "${run_name}" || true
+
+    # MANDATORY, and the reason job 21790393 produced 11 invalid rows: because
+    # --kill-on-bad-exit=0 keeps surviving ranks alive when one aborts on a stall,
+    # ranks from a stalled attempt stay blocked inside RCCL, holding their GCDs, while
+    # the next attempt starts. The next attempt then stalls too -- in world_second, a
+    # warm collective that cannot fail on its own -- and the cascade looks like a
+    # finding. Reap everything before measuring anything else.
+    srun --overlap --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
+      bash -c 'pkill -f rccl_probe.py 2>/dev/null; pkill -f in_container_probe 2>/dev/null; exit 0' || true
+    sleep 10
+
+    # Canary: a plain baseline run must stay healthy between variants. If it does not,
+    # the node set is contaminated and every later row is suspect -- say so in the log
+    # rather than emitting numbers that look like measurements.
+    if [ "${CANARY:-1}" = "1" ] && [ "${run_name}" != "canary" ]; then
+      srun --kill-on-bad-exit=0 --ntasks="${SLURM_NPROCS}" \
+        singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
+        bash -c 'RANK=$SLURM_PROCID LOCAL_RANK=$SLURM_LOCALID \
+          HIP_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-0} HOME=/runtime \
+          timeout 90 python3 -c "
+import os, torch, torch.distributed as dist
+torch.cuda.set_device(0)
+dist.init_process_group(backend=\"nccl\")
+t = torch.ones(1024, device=\"cuda:0\")
+dist.all_reduce(t)
+torch.cuda.synchronize()
+dist.destroy_process_group()
+"' >/dev/null 2>&1 \
+        && echo "  canary after ${run_name}: OK" \
+        || echo "  canary after ${run_name}: FAILED -- node set contaminated, later rows are NOT valid"
+      srun --overlap --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
+        bash -c 'pkill -f "python3 -c" 2>/dev/null; exit 0' || true
+    fi
   done
 done
 
