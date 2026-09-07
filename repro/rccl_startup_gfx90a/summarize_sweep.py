@@ -31,6 +31,10 @@ WHAT_IT_RULES_OUT = {
     "cpu_bind": "#6: missing GCD-to-NUMA-to-NIC affinity",
     "container_older": "#10: container/plugin version (expected to change nothing)",
     "net_socket": "positive control -- must be healthy, or the harness is wrong",
+    "gdr_cap": "whether the reported NCCL_MAX_NCHANNELS=8 workaround rescues the GDR hang",
+    "gdr_runtime_connect": "whether eager connect rescues the GDR hang",
+    "gdr_ifname": "whether pinning the interface rescues the GDR hang",
+    "gdr_socket_net": "whether the hang is specific to the OFI/CXI path",
 }
 
 # Ordered so the reader meets the phases in the order the process lives them.

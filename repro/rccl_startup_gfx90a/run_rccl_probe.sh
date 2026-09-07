@@ -21,6 +21,7 @@
 #   MODE=sweep sbatch --nodes=4 repro/rccl_startup_gfx90a/run_rccl_probe.sh
 #   MODE=sweep sbatch --nodes=8 repro/rccl_startup_gfx90a/run_rccl_probe.sh
 #   MODE=debug sbatch repro/rccl_startup_gfx90a/run_rccl_probe.sh     # NCCL INFO logs
+#   MODE=combos sbatch ...                                            # what rescues the GDR hang
 #   VARIANTS_ONLY="baseline socket_ifname" sbatch ...                 # pick rows
 #   MANY_COMMS=32 sbatch ...                                          # communicator-count scaling
 #
@@ -61,18 +62,33 @@ VARIANTS=(
   "net_socket|NCCL_NET=Socket|"
 )
 
+# Deliberate multi-variable rows, added only after gdr_level was confirmed to hang on
+# its own (jobs 21790392, 21790393). Each asks whether one of the reporter's remedies
+# rescues that specific hang -- which is the question "why does capping channels help?"
+# stated precisely enough to answer.
+COMBOS=(
+  "gdr_cap|NCCL_NET_GDR_LEVEL=PHB NCCL_MAX_NCHANNELS=8|"
+  "gdr_runtime_connect|NCCL_NET_GDR_LEVEL=PHB NCCL_RUNTIME_CONNECT=0|"
+  "gdr_ifname|NCCL_NET_GDR_LEVEL=PHB NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3|"
+  "gdr_socket_net|NCCL_NET_GDR_LEVEL=PHB NCCL_NET=Socket|"
+)
+VARIANTS+=("${COMBOS[@]}")
+
 # Rung 1 is the cheapest decisive cut: does it reproduce, does pinning the interface
 # alone fix it, and does the reported workaround fix it.
 RUNG1="baseline socket_ifname nchannels_8"
 # Interface evidence must come from a separate run: NCCL_DEBUG=INFO writes per-rank logs
 # from every rank and would contaminate the very timings we are measuring.
-DEBUG_SET="baseline socket_ifname"
+DEBUG_SET="baseline socket_ifname gdr_level"
+# The GDR hang is the one worth tracing, so combos get their own mode.
+COMBO_SET="baseline gdr_level gdr_cap gdr_runtime_connect gdr_ifname gdr_socket_net"
 
 case "${MODE}" in
   probe) SELECTED="${RUNG1}" ;;
   sweep) SELECTED="" ;;
   debug) SELECTED="${DEBUG_SET}" ;;
-  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep or debug)" >&2; exit 2 ;;
+  combos) SELECTED="${COMBO_SET}" ;;
+  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug or combos)" >&2; exit 2 ;;
 esac
 [ -n "${VARIANTS_ONLY}" ] && SELECTED="${VARIANTS_ONLY}"
 
@@ -141,7 +157,7 @@ for row in "${VARIANTS[@]}"; do
 
   # Clear everything a previous row may have set, so one variable really does move.
   unset NCCL_SOCKET_IFNAME NCCL_NET_GDR_LEVEL NCCL_RUNTIME_CONNECT NCCL_MAX_NCHANNELS \
-        NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
+        NCCL_MIN_NCHANNELS NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
         FI_CXI_DEFAULT_CQ_SIZE FI_CXI_RX_MATCH_MODE
   if [ "${var_env}" != "-" ] && [ -n "${var_env}" ]; then
     for kv in ${var_env}; do export "${kv?}"; done
