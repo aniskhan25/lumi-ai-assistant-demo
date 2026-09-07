@@ -132,8 +132,12 @@ for row in "${VARIANTS[@]}"; do
   STARTUP_SECONDS="${SECONDS}"
   echo "variant ${name}: verdict=${VERDICT} startup_seconds=${STARTUP_SECONDS}"
 
+  # Killing the srun leaves the vLLM workers holding their HBM, which would make every
+  # later variant OOM or mismeasure. Reap them explicitly.
   kill "${LAUNCH_PID}" 2>/dev/null || true
   wait "${LAUNCH_PID}" 2>/dev/null || true
+  srun --overlap --ntasks=1 \
+    bash -c 'pkill -f "vllm serve" 2>/dev/null; pkill -f "VLLM::" 2>/dev/null; exit 0' || true
   sleep 15
 
   srun --ntasks=1 singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \

@@ -40,6 +40,7 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-1800}"
 STARTUP_POLL_S="${STARTUP_POLL_S:-2}"
 DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 LOAD_FORMAT="${LOAD_FORMAT:-}"
+LOAD_FORMAT_DEFAULT="${LOAD_FORMAT}"
 VARIANTS_ONLY="${VARIANTS_ONLY:-}"
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching}"
 
@@ -116,6 +117,18 @@ for row in "${VARIANTS[@]}"; do
     continue
   fi
 
+  # Refuse to start a variant that cannot finish: a row cut off by the wall clock looks
+  # identical to a stall, and that ambiguity is what this whole case is trying to remove.
+  if [ -n "${SLURM_JOB_END_TIME:-}" ]; then
+    remaining=$(( SLURM_JOB_END_TIME - $(date +%s) ))
+    needed=$(( STARTUP_TIMEOUT_S + 300 ))
+    if [ "${remaining}" -lt "${needed}" ]; then
+      echo "SKIPPING remaining variants: ${remaining}s of walltime left, need ${needed}s."
+      echo "Resubmit with VARIANTS_ONLY to finish the table."
+      break
+    fi
+  fi
+
   echo
   echo "============ variant ${name} ============"
 
@@ -129,7 +142,10 @@ for row in "${VARIANTS[@]}"; do
   unset NCCL_SOCKET_IFNAME NCCL_NET_GDR_LEVEL NCCL_RUNTIME_CONNECT NCCL_MAX_NCHANNELS \
         NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
         FI_CXI_DEFAULT_CQ_SIZE FI_CXI_RX_MATCH_MODE
-  export LOAD_FORMAT RUNAI_STREAMER_CONCURRENCY="${RUNAI_STREAMER_CONCURRENCY:-1}"
+  # Back to the job-level default every iteration, so a variant that sets these cannot
+  # leak into the ones after it regardless of the order rows are selected in.
+  export LOAD_FORMAT="${LOAD_FORMAT_DEFAULT}"
+  export RUNAI_STREAMER_CONCURRENCY=1
   if [ "${var_env}" != "-" ] && [ -n "${var_env}" ]; then
     for kv in ${var_env}; do export "${kv?}"; done
   fi
@@ -161,11 +177,18 @@ for row in "${VARIANTS[@]}"; do
   STARTUP_SECONDS="${SECONDS}"
   echo "variant ${name}: verdict=${VERDICT} startup_seconds=${STARTUP_SECONDS}"
 
-  # Tear the server down before the next variant, and give the ports and the RCCL
-  # rendezvous time to clear so the next measurement starts clean.
+  # Tear the server down before the next variant. Killing the srun is not enough: the
+  # vLLM workers it spawned keep running and keep their HBM, so the next variant would
+  # either OOM or measure a machine that is still busy. Reap them on every node and
+  # wait for the memory to actually come back.
   kill "${LAUNCH_PID}" 2>/dev/null || true
   wait "${LAUNCH_PID}" 2>/dev/null || true
+  srun --overlap --ntasks="${NNODES}" --ntasks-per-node=1 \
+    bash -c 'pkill -f "vllm serve" 2>/dev/null; pkill -f "VLLM::" 2>/dev/null; exit 0' || true
   sleep 20
+  # Confirm the GPUs are actually idle before trusting the next measurement.
+  srun --overlap --ntasks=1 --ntasks-per-node=1 \
+    bash -c 'rocm-smi --showmemuse 2>/dev/null | grep -i "used memory" | head -8 || true' || true
 
   srun --ntasks=1 --ntasks-per-node=1 singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
     python3 /work/repro/rccl_startup_gfx90a/phase_timeline.py \
