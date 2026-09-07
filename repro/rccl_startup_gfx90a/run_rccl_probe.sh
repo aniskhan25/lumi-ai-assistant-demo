@@ -22,6 +22,7 @@
 #   MODE=sweep sbatch --nodes=8 repro/rccl_startup_gfx90a/run_rccl_probe.sh
 #   MODE=debug sbatch repro/rccl_startup_gfx90a/run_rccl_probe.sh     # NCCL INFO logs
 #   MODE=combos sbatch ...                                            # what rescues the GDR hang
+#   REPEATS=5 VARIANTS_ONLY="baseline" sbatch ...                     # is a stall reproducible?
 #   VARIANTS_ONLY="baseline socket_ifname" sbatch ...                 # pick rows
 #   MANY_COMMS=32 sbatch ...                                          # communicator-count scaling
 #
@@ -39,6 +40,10 @@ MODE="${MODE:-probe}"
 STALL_TIMEOUT_S="${STALL_TIMEOUT_S:-300}"
 TENSOR_MIB="${TENSOR_MIB:-32}"
 MANY_COMMS="${MANY_COMMS:-0}"
+# Repeat each selected variant this many times. The fresh_world_first stalls seen in
+# jobs 21790392/21790393 hit different variants at different scales, which is the
+# signature of a race rather than a setting. One run cannot tell those apart.
+REPEATS="${REPEATS:-1}"
 VARIANTS_ONLY="${VARIANTS_ONLY:-}"
 
 # See https://docs.lumi-supercomputer.eu/runjobs/scheduled-jobs/distribution-binding/#gpu-binding
@@ -174,12 +179,25 @@ for row in "${VARIANTS[@]}"; do
 
   echo "env: ${var_env}   srun_extra: ${srun_extra:-none}"
 
-  # kill-on-bad-exit=0 plus || true: a stalled or failed variant is a recorded result,
-  # never a fatal job abort. rccl_probe.py exits 75 on a stall, having written its JSON.
-  # shellcheck disable=SC2086
-  srun --kill-on-bad-exit=0 ${srun_extra} \
-    singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
-    bash /work/repro/rccl_startup_gfx90a/in_container_probe.sh "${name}" || true
+  for rep in $(seq 1 "${REPEATS}"); do
+    # Each repeat is recorded under its own name so nothing is overwritten and the
+    # summary shows the spread across attempts rather than only the last one.
+    if [ "${REPEATS}" -gt 1 ]; then
+      run_name="${name}-r${rep}"
+      echo "--- repeat ${rep}/${REPEATS} ---"
+    else
+      run_name="${name}"
+    fi
+    # A fresh rendezvous port per attempt, so one hung attempt cannot poison the next.
+    export MASTER_PORT="$(( 20000 + (SLURM_JOB_ID % 10000) + RANDOM % 1000 ))"
+
+    # kill-on-bad-exit=0 plus || true: a stalled or failed variant is a recorded result,
+    # never a fatal job abort. rccl_probe.py exits 75 on a stall, having written its JSON.
+    # shellcheck disable=SC2086
+    srun --kill-on-bad-exit=0 ${srun_extra} \
+      singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
+      bash /work/repro/rccl_startup_gfx90a/in_container_probe.sh "${run_name}" || true
+  done
 done
 
 echo
