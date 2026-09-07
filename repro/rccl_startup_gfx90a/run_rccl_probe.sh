@@ -22,6 +22,7 @@
 #   MODE=sweep sbatch --nodes=8 repro/rccl_startup_gfx90a/run_rccl_probe.sh
 #   MODE=debug sbatch repro/rccl_startup_gfx90a/run_rccl_probe.sh     # NCCL INFO logs
 #   VARIANTS_ONLY="baseline socket_ifname" sbatch ...                 # pick rows
+#   MANY_COMMS=32 sbatch ...                                          # communicator-count scaling
 #
 # The task layout (8 tasks/node, 7 cpus/task, --mem-per-gpu=60G) and the CPU bind mask
 # below are the LUMI AI Guide's, so the probe measures the configuration the guide
@@ -36,6 +37,7 @@ CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r70f21m5
 MODE="${MODE:-probe}"
 STALL_TIMEOUT_S="${STALL_TIMEOUT_S:-300}"
 TENSOR_MIB="${TENSOR_MIB:-32}"
+MANY_COMMS="${MANY_COMMS:-0}"
 VARIANTS_ONLY="${VARIANTS_ONLY:-}"
 
 # See https://docs.lumi-supercomputer.eu/runjobs/scheduled-jobs/distribution-binding/#gpu-binding
@@ -115,7 +117,7 @@ export MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 
 export WORLD_SIZE="${SLURM_NPROCS}"
 export LOCAL_WORLD_SIZE="${SLURM_NTASKS_PER_NODE:-8}"
 export RESULTS_DIR="/work/repro/rccl_startup_gfx90a/results/job_${SLURM_JOB_ID}"
-export STALL_TIMEOUT_S TENSOR_MIB
+export STALL_TIMEOUT_S TENSOR_MIB MANY_COMMS
 
 # Capture the environment once, before any variant has moved anything.
 srun --ntasks=1 --ntasks-per-node=1 singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \

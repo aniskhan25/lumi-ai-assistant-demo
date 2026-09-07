@@ -46,6 +46,7 @@ PHASE_ORDER = [
     "tp_like_first",
     "pp_like_create",
     "pp_like_first",
+    "many_comms",
 ]
 
 WHAT_IT_MEASURES = {
@@ -58,6 +59,9 @@ WHAT_IT_MEASURES = {
     "tp_like_first": "intra-node group, mirrors vLLM's TP comm",
     "pp_like_create": "building the cross-node groups",
     "pp_like_first": "cross-node group, mirrors vLLM's PP comm",
+    "many_comms": "N more communicators, each used once -- tests whether cost grows "
+                  "with communicator count, the one axis vLLM pushes much harder than "
+                  "a microbenchmark does",
 }
 
 
@@ -149,6 +153,10 @@ def main() -> int:
         default=float(os.environ.get("STALL_TIMEOUT_S", "300")),
         help="a phase exceeding this is recorded as STALL and the rank aborts",
     )
+    parser.add_argument("--many-comms", type=int,
+                        default=int(os.environ.get("MANY_COMMS", "0")),
+                        help="create this many extra communicators and use each once; "
+                             "0 disables the phase")
     parser.add_argument("--tensor-mib", type=float, default=32.0,
                         help="all_reduce payload; big enough to need real channels, "
                              "small enough that time is setup, not bandwidth")
@@ -180,6 +188,7 @@ def main() -> int:
             "gcn_arch": torch.cuda.get_device_properties(device_index).gcnArchName,
             "stall_timeout_s": args.stall_timeout_s,
             "tensor_mib": args.tensor_mib,
+            "many_comms": args.many_comms,
             "env": tracked_env(),
         },
     )
@@ -235,6 +244,21 @@ def main() -> int:
 
     pp_group = timer.run("pp_like_create", build_pp)
     timer.run("pp_like_first", lambda: allreduce(pp_group))
+
+    if args.many_comms > 0:
+        def many():
+            # Each communicator is used once, which is what vLLM's startup effectively
+            # does across its TP/PP/world/all2all groups. Held in a list so none is
+            # garbage-collected mid-phase, which would destroy the comm being measured.
+            groups = []
+            for _ in range(args.many_comms):
+                group = dist.new_group(ranks=list(range(world_size)))
+                groups.append(group)
+                dist.all_reduce(payload, group=group)
+            torch.cuda.synchronize()
+            return len(groups)
+
+        timer.run("many_comms", many)
 
     phases = timer.record["phases"]
     # The signature that matters is a ratio, not an absolute: a fresh communicator

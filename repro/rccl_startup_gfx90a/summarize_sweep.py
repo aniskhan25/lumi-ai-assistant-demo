@@ -44,6 +44,7 @@ PHASE_COLUMNS = [
     "tp_like_first",
     "pp_like_create",
     "pp_like_first",
+    "many_comms",
 ]
 
 # world_second is the warm control and is excluded: it is the denominator, not a cost.

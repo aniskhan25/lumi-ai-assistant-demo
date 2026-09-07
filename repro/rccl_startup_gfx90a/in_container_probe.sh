@@ -29,7 +29,8 @@ python3 /work/repro/rccl_startup_gfx90a/rccl_probe.py \
   --variant "${VARIANT}" \
   --results-dir "${RESULTS_DIR}" \
   --stall-timeout-s "${STALL_TIMEOUT_S:-300}" \
-  --tensor-mib "${TENSOR_MIB:-32}"
+  --tensor-mib "${TENSOR_MIB:-32}" \
+  --many-comms "${MANY_COMMS:-0}"
 status=$?
 
 if [ "${SLURM_LOCALID}" = "0" ]; then
