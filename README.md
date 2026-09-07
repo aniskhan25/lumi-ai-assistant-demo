@@ -252,3 +252,24 @@ vLLM logs:
 |  | `meta-llama/Llama-3.1-405B-Instruct` | 2 nodes, 16 GCDs | 32 | 34.373 | 113.057 | 7.066 |
 |  | `meta-llama/Llama-3.1-405B-Instruct` | 4 nodes, 32 GCDs | 160 | 66.241 | 227.973 | 7.124 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` | 4 nodes, 32 GCDs | 64 | 121.763 | 62.749 | 1.961 |
+
+## Known Issues
+
+Multi-node vLLM startup on LUMI stalls for 10-60+ minutes, and not in one fixed phase:
+different runs freeze at different stages, and clearing one stage does not prevent a
+stall later. `NCCL_MAX_NCHANNELS=8` works around it. Note that the multi-node recipes
+above already need `STARTUP_TIMEOUT_S` of 2700-14400 s, which is likely the same
+symptom paid for with a long timeout rather than diagnosed.
+
+`repro/rccl_startup_gfx90a/` times RCCL startup phase by phase with no model in the
+picture, then checks whether the same signature appears in real vLLM startup, and
+measures what capping channels costs in collective bandwidth:
+
+```bash
+sbatch repro/rccl_startup_gfx90a/run_rccl_probe.sh              # cheapest, no model
+MODE=sweep sbatch repro/rccl_startup_gfx90a/run_rccl_probe.sh   # full variant table
+sbatch repro/rccl_startup_gfx90a/run_bandwidth.sh               # cost of capping channels
+```
+
+See `repro/rccl_startup_gfx90a/README.md` for the run order and
+`repro/rccl_startup_gfx90a/FINDINGS.md` for conclusions.
