@@ -343,6 +343,36 @@ would have discarded the valid table above. It is disabled by default
 verdicts must not be used until diagnosed. Validity is instead argued from the positive
 control and from recovery-after-stall, both of which come from the measurement itself.
 
+## Stall rates, and why 5 attempts is not enough (job 21811023)
+
+8 nodes, world size 64, five attempts per variant, `STALL_TIMEOUT_S=120`:
+
+| variant | attempts | stalled | phase |
+| --- | --- | --- | --- |
+| `baseline` | 5 | **1** | `fresh_world_first` |
+| `nchannels_16` | 5 | **1** | `fresh_world_first` |
+| `nchannels_8` | 5 | 0 | - |
+| `net_socket` | 5 | 0 | - |
+
+Pooling every clean observation of `baseline` at 64 ranks — jobs 21790393 (healthy),
+21794113 (stalled), 21794114 (healthy), and 1 of 5 here — gives **2 stalls in 8
+attempts, about 25%**.
+
+**`NCCL_MAX_NCHANNELS=16` does not fix the stall.** It hung once in five, the same rate
+as baseline. This retracts the recommendation drafted after job 21791400, which read the
+zero bandwidth cost of a 16-channel cap as making it the obvious thing to try first. It
+is free, and it does not work. The bandwidth measurement stands; the inference from it
+was wrong.
+
+**And 0 of 5 does not establish that `NCCL_MAX_NCHANNELS=8` works.** At a 20% base rate,
+five clean attempts happen by chance 33% of the time (0.8^5). The same applies to
+`net_socket`. Both are *consistent* with being fixes and neither is demonstrated. Jobs
+21811437 and 21811438 run 15 attempts per variant, where a clean sweep would have a
+3.5% chance of being luck — enough to state a conclusion.
+
+This is the reason the harness has a `REPEATS` mode at all. A single healthy run of a
+proposed fix, against an intermittent failure, is indistinguishable from no fix.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -369,7 +399,9 @@ Ordered by prior probability. Every row must resolve.
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
 | 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
-| 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | _running_ |
+| 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | baseline 1/5, `nchannels_16` 1/5, `nchannels_8` 0/5, `net_socket` 0/5 — underpowered |
+| 21811437 | 2 | 8 / 64 | 15x baseline and `nchannels_8` | _running_ |
+| 21811438 | 2 | 8 / 64 | 15x `nchannels_16` and `nchannels_4` | _running_ |
 | 21791400 | 5 | 8 / 64 | bandwidth vs channel cap | cap 16 free, cap 8 costs 20%, cap 4 costs 56% in the training band |
 | 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 
@@ -393,9 +425,15 @@ _pending._
 **Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
 128 MiB - 1 GiB band that bandwidth-bound training uses — all_reduce falls from
 87.6 to 70.5 GB/s. Capping at **4** costs 56%. Capping at **16** costs nothing
-measurable. Small messages (<= 1 MiB) are unaffected by any cap, so inference is
-largely insensitive while training is not. Recommendation: try `NCCL_MAX_NCHANNELS=16`
-first — if it stops the stall, the fix is free.
+measurable. Small messages (<= 1 MiB) are unaffected by any cap, so an inference server
+is largely insensitive while a training job pays in full — the reporter's instinct that
+this is the wrong knob for bandwidth-bound training is correct.
+
+Note the tempting inference that does **not** hold: a 16-channel cap is free, but job
+21811023 shows it does not stop the stall (1/5, same as baseline). Free and ineffective.
+So on current evidence the choice really is between paying ~20% for a cap of 8, or
+finding a different fix — which is what makes question 2 worth pursuing rather than
+settling for the workaround.
 
 **4. Recommended `NCCL_*` / `FI_CXI_*` baseline?**
 _pending_ — `env_baseline.sh`. F6 means there is no existing measured baseline to point
