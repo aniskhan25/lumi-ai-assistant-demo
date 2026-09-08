@@ -583,6 +583,78 @@ confound it. `NCCL_NET_GDR_LEVEL=PHB` is set by the LUMI AI Guide's
 but anyone copying that block into a multi-node job gets a deterministic hang. That is
 worth fixing in the guide whether or not it is what the reporter hit.
 
+## Rung 3: vLLM at 8 nodes / world 64 (job 21819544)
+
+`openai/gpt-oss-120b`, TP 8 x PP 8 = world 64, the same geometry as the pure-RCCL hang.
+All three variants reached health; **no stall in this allocation**, which at a ~25%
+per-allocation rate is the likely outcome and is therefore weak evidence either way.
+
+| variant | time to `/v1/models` | `pynccl_allreduce` | `graph_capture` | `kv_cache` |
+| --- | --- | --- | --- | --- |
+| `baseline` | **354 s** | 64 s | 186 s | 216 s |
+| `socket_ifname` | **124 s** | 56 s | 71 s | 73 s |
+| `nchannels_8` | **130 s** | 56 s | 76 s | 78 s |
+
+**A 2.9x difference in real startup time**, and the phase timeline says it is *not* in
+communicator setup: `pynccl_allreduce` differs by only 8 s (64 vs 56). The gap opens
+later, in graph capture and memory profiling — 186/216 s for baseline against 71/73 s
+with the interface pinned. Those phases run real collectives, so slower collectives make
+them slower. This is a separate benefit from the setup-time win and a much larger one.
+
+Recorded plainly: this is one allocation per variant, and baseline stall behaviour is
+known to vary by allocation, so the 2.9x should be reproduced before being quoted as a
+number. The direction is consistent with every other measurement of the interface pin.
+
+### vLLM builds three communicators, each logging the reporter's freeze line
+
+```
+(Worker pid=76703) INFO ... [cuda_communicator.py:232] Using ['PYNCCL'] all-reduce ... for group 'tp:0' ...
+(Worker pid=76703) INFO ... [cuda_communicator.py:232] Using ['PYNCCL'] all-reduce ... for group 'pp:0' ...
+(Worker pid=76703) INFO ... [cuda_communicator.py:232] Using ['PYNCCL'] all-reduce ... for group 'ep:0' ...
+```
+
+Three groups — tensor, pipeline and expert parallel — at 64 s, 65 s and 66 s. This
+matters for reading the report: **"frozen on `cuda_communicator.py:266 Using ['PYNCCL']
+all-reduce`" does not say which communicator was being built**, because the line is
+emitted once per group. It also lines up with the pure-RCCL finding that fresh
+communicator creation is where hangs occur: vLLM creates at least three in a row, each
+one an opportunity to hang. (The line is `:232` in this container against `:266` in the
+reporter's, so their vLLM differs in version.)
+
+## Symptom B is almost certainly Lustre, not RCCL (job 21819545)
+
+Raw sequential read of the `Kimi-K2-Instruct-0905` checkpoint on one node, no loader and
+no GPU involved:
+
+| | |
+| --- | --- |
+| Checkpoint size | 1,029,207,342,689 bytes (**1.03 TB**, not 959 GB) |
+| Filesystem | `/pfs/lustrep4`, Lustre |
+| Read | 48.15 GiB in 35.30 s |
+| Throughput | **1.46 GB/s** |
+| **Implied floor for the whole checkpoint** | **703 s (11.7 min)** |
+
+The reporter's second symptom is the weight streamer sitting at `0% Completed` for
+**850+ s**. The floor imposed by Lustre read bandwidth alone is **703 s**. Those are the
+same number to within the precision of this measurement.
+
+Two supporting details:
+
+- The string they quote is literally a tqdm progress bar:
+  `Loading safetensors checkpoint shards:   0% Completed | 0/15`. It shows 0% until the
+  *first shard* finishes, so a long period at 0% is what slow-but-working I/O looks
+  like, not evidence of a hang.
+- The launchers read weights from `/scratch` (Lustre) and never from `/flash` (NVMe) —
+  F9 — and `launch_vllm_multinode_rank.sh:27-28` defaults
+  `RUNAI_STREAMER_CONCURRENCY=1`, which throttles the reads further when the streamer
+  is actually enabled.
+
+**So symptom B is a different problem from symptom A, with a different fix**: stage the
+checkpoint to `/flash`, raise `RUNAI_STREAMER_CONCURRENCY`, and expect ~12 minutes of
+unavoidable read time for a 1 TB checkpoint on this filesystem. Hypotheses 7 and 8 are
+resolved in favour of 8. This also means capping channels never had anything to do with
+symptom B, and the apparent link in the report is coincidence.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -596,7 +668,7 @@ Ordered by prior probability. Every row must resolve.
 | 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | job 21794113 — `cxi_cq_and_sw_match` healthy; job 21794114 — `NCCL_NET=Socket` rescues the hang | **the hang is in the OFI/CXI path**, but CQ size and match mode are not the lever, matching the reporter's null result |
 | 6 | Missing CPU/NUMA/NIC affinity | job 21794113 — `cpu_bind` stalled in the same phase as `baseline` | **no evidence it helps**; likely just another sample of the same race, needs repeats |
 | 7 | Symptom B is the RunAI streamer throttle, not RCCL | rung 7, single node | _pending_ |
-| 8 | Symptom B is Lustre read bandwidth on a 959 GB checkpoint | rung 7 `lustre_read.sh` | _pending_ |
+| 8 | Symptom B is Lustre read bandwidth on the (actually 1.03 TB) checkpoint | job 21819545 — 1.46 GB/s, floor 703 s vs reported 850 s | **CONFIRMED as the explanation for symptom B** |
 | 9 | Per-job MIOpen cache re-pays kernel compilation — a startup cost, not the stall | rungs 4-5 `graph_capture` gap | _pending_ |
 | 10 | Container/plugin version — expected **negative**, since the reporter says every image reproduces | rung 2 `container_older` variant | _pending_ |
 | 11 | RCCL finds no network path for GCDs 1, 3, 7, forcing their traffic through peer GCDs | job 21790359 — 64 warnings per variant, identical across all three | **confirmed present at defaults**; effect on the stall not yet quantified |
@@ -609,6 +681,8 @@ Ordered by prior probability. Every row must resolve.
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
 | 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
+| 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; baseline 354 s vs `socket_ifname` 124 s; 3 communicators (tp/pp/ep) |
+| 21819545 | 7 | 1 | Lustre read floor, Kimi 1.03 TB | 1.46 GB/s -> 703 s floor, matching the reported 850 s |
 | 21818930 | 2 | 8 / 64 | independent single attempt, baseline | ok |
 | 21818931 | 2 | 8 / 64 | independent single attempt, `socket_ifname` | **STALL** — the pin is not a fix |
 | 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | baseline 1/5, `nchannels_16` 1/5, `nchannels_8` 0/5, `net_socket` 0/5 — underpowered |

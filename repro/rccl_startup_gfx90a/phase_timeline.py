@@ -19,9 +19,14 @@ import os
 import re
 from datetime import datetime
 
-# vLLM's own log prefix, e.g. "INFO 09-07 12:34:56 [core.py:123]".
+# vLLM's log prefix. Multi-node vLLM prefixes almost every line with the emitting
+# process -- "(APIServer pid=76144) INFO 09-08 14:00:55 [utils.py:344]" or
+# "(Worker_PP0_TP0 pid=76703) ..." -- so the process tag has to be optional-matched or
+# every timestamp is missed and the whole timeline comes back empty (job 21819544).
 # The year is absent, so timestamps are only ever used for differences.
-LOG_TS = re.compile(r"^\w+\s+(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})")
+LOG_TS = re.compile(
+    r"^(?:\([^)]*\)\s+)?[A-Z]+\s+(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})"
+)
 
 # (phase name, regex, what a long gap before it would mean)
 MARKERS = [
@@ -33,17 +38,17 @@ MARKERS = [
                   r"World size|distributed_init_method",
      "torch.distributed rendezvous over MASTER_ADDR:MASTER_PORT"),
     ("pynccl_allreduce", r"Using \[.*PYNCCL.*\] all-reduce|cuda_communicator",
-     "RCCL communicator setup -- the reporter's 8-node freeze point"),
+     "first RCCL communicator setup -- the reporter's 8-node freeze point"),
     ("weights_start", r"Loading safetensors|Loading weights|Starting to load model|"
                       r"0% Completed",
      "weight loader starting -- the reporter's 2-node freeze point"),
     ("weights_done", r"Model loading took|Loading model weights took|100% Completed",
      "the weight read itself (Lustre bandwidth lands here)"),
-    ("kv_cache", r"Available KV cache memory|GPU KV cache size|Memory profiling",
-     "memory profiling and KV cache sizing"),
     ("graph_capture", r"Capturing CUDA graph|Capturing cudagraphs|torch.compile|"
                       r"Compiling a graph",
      "graph capture / compile (MIOpen kernel cache misses land here)"),
+    ("kv_cache", r"Available KV cache memory|GPU KV cache size|Memory profiling",
+     "memory profiling and KV cache sizing"),
     ("api_ready", r"Application startup complete|Starting vLLM API server|Uvicorn running",
      "API server accepting connections"),
 ]
@@ -83,14 +88,35 @@ def timeline_for(path: str) -> dict:
                         "text": line.strip()[:200],
                     }
 
+    # Every communicator group vLLM sets up, in order, with its own timestamp. This is
+    # the direct link to the report: the reporter froze on this line, and there is one
+    # occurrence per group, so "frozen at cuda_communicator" does not identify which
+    # communicator was being built.
+    comm_groups = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            m = re.search(r"Using \[.*PYNCCL.*\] all-reduce.*?group '([^']+)'", line)
+            if m:
+                ts = parse_ts(line)
+                comm_groups.append({
+                    "group": m.group(1),
+                    "at_seconds": (ts - first_ts).total_seconds()
+                    if ts is not None and first_ts is not None else None,
+                })
+
     ordered = [name for name, _, _ in MARKERS]
     reached = [n for n in ordered if n in hits]
     missing = [n for n in ordered if n not in hits]
 
     # Gaps between consecutive markers that were actually reached. The largest gap is
     # where this rank spent its startup, which is the whole point.
+    # Order by measured time, not by the MARKERS list: vLLM's phase order shifts
+    # between versions, and a stale assumption here produced negative gaps in job
+    # 21819544 (graph_capture actually precedes kv_cache).
+    timed = sorted((n for n in reached if hits[n]["at_seconds"] is not None),
+                   key=lambda n: hits[n]["at_seconds"])
     gaps = []
-    for earlier, later in zip(reached, reached[1:]):
+    for earlier, later in zip(timed, timed[1:]):
         a, b = hits[earlier]["at_seconds"], hits[later]["at_seconds"]
         if a is not None and b is not None:
             gaps.append({"from": earlier, "to": later, "seconds": round(b - a, 1)})
@@ -106,6 +132,7 @@ def timeline_for(path: str) -> dict:
         "largest_gap": max(gaps, key=lambda g: g["seconds"]) if gaps else None,
         # A rank that never reached api_ready is where the job actually hung.
         "stalled_after": reached[-1] if reached and "api_ready" not in hits else None,
+        "comm_groups": comm_groups,
     }
 
 
@@ -162,6 +189,11 @@ def main() -> int:
             print(f"  -> longest phase: {gap['from']} -> {gap['to']} = {gap['seconds']}s")
         if data["stalled_after"]:
             print(f"  -> never became ready; last marker reached was {data['stalled_after']}")
+        if data.get("comm_groups"):
+            groups = ", ".join(
+                f"{g['group']}@{g['at_seconds']:.0f}s" if g["at_seconds"] is not None
+                else g["group"] for g in data["comm_groups"])
+            print(f"  -> communicators built: {groups}")
         if data["missing"]:
             print(f"  -> markers never seen (may be a renamed log string): "
                   f"{', '.join(data['missing'])}")
