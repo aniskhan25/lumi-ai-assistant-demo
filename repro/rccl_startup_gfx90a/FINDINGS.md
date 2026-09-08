@@ -373,6 +373,39 @@ five clean attempts happen by chance 33% of the time (0.8^5). The same applies t
 This is the reason the harness has a `REPEATS` mode at all. A single healthy run of a
 proposed fix, against an intermittent failure, is indistinguishable from no fix.
 
+## Channel-cap dose response, properly powered (job 21811438)
+
+15 attempts per variant, 8 nodes, world size 64:
+
+| variant | attempts | stalled | rate | p(this clean, if the rate were 33%) |
+| --- | --- | --- | --- | --- |
+| `nchannels_16` | 15 | **5** | 33% | - |
+| `nchannels_4` | 15 | **0** | 0% | 0.67^15 = **0.002** |
+
+Two conclusions, one of them a retraction being made final:
+
+- **`NCCL_MAX_NCHANNELS=16` does not fix the stall.** 5 in 15, indistinguishable from
+  baseline. The earlier "capping at 16 is free, so try it first" recommendation is
+  withdrawn for good. Free and ineffective.
+- **`NCCL_MAX_NCHANNELS=4` does fix it**, and this time the statistics support the claim:
+  zero stalls in 15 attempts against a 33% background rate has a 0.2% chance of being
+  luck. But it costs **56%** of training-band bandwidth (job 21791400), which makes it
+  a fix nobody bandwidth-bound would want.
+
+Note that `nchannels_16` at 33% also gives a better estimate of the background rate than
+the pooled `baseline` figure did, and it is consistent with it (25% over 8 attempts).
+
+So the dose response is real but sharp: 16 does nothing, 4 works and is ruinous, and 8 —
+the reporter's own setting, at 20% bandwidth cost — is the interesting middle. Job
+21811437 is measuring it at 15 attempts alongside baseline.
+
+The remaining question worth more than any of these is whether something with **no**
+bandwidth cost works. `NCCL_SOCKET_IFNAME` is not a cap: it was healthy in every
+observation so far and independently cuts first-collective setup time by ~38%. Job
+21812432 puts it and `NCCL_RUNTIME_CONNECT=0` through the same 15-attempt test. If the
+interface pin holds at 0/15, it is strictly better than any channel cap and it is the
+answer to question 2.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -381,7 +414,7 @@ Ordered by prior probability. Every row must resolve.
 | --- | --- | --- | --- |
 | 1 | `NCCL_SOCKET_IFNAME` unset → RCCL bootstrap on a non-HSN interface (**H-A**) | job 21790359 — `init` is 0.76 s with or without the pin | **refuted as stated at 2 nodes**; revised form (interface choice affects data-path connection setup, -33% on `world_first`) still open |
 | 2 | New communicators are where multi-node RCCL fails (**H-B, revised**) | job 21794113 — `baseline` hangs 64/64 in `fresh_world_first` after a healthy first collective | **CONFIRMED as the failure site**, not as a cost: it is an intermittent hang, not a slow burst. Stall rate pending job 21811023 |
-| 3 | Burst cost scales with `channels x ranks` | jobs 21790359, 21790392, 21790393 | **rank scaling refuted**: `world_first` is 14.71/15.71/15.82 s at 16/32/64 ranks — flat. Channel dose-response still pending |
+| 3 | Channel count governs whether the hang happens | job 21811438 | **confirmed, sharply**: cap 16 -> 5/15 stalls, cap 4 -> 0/15. Rank-count scaling separately refuted (`world_first` flat at 14.71/15.71/15.82 s for 16/32/64 ranks) |
 | 4 | `NCCL_NET_GDR_LEVEL` unset degrades the chosen path | rung 2 `gdr_level` variant | _pending_ |
 | 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | job 21794113 — `cxi_cq_and_sw_match` healthy; job 21794114 — `NCCL_NET=Socket` rescues the hang | **the hang is in the OFI/CXI path**, but CQ size and match mode are not the lever, matching the reporter's null result |
 | 6 | Missing CPU/NUMA/NIC affinity | job 21794113 — `cpu_bind` stalled in the same phase as `baseline` | **no evidence it helps**; likely just another sample of the same race, needs repeats |
@@ -401,7 +434,8 @@ Ordered by prior probability. Every row must resolve.
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
 | 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | baseline 1/5, `nchannels_16` 1/5, `nchannels_8` 0/5, `net_socket` 0/5 — underpowered |
 | 21811437 | 2 | 8 / 64 | 15x baseline and `nchannels_8` | _running_ |
-| 21811438 | 2 | 8 / 64 | 15x `nchannels_16` and `nchannels_4` | _running_ |
+| 21811438 | 2 | 8 / 64 | 15x `nchannels_16` and `nchannels_4` | 16 stalls 5/15 (no fix, final); 4 stalls 0/15 (real fix, but -56% bandwidth) |
+| 21812432 | 2 | 8 / 64 | 15x `socket_ifname` and `runtime_connect_off` | _running_ — the zero-cost candidates |
 | 21791400 | 5 | 8 / 64 | bandwidth vs channel cap | cap 16 free, cap 8 costs 20%, cap 4 costs 56% in the training band |
 | 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 
