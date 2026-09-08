@@ -466,6 +466,73 @@ practical consequence is that **absolute rates from a single job are not portabl
 only within-job comparisons and pooled counts should be quoted. It is also a reason the
 reporter's experience may differ run to run and week to week.
 
+## CORRECTION: repeats within a job are not independent, so the p-values above are void
+
+Stall sequences in repeat order (`X` = stalled, `.` = ok, r1 to r15):
+
+| job | variant | sequence | stalls |
+| --- | --- | --- | --- |
+| 21811437 | `baseline` | `...XXXXXXXXXXXX` | 12/15 |
+| 21817829 | `baseline` | `.XX..X.XXXXX..X` | 9/15 |
+| 21811437 | `nchannels_8` | `.X.X.X.X.X.X.X.` | 7/15 |
+| 21817829 | `socket_ifname` | `....X........X.` | 2/15 |
+| 21812432 | `runtime_connect_off` | `....X.XX......X` | 4/15 |
+| 21811438 | `nchannels_16` | `..X...XX..X.X..` | 5/15 |
+
+`baseline` in job 21811437 runs clean three times and then stalls **twelve consecutive
+times** — an absorbing state, not a coin flip. `nchannels_8` alternates almost perfectly.
+Neither is remotely consistent with independent Bernoulli trials.
+
+**Every significance figure quoted earlier in this document is therefore withdrawn**:
+`0.8^5 = 0.33` for the 5-attempt runs, `0.67^15 = 0.002` for `nchannels_4`, and
+`0.53^15 = 6e-5` for `socket_ifname`. All three assumed independence between attempts.
+They do not license any conclusion.
+
+**What this means, in order of importance:**
+
+1. **Attempts within one job share state.** Something persists between attempts that the
+   reaping fix does not clear — either leaked fabric/endpoint resources, or genuine
+   memory in the node set. The absorbing pattern says a node set can enter a mode where
+   it stalls essentially always.
+2. **`socket_ifname`'s advantage is confounded with sequence position after all.** It was
+   0/15 running first (job 21812432) and 2/15 running second (job 21817829). Both may be
+   position effects rather than treatment effects.
+3. **`nchannels_4`'s 0/15 is likewise position-advantaged** — checking the `VARIANTS`
+   array order, `nchannels_4` precedes `nchannels_16`, so it ran first in job 21811438.
+4. **The effect directions still look large and real.** Pooled at 8 nodes: `baseline`
+   21/30, `nchannels_8` 7/15, `socket_ifname` 2/30. Those gaps are big enough that
+   position alone is unlikely to explain them. But "unlikely" is not a measurement, and
+   this document should not contain another number that turns out to rest on a bad
+   assumption.
+
+**The correct design, which has not yet been run:** one variant per job, in first
+position, one attempt per job. Then each sample gets a fresh allocation and fresh node
+state, and samples are genuinely independent. It costs one job per data point, which is
+why it was not the first thing tried — but it is the only design that supports a rate
+with a confidence interval attached.
+
+Until that runs, the defensible statement is qualitative: **at 64 ranks and default
+settings the stall is frequent and can become persistent; pinning `NCCL_SOCKET_IFNAME`
+reduces it markedly; capping channels at 8 reduces it less; and no tested setting has
+been shown to eliminate it.**
+
+### Scale threshold: nothing stalls at 32 ranks (job 21817831)
+
+4 nodes, world size 32, 15 attempts each: `baseline` 0/15 and `socket_ifname` 0/15. With
+the caveat above about independence, 30 consecutive clean attempts at 32 ranks against
+frequent stalls at 64 places the onset between the two. That matches the reporter's
+8-node freeze, and it means reproduction work must be done at 8 nodes.
+
+### The CXI telemetry collection captured nothing
+
+`cxi_counters.sh` produced 480 snapshot files across 240 before/after pairs and **not one
+counter changed**, because `cxi_stat` on LUMI prints device inventory (part numbers, link
+state, MAC/NID) rather than counters, and the sysfs paths the script globs for
+(`*cq*`, `*eq*`, `*pt_te*`, `*retry*`) yield nothing under `/sys/class/cxi/cxi*` at
+depth 3. So hypothesis 5 has no telemetry evidence either way, and the accumulation
+hypothesis above cannot be tested with what is currently collected. The counter source
+needs to be found before that section of the harness is worth running again.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -496,8 +563,8 @@ Ordered by prior probability. Every row must resolve.
 | 21811437 | 2 | 8 / 64 | 15x baseline and `nchannels_8` | baseline 12/15 across five phases; `nchannels_8` 7/15 — a probability reduction, not a fix |
 | 21811438 | 2 | 8 / 64 | 15x `nchannels_16` and `nchannels_4` | 16 stalls 5/15 (no fix, final); 4 stalls 0/15 (real fix, but -56% bandwidth) |
 | 21812432 | 2 | 8 / 64 | 15x `socket_ifname` and `runtime_connect_off` | **`socket_ifname` 0/15**; `runtime_connect_off` 4/15 |
-| 21817829 | 2 | 8 / 64 | baseline then `socket_ifname`, 15x each | _running_ — closes the ordering confound |
-| 21817831 | 2 | 4 / 32 | same at 4 nodes | _running_ |
+| 21817829 | 2 | 8 / 64 | baseline then `socket_ifname`, 15x each | baseline 9/15, `socket_ifname` **2/15** — the pin is not a cure; also revealed non-independence |
+| 21817831 | 2 | 4 / 32 | same at 4 nodes | 0/15 and 0/15 — no stalls at 32 ranks |
 | 21791400 | 5 | 8 / 64 | bandwidth vs channel cap | cap 16 free, cap 8 costs 20%, cap 4 costs 56% in the training band |
 | 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 
@@ -517,13 +584,15 @@ much as theirs, and F3 shows we were already paying for it: our own README needs
 timeouts of 2700-14400 s for multi-node launches, which is this stall, undiagnosed.
 
 **2. Is there a better fix than capping channels?**
-**Yes, and capping channels is not actually a fix.** `NCCL_MAX_NCHANNELS=8` only lowers
-the rate from 80% to 47% (7/15, job 21811437) while costing 20% of training-band
-bandwidth. `NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` gave 0 stalls in 15 attempts, has
-never stalled in ~19 observations across three scales, costs no bandwidth, and cuts
-first-collective setup time by ~38%. Pending the ordering confirmation in job 21817829,
-that is the recommendation, and it replaces the channel cap rather than supplementing
-it.
+**Probably, but not yet demonstrated, and capping channels is not a fix either.**
+Pooled at 8 nodes: `baseline` stalls 21/30, `NCCL_MAX_NCHANNELS=8` 7/15,
+`NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` 2/30. The interface pin looks markedly better
+than the channel cap and costs no bandwidth (it is not a cap) while also cutting
+first-collective setup time ~38%. But repeats within a job are not independent (see the
+correction above), so these are not rates with error bars, and **no setting tested has
+been shown to eliminate the stall** — the pin included, since it stalled 2/15 when run
+second. Honest current advice: prefer the pin over the cap, expect improvement rather
+than a cure, and do not remove long startup timeouts on the strength of it.
 
 **3. What does capping to 8 cost in collective bandwidth?**
 **Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
