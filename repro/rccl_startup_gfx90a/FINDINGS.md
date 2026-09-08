@@ -406,13 +406,73 @@ observation so far and independently cuts first-collective setup time by ~38%. J
 interface pin holds at 0/15, it is strictly better than any channel cap and it is the
 answer to question 2.
 
+## Q1 and Q2, answered: the interface pin is the fix; capping channels only lowers the odds (jobs 21811437, 21812432)
+
+15 attempts per variant, 8 nodes, world size 64. Bandwidth costs from job 21791400.
+
+| variant | stalled | rate | bandwidth cost | phases seen stalling |
+| --- | --- | --- | --- | --- |
+| `baseline` | **12/15** | 80% | - | `world_first`, `world_second`, `tp_like_first`, `pp_like_first`, `fresh_world_first` |
+| `nchannels_8` | **7/15** | 47% | -20% | `fresh_world_first` |
+| `nchannels_16` | 5/15 | 33% | none | `fresh_world_first` |
+| `runtime_connect_off` | 4/15 | 27% | none | `fresh_world_first` |
+| `nchannels_4` | 0/15 | 0% | **-56%** | - |
+| **`socket_ifname`** | **0/15** | **0%** | **none** | - |
+
+### The reporter's workaround is not a fix
+
+`NCCL_MAX_NCHANNELS=8` leaves 7 stalls in 15. It lowers the failure rate from 80% to
+47% and costs 20% of training-band bandwidth to do it. That is consistent with the
+report — they say they "keep hitting" the stall, not that it always happens — and it
+explains why capping felt like a cure: at 47% a few good runs in a row are unremarkable.
+It also means the earlier `nchannels_8` result of 0/5 was exactly the luck it was
+flagged as being.
+
+### `baseline` stalls in five different phases
+
+`world_first`, `world_second`, `tp_like_first`, `pp_like_first` and `fresh_world_first`
+all appear across the 12 stalled attempts. This is the reported symptom reproduced
+literally: the stall is not tied to one phase, and clearing one phase does not prevent a
+stall in a later one. Note this includes `world_second`, a warm collective — so the
+failure can strike a communicator that has already carried traffic successfully, not
+only a fresh one. That is broader than the original H-B and it is what makes the symptom
+look so erratic from the outside.
+
+### `NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` never stalled
+
+Zero stalls in 15 attempts, against a 47% rate for `nchannels_8` measured in the same
+week and an 80% rate for `baseline`. Against 47%, a clean sweep of 15 has probability
+0.53^15 = 6e-5. Pooled across the whole investigation — jobs 21790359 (2 nodes),
+21790392 (4), 21790393 (8), 21794113 (8, run immediately after a 64-rank baseline
+stall), and 21812432 (15 attempts) — it is roughly **19 clean observations and zero
+stalls**, at three scales.
+
+It also costs nothing: it is not a cap, so the bandwidth curve does not apply, and it
+independently *reduces* first-collective setup time by ~38% (15.7 s to 9.8 s).
+
+**One confound, being closed.** In job 21812432 `socket_ifname` ran first and
+`runtime_connect_off` second, so the winner was also the least exposed to any residual
+state. Its clean record in job 21794113 — where it ran straight after a 64/64 baseline
+stall — argues against an ordering artefact, but jobs 21817829 (8 nodes) and 21817831
+(4 nodes) settle it properly by running 15 baseline attempts first and then asking
+`socket_ifname` to stay clean on those same nodes.
+
+### The stall rate itself varies between jobs
+
+`baseline` at 64 ranks has measured 0/1, 1/1, 0/1, 1/5 and 12/15 across jobs — roughly
+25% earlier and 80% here. The ordering of variants has been consistent throughout, so
+the likely cause is the node set or concurrent fabric load rather than the harness. The
+practical consequence is that **absolute rates from a single job are not portable**;
+only within-job comparisons and pooled counts should be quoted. It is also a reason the
+reporter's experience may differ run to run and week to week.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
 
 | # | Hypothesis | Decided by | Status |
 | --- | --- | --- | --- |
-| 1 | `NCCL_SOCKET_IFNAME` unset → RCCL bootstrap on a non-HSN interface (**H-A**) | job 21790359 — `init` is 0.76 s with or without the pin | **refuted as stated at 2 nodes**; revised form (interface choice affects data-path connection setup, -33% on `world_first`) still open |
+| 1 | `NCCL_SOCKET_IFNAME` unset → RCCL uses the wrong interfaces (**H-A, revised**) | jobs 21790359, 21811437, 21812432 | **CONFIRMED in its revised form**: not a slow bootstrap (`init` is 0.76 s either way) but wrong data-path interface selection. Pinning it fixes the stall (0/15) and cuts setup 38% |
 | 2 | New communicators are where multi-node RCCL fails (**H-B, revised**) | job 21794113 — `baseline` hangs 64/64 in `fresh_world_first` after a healthy first collective | **CONFIRMED as the failure site**, not as a cost: it is an intermittent hang, not a slow burst. Stall rate pending job 21811023 |
 | 3 | Channel count governs whether the hang happens | job 21811438 | **confirmed, sharply**: cap 16 -> 5/15 stalls, cap 4 -> 0/15. Rank-count scaling separately refuted (`world_first` flat at 14.71/15.71/15.82 s for 16/32/64 ranks) |
 | 4 | `NCCL_NET_GDR_LEVEL` unset degrades the chosen path | rung 2 `gdr_level` variant | _pending_ |
@@ -433,9 +493,11 @@ Ordered by prior probability. Every row must resolve.
 | 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
 | 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | baseline 1/5, `nchannels_16` 1/5, `nchannels_8` 0/5, `net_socket` 0/5 — underpowered |
-| 21811437 | 2 | 8 / 64 | 15x baseline and `nchannels_8` | _running_ |
+| 21811437 | 2 | 8 / 64 | 15x baseline and `nchannels_8` | baseline 12/15 across five phases; `nchannels_8` 7/15 — a probability reduction, not a fix |
 | 21811438 | 2 | 8 / 64 | 15x `nchannels_16` and `nchannels_4` | 16 stalls 5/15 (no fix, final); 4 stalls 0/15 (real fix, but -56% bandwidth) |
-| 21812432 | 2 | 8 / 64 | 15x `socket_ifname` and `runtime_connect_off` | _running_ — the zero-cost candidates |
+| 21812432 | 2 | 8 / 64 | 15x `socket_ifname` and `runtime_connect_off` | **`socket_ifname` 0/15**; `runtime_connect_off` 4/15 |
+| 21817829 | 2 | 8 / 64 | baseline then `socket_ifname`, 15x each | _running_ — closes the ordering confound |
+| 21817831 | 2 | 4 / 32 | same at 4 nodes | _running_ |
 | 21791400 | 5 | 8 / 64 | bandwidth vs channel cap | cap 16 free, cap 8 costs 20%, cap 4 costs 56% in the training band |
 | 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 
@@ -445,15 +507,23 @@ Each answer must cite the job ids that support it. Left blank deliberately until
 exist.
 
 **1. Known LUMI behaviour, or their misconfiguration?**
-_pending._ The rule for deciding: if this repo — which carries no comms tuning at all
-(F1, F2) — stalls at defaults, it is platform default behaviour and not the reporter's
-mistake. If `socket_ifname` or `cpu_bind` alone removes the stall, it is a configuration
-gap, and F5 says it is one **we and the guide's own multi-node lesson share**, so it
-should be reported as ours too rather than pinned on them. F3 is part of the honest
-answer either way.
+**Both, and the honest answer names our share of it.** It is default-configuration
+behaviour on LUMI: this repo sets no comms variable anywhere (F1), the bindings module
+sets none (F2), and at those defaults `baseline` stalls 12 times in 15 at 64 ranks
+(job 21811437). Nothing they did caused it. But it is *also* a configuration gap that is
+fixable from the user side, and the missing setting — `NCCL_SOCKET_IFNAME` — is absent
+from this repo and from the guide's multi-node lesson alike (F5). So it is our gap as
+much as theirs, and F3 shows we were already paying for it: our own README needs startup
+timeouts of 2700-14400 s for multi-node launches, which is this stall, undiagnosed.
 
 **2. Is there a better fix than capping channels?**
-_pending._
+**Yes, and capping channels is not actually a fix.** `NCCL_MAX_NCHANNELS=8` only lowers
+the rate from 80% to 47% (7/15, job 21811437) while costing 20% of training-band
+bandwidth. `NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` gave 0 stalls in 15 attempts, has
+never stalled in ~19 observations across three scales, costs no bandwidth, and cuts
+first-collective setup time by ~38%. Pending the ordering confirmation in job 21817829,
+that is the recommendation, and it replaces the channel cap rather than supplementing
+it.
 
 **3. What does capping to 8 cost in collective bandwidth?**
 **Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
