@@ -13,13 +13,14 @@
 # Shipping an unjustified NCCL variable is how cargo-cult tuning starts, and the whole
 # point of the reporter's fourth question is that no measured baseline exists yet.
 
-# --- measured, and worth setting -----------------------------------------------------
-# Cuts first-collective setup time from ~15.7 s to ~9.8 s (about 38%) consistently at
-# 16, 32 and 64 ranks. It is not a channel cap, so it costs no collective bandwidth.
-# It does NOT prevent the multi-node startup hang: job 21818931 stalled on its first
-# attempt with this set. Set it for the setup-time win, not as a fix.
-#   justified by: jobs 21790359, 21790392, 21790393, 21811437    cost: none measured
-export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
+# --- nothing here earns a positive recommendation yet --------------------------------
+# NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3 was recommended three times during this
+# investigation and refuted three times. Measured against independent single-variant
+# allocations it changes nothing: world_first 15.75 s vs baseline 15.73 s (jobs 21818931,
+# 21818930), vLLM startup 287/123 s vs 290/123 s cold/warm (jobs 21822748, 21822747), and
+# it stalled 1 of 2 fresh allocations. Every earlier apparent win was position in the job
+# or cache warming. It is left unset rather than cargo-culted.
+#   refuted by: jobs 21818930, 21818931, 21822747, 21822748
 
 # --- DO NOT SET -----------------------------------------------------------------------
 # NCCL_NET_GDR_LEVEL=PHB hangs the first cross-node collective on every rank,
@@ -55,6 +56,17 @@ export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 # so the next person does not have to rediscover that they do not help.
 # export FI_CXI_DEFAULT_CQ_SIZE=131072
 # export FI_CXI_RX_MATCH_MODE=software
+
+# --- not a comms setting, but the one measured win ------------------------------------
+# ~167 s of every cold 8-node vLLM launch is one-time MIOpen kernel compilation plus
+# first-touch of the weights on Lustre (290 s cold vs 123 s warm, both variants, jobs
+# 21822747/21822748). A persistent per-user MIOpen cache avoids re-paying the
+# compilation half of that. This repo's launchers use a per-job mktemp -d instead, which
+# guarantees paying it every launch. /tmp is node-local, so this only helps when Slurm
+# reuses nodes.
+#   justified by: jobs 21822747, 21822748    cost: none
+export MIOPEN_CUSTOM_CACHE_DIR="/tmp/miopen-cache-${USER}"
+export MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
 
 # --- diagnostics (off by default) -----------------------------------------------------
 # NCCL_DEBUG=INFO makes every rank write a log; at 64 ranks that measurably changes the

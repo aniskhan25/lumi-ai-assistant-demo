@@ -569,7 +569,7 @@ cure for the stall, and it should not be presented as one.
 | 2 | Nothing stalls at 32 ranks | **solid** — 2 independent + 30 repeat attempts, zero stalls |
 | 3 | `NCCL_NET_GDR_LEVEL=PHB` hangs all ranks deterministically at 4 **and** 8 nodes | **solid, and the strongest causal claim here** — at 4 nodes the background rate is zero, yet this stalls 32/32, first-stall position in its job |
 | 4 | Channel-cap bandwidth cost: 20% at 8, 56% at 4, none at 16, all at large messages | **solid** — an independent measurement, unaffected by the stall statistics |
-| 5 | `NCCL_SOCKET_IFNAME` cuts first-collective setup ~38% | **solid** — consistent across 3 scales and many jobs |
+| 5 | ~~`NCCL_SOCKET_IFNAME` cuts first-collective setup ~38%~~ | **RETRACTED** — position artefact; 15.75 s vs baseline 15.73 s in independent single-variant jobs |
 | 6 | Attempts within one job share state (absorbing and alternating stall sequences) | **solid, and it invalidated our own statistics** |
 | 7 | RCCL finds no network path for GCDs 1, 3, 7 in every configuration | **solid**, mechanism unquantified |
 | 8 | Any *fix* for the stall | **not established** |
@@ -655,13 +655,78 @@ unavoidable read time for a 1 TB checkpoint on this filesystem. Hypotheses 7 and
 resolved in favour of 8. This also means capping channels never had anything to do with
 symptom B, and the apparent link in the report is coincidence.
 
+## RETRACTION 2: the interface pin has no demonstrated benefit at all (jobs 21822747, 21822748, 21818930, 21818931, 21812432)
+
+The 2.9x vLLM startup win reported from job 21819544 was cache warming. Running each
+variant alone, three times, in its own allocation:
+
+| repeat | `baseline` (job 21822747) | `socket_ifname` (job 21822748) |
+| --- | --- | --- |
+| 1 (cold) | 290 s | 287 s |
+| 2 | 123 s | 123 s |
+| 3 | 121 s (DIED) | 139 s |
+
+Identical curves. The pin makes no difference to vLLM startup, cold or warm. What job
+21819544 actually measured was **position in the job**: `baseline` ran first and paid
+cold MIOpen kernel compilation and cold Lustre page cache; the two variants after it
+inherited warm caches.
+
+The same artefact accounts for the earlier "~38% faster first collective" claim. From
+the independent single-variant jobs, each running one variant alone in first position:
+
+| job | variant | `world_first` |
+| --- | --- | --- |
+| 21818930 | `baseline` | **15.73 s** |
+| 21818931 | `socket_ifname` | **15.75 s** |
+
+Indistinguishable. And within job 21812432, where `socket_ifname` ran first for 15
+attempts: r1 = 16.81 s, r2-r15 = 9.17-9.26 s. The first attempt in *any* allocation costs
+~15-17 s and every later attempt ~9.2 s, regardless of which variable is set.
+
+**`NCCL_SOCKET_IFNAME` therefore has no demonstrated benefit on any axis measured here:**
+
+| claimed benefit | status |
+| --- | --- |
+| prevents the stall | **refuted** — stalled 1 of 2 fresh allocations (job 21818931) |
+| ~38% faster first collective | **refuted** — 15.75 s vs baseline's 15.73 s cold |
+| 2.9x faster vLLM startup | **refuted** — 287 s vs 290 s cold, 123 s vs 123 s warm |
+
+It was recommended in this document three times on three different grounds, and all
+three were position or warming artefacts. It has been removed from `env_baseline.sh`.
+The lesson is specific and worth keeping: on this system, **any comparison between
+variants run sequentially in one allocation is worthless**, because the first run pays
+one-time costs (MIOpen compilation, Lustre cache population, and whatever RCCL caches
+between communicators) that later runs do not. Only one-variant-per-allocation
+comparisons mean anything.
+
+## A real finding from the same data: the cold-start penalty
+
+Both variants, independently, in two separate allocations:
+
+| | cold (first run in the allocation) | warm (later runs) | penalty |
+| --- | --- | --- | --- |
+| RCCL first collective | ~15.7 s | ~9.2 s | 1.7x |
+| vLLM time to `/v1/models` (8 nodes, gpt-oss-120b) | ~290 s | ~123 s | **2.4x, about 167 s** |
+
+This is reproduced across variants and jobs, which is exactly what the interface-pin
+claims were not. It is also actionable: roughly **167 seconds of every cold 8-node vLLM
+launch is one-time cost** — MIOpen kernel compilation and first-touch of the weights on
+Lustre — not model loading or communication.
+
+The LUMI AI Guide's persistent per-user MIOpen cache (`MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen-cache-$USER`)
+is the right idea for this, and this repo's launchers do **not** use it: they set a
+per-job `mktemp -d` (F10), which guarantees paying compilation every launch. The caveat
+is that `/tmp` is node-local, so the cache only helps when Slurm reuses the same nodes.
+Persisting it on shared storage instead would need testing for lock contention before
+being recommended.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
 
 | # | Hypothesis | Decided by | Status |
 | --- | --- | --- | --- |
-| 1 | `NCCL_SOCKET_IFNAME` unset → RCCL uses the wrong interfaces (**H-A, revised**) | jobs 21790359, 21811437, 21812432 | **CONFIRMED in its revised form**: not a slow bootstrap (`init` is 0.76 s either way) but wrong data-path interface selection. Pinning it fixes the stall (0/15) and cuts setup 38% |
+| 1 | `NCCL_SOCKET_IFNAME` unset → RCCL uses the wrong interfaces (**H-A**) | jobs 21818930, 21818931, 21822747, 21822748 | **REFUTED entirely**: no effect on the stall, on setup time, or on vLLM startup. Every apparent benefit was position or cache warming |
 | 2 | New communicators are where multi-node RCCL fails (**H-B, revised**) | job 21794113 — `baseline` hangs 64/64 in `fresh_world_first` after a healthy first collective | **CONFIRMED as the failure site**, not as a cost: it is an intermittent hang, not a slow burst. Stall rate pending job 21811023 |
 | 3 | Channel count governs whether the hang happens | job 21811438 | **confirmed, sharply**: cap 16 -> 5/15 stalls, cap 4 -> 0/15. Rank-count scaling separately refuted (`world_first` flat at 14.71/15.71/15.82 s for 16/32/64 ranks) |
 | 4 | `NCCL_NET_GDR_LEVEL` unset degrades the chosen path | rung 2 `gdr_level` variant | _pending_ |
@@ -681,7 +746,9 @@ Ordered by prior probability. Every row must resolve.
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
 | 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
-| 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; baseline 354 s vs `socket_ifname` 124 s; 3 communicators (tp/pp/ep) |
+| 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
+| 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
+| 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |
 | 21819545 | 7 | 1 | Lustre read floor, Kimi 1.03 TB | 1.46 GB/s -> 703 s floor, matching the reported 850 s |
 | 21818930 | 2 | 8 / 64 | independent single attempt, baseline | ok |
 | 21818931 | 2 | 8 / 64 | independent single attempt, `socket_ifname` | **STALL** — the pin is not a fix |
@@ -710,16 +777,19 @@ much as theirs, and F3 shows we were already paying for it: our own README needs
 timeouts of 2700-14400 s for multi-node launches, which is this stall, undiagnosed.
 
 **2. Is there a better fix than capping channels?**
-**Not found. And capping channels is not a fix either.** On independent samples nothing
-tested prevents the stall: `socket_ifname` stalled 1 of 2 fresh allocations,
-`nchannels_8` leaves 7/15 within a job, `nchannels_16` 5/15. The apparent winners in
-the repeat runs were position artefacts. Two things are still worth setting on their own
-merits — `NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` for a ~38% cut in first-collective
-setup time at no bandwidth cost, and *not* setting `NCCL_NET_GDR_LEVEL` — but neither is
-a cure. Practical advice for the reporter: keep the generous startup timeouts, keep
-`NCCL_MAX_NCHANNELS=8` only if they measure it helping their own workload and can afford
-20% on bandwidth-bound jobs, and treat the underlying hang as an open platform issue
-rather than a configuration mistake on their side.
+**No fix was found, and capping channels is not one either.** On independent samples
+nothing tested prevents the stall. `NCCL_SOCKET_IFNAME` was recommended here three times
+and refuted three times — it has no effect on the stall, on setup time, or on vLLM
+startup. `NCCL_MAX_NCHANNELS=8` still leaves 7/15 stalls within a job and costs 20% of
+training-band bandwidth. The one clear negative recommendation stands: **do not set
+`NCCL_NET_GDR_LEVEL=PHB`**, which hangs deterministically at 4 and 8 nodes.
+
+Practical advice for the reporter: keep the generous startup timeouts, keep
+`NCCL_MAX_NCHANNELS=8` only if they can measure it helping their own workload and can
+afford 20% on bandwidth-bound jobs, and treat the hang as an open platform issue rather
+than a configuration mistake on their side. Their `NCCL_NET=Socket` observation is
+consistent with everything measured here and remains the only thing that reliably
+avoided a hang in our tests too — at a throughput cost they have already rejected.
 
 **3. What does capping to 8 cost in collective bandwidth?**
 **Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
@@ -736,9 +806,15 @@ finding a different fix — which is what makes question 2 worth pursuing rather
 settling for the workaround.
 
 **4. Recommended `NCCL_*` / `FI_CXI_*` baseline?**
-_pending_ — `env_baseline.sh`. F6 means there is no existing measured baseline to point
-at, so this investigation has to produce one. Every line must carry a job id and a
-stated cost before it is uncommented.
+**A short and mostly negative one**, in `env_baseline.sh`. Nothing measured here earns a
+place as a positive recommendation: the only candidate that looked promising
+(`NCCL_SOCKET_IFNAME`) was refuted. What the baseline can say with evidence is what
+*not* to set — `NCCL_NET_GDR_LEVEL=PHB` hangs multi-node jobs deterministically — and
+that the `FI_CXI_*` knobs the reporter tried are indeed inert here. Outside the comms
+variables, the persistent MIOpen cache is worth adopting for a measured ~167 s per cold
+launch. A genuinely tuned RCCL baseline for LUMI does not exist yet and this
+investigation did not produce one; saying so is more useful than shipping settings whose
+apparent benefits were artefacts.
 
 ## Corrections to the original report
 

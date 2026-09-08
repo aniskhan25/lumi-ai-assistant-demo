@@ -16,6 +16,7 @@
 #
 #   sbatch repro/rccl_startup_gfx90a/run_vllm_startup.sh                       # 2 nodes, 3 variants
 #   MODE=sweep sbatch --nodes=4 repro/rccl_startup_gfx90a/run_vllm_startup.sh
+#   REPEATS=3 VARIANTS_ONLY="baseline" sbatch ...   # real effect, or cache warming?
 #   MODEL=moonshotai/Kimi-K2-Instruct-0905 PP_SIZE=4 \
 #     EXTRA_VLLM_ARGS="--trust-remote-code --quantization fp8 --kv-cache-dtype fp8 \
 #     --max-model-len 16384 --max-num-seqs 32 --max-num-batched-tokens 8192 \
@@ -42,6 +43,12 @@ DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 LOAD_FORMAT="${LOAD_FORMAT:-}"
 LOAD_FORMAT_DEFAULT="${LOAD_FORMAT}"
 VARIANTS_ONLY="${VARIANTS_ONLY:-}"
+# Repeat each variant. Decisive for telling a real effect from cache warming: MIOpen
+# keeps a persistent per-user kernel cache in /tmp and Lustre caches the weight reads,
+# so whichever variant runs FIRST in a job pays costs the later ones do not. Job
+# 21819544 showed graph_capture at 186 s for the first variant and 71/76 s for the next
+# two, which is exactly that shape.
+REPEATS="${REPEATS:-1}"
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching}"
 
 # name | extra env (space separated KEY=VAL, or -)
@@ -132,13 +139,6 @@ for row in "${VARIANTS[@]}"; do
   echo
   echo "============ variant ${name} ============"
 
-  # Fresh port per variant so a torn-down rendezvous cannot be reused by the next one.
-  export MASTER_PORT="$(( 20000 + (SLURM_JOB_ID % 10000) + RANDOM % 1000 ))"
-  # Per-variant log directory, so timelines cannot be attributed to the wrong variant.
-  VARIANT_LOGS="${RUNTIME_DIR}/${name}"
-  mkdir -p "${VARIANT_LOGS}"
-  export LOG_SUBDIR="${name}"
-
   unset NCCL_SOCKET_IFNAME NCCL_NET_GDR_LEVEL NCCL_RUNTIME_CONNECT NCCL_MAX_NCHANNELS \
         NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
         FI_CXI_DEFAULT_CQ_SIZE FI_CXI_RX_MATCH_MODE
@@ -152,6 +152,18 @@ for row in "${VARIANTS[@]}"; do
   export NCCL_DEBUG=WARN
   echo "env: ${var_env}"
   echo "load format: ${LOAD_FORMAT:-<vllm default>}"
+
+  for rep in $(seq 1 "${REPEATS}"); do
+  if [ "${REPEATS}" -gt 1 ]; then
+    run_name="${name}-r${rep}"
+    echo "--- repeat ${rep}/${REPEATS} ---"
+  else
+    run_name="${name}"
+  fi
+  VARIANT_LOGS="${RUNTIME_DIR}/${run_name}"
+  mkdir -p "${VARIANT_LOGS}"
+  export LOG_SUBDIR="${run_name}"
+  export MASTER_PORT="$(( 20000 + (SLURM_JOB_ID % 10000) + RANDOM % 1000 ))"
 
   srun --ntasks="${NNODES}" --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL \
     singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
@@ -192,11 +204,12 @@ for row in "${VARIANTS[@]}"; do
 
   srun --ntasks=1 --ntasks-per-node=1 singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
     python3 /work/repro/rccl_startup_gfx90a/phase_timeline.py \
-    --logs "/runtime/${name}/vllm_server_rank*.log" \
-    --variant "${name}" \
+    --logs "/runtime/${run_name}/vllm_server_rank*.log" \
+    --variant "${run_name}" \
     --results-dir "${RESULTS_DIR}" \
     --startup-seconds "${STARTUP_SECONDS}" \
     --verdict "${VERDICT}" || true
+  done
 done
 
 echo
