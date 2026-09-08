@@ -13,13 +13,21 @@
 # Shipping an unjustified NCCL variable is how cargo-cult tuning starts, and the whole
 # point of the reporter's fourth question is that no measured baseline exists yet.
 
-# --- established by the LUMI AI Guide -------------------------------------------------
-# Set in 5-experiment-tracking/run_*.sh. Notably NOT set in 3-multi-gpu-and-node/,
-# which is where multi-node RCCL actually needs them -- that gap is what hypothesis 1
-# is about. A LUMI node exposes nmn0, net1-3 and bond0 alongside the four Slingshot
-# NICs, so with this unset RCCL picks its bootstrap interface by autodetection.
+# --- measured, and worth setting -----------------------------------------------------
+# Cuts first-collective setup time from ~15.7 s to ~9.8 s (about 38%) consistently at
+# 16, 32 and 64 ranks. It is not a channel cap, so it costs no collective bandwidth.
+# It does NOT prevent the multi-node startup hang: job 21818931 stalled on its first
+# attempt with this set. Set it for the setup-time win, not as a fix.
+#   justified by: jobs 21790359, 21790392, 21790393, 21811437    cost: none measured
 export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
-export NCCL_NET_GDR_LEVEL=PHB
+
+# --- DO NOT SET -----------------------------------------------------------------------
+# NCCL_NET_GDR_LEVEL=PHB hangs the first cross-node collective on every rank,
+# deterministically, at 4 nodes (32/32) and 8 nodes (64/64) -- jobs 21790392, 21790393,
+# 21794114. At 4 nodes the background stall rate is zero, so this is unambiguous.
+# The LUMI AI Guide sets it in 5-experiment-tracking/run_*.sh, which are single-node
+# jobs where it is harmless; do not carry that line into a multi-node script.
+# export NCCL_NET_GDR_LEVEL=PHB   # <-- deliberately left unset
 
 # --- candidates, pending measurement --------------------------------------------------
 # Uncomment only with a job id and a measured cost recorded in FINDINGS.md.

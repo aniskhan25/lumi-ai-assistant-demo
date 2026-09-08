@@ -533,6 +533,56 @@ depth 3. So hypothesis 5 has no telemetry evidence either way, and the accumulat
 hypothesis above cannot be tested with what is currently collected. The counter source
 needs to be found before that section of the harness is worth running again.
 
+## FINAL on the fix question: nothing tested prevents the stall (independent samples)
+
+The first attempt executed in a job runs on a freshly allocated node set with nothing
+before it to have left state behind, so **one such sample per job is independent**.
+Mining every job in this investigation gives, at 8 nodes / world 64:
+
+| variant | independent first attempts | stalled |
+| --- | --- | --- |
+| `baseline` | 8 | **2 (25%)** |
+| `socket_ifname` | 2 | **1** |
+| `nchannels_4` | 1 | 0 |
+
+At 4 nodes / world 32, `baseline` first attempts: 0 stalls in 2 jobs (plus 0/15 and
+0/15 in repeats).
+
+**`NCCL_SOCKET_IFNAME` does not prevent the stall.** Job 21818931 stalled on its first
+attempt on a fresh allocation. Its earlier record — 0/15 running first in job 21812432,
+2/15 running second in 21817829, ~19 apparently clean observations — was position and
+accumulated state, not a treatment effect. **The Q2 recommendation drafted from that is
+withdrawn.**
+
+On independent samples, no setting tested in this investigation has been shown to
+prevent the stall, and the sample sizes (8, 2, 1) are too small to rank any of them.
+What the interface pin *does* have is a robust, separately measured benefit: it cuts
+first-collective setup time from ~15.7 s to ~9.8 s (~38%) consistently across every job
+and all three scales. That is a real improvement and a reason to set it. It is not a
+cure for the stall, and it should not be presented as one.
+
+### What is actually established
+
+| # | Finding | Strength |
+| --- | --- | --- |
+| 1 | At 64 ranks and stock defaults, RCCL startup hangs indefinitely on ~25% of fresh allocations (2/8 independent samples), in varied phases including warm collectives | **solid** — reproduced across 8 jobs and several days |
+| 2 | Nothing stalls at 32 ranks | **solid** — 2 independent + 30 repeat attempts, zero stalls |
+| 3 | `NCCL_NET_GDR_LEVEL=PHB` hangs all ranks deterministically at 4 **and** 8 nodes | **solid, and the strongest causal claim here** — at 4 nodes the background rate is zero, yet this stalls 32/32, first-stall position in its job |
+| 4 | Channel-cap bandwidth cost: 20% at 8, 56% at 4, none at 16, all at large messages | **solid** — an independent measurement, unaffected by the stall statistics |
+| 5 | `NCCL_SOCKET_IFNAME` cuts first-collective setup ~38% | **solid** — consistent across 3 scales and many jobs |
+| 6 | Attempts within one job share state (absorbing and alternating stall sequences) | **solid, and it invalidated our own statistics** |
+| 7 | RCCL finds no network path for GCDs 1, 3, 7 in every configuration | **solid**, mechanism unquantified |
+| 8 | Any *fix* for the stall | **not established** |
+
+### Why finding 3 is worth reporting regardless of the reporter's case
+
+At 4 nodes the background stall rate is zero across 32 attempts, so `gdr_level` stalling
+32/32 there is unambiguous — no accumulated state, no position effect, no race to
+confound it. `NCCL_NET_GDR_LEVEL=PHB` is set by the LUMI AI Guide's
+`5-experiment-tracking/run_*.sh`. Those lessons are single-node, where it is harmless,
+but anyone copying that block into a multi-node job gets a deterministic hang. That is
+worth fixing in the guide whether or not it is what the reporter hit.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -559,6 +609,8 @@ Ordered by prior probability. Every row must resolve.
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
 | 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
+| 21818930 | 2 | 8 / 64 | independent single attempt, baseline | ok |
+| 21818931 | 2 | 8 / 64 | independent single attempt, `socket_ifname` | **STALL** — the pin is not a fix |
 | 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | baseline 1/5, `nchannels_16` 1/5, `nchannels_8` 0/5, `net_socket` 0/5 — underpowered |
 | 21811437 | 2 | 8 / 64 | 15x baseline and `nchannels_8` | baseline 12/15 across five phases; `nchannels_8` 7/15 — a probability reduction, not a fix |
 | 21811438 | 2 | 8 / 64 | 15x `nchannels_16` and `nchannels_4` | 16 stalls 5/15 (no fix, final); 4 stalls 0/15 (real fix, but -56% bandwidth) |
@@ -584,15 +636,16 @@ much as theirs, and F3 shows we were already paying for it: our own README needs
 timeouts of 2700-14400 s for multi-node launches, which is this stall, undiagnosed.
 
 **2. Is there a better fix than capping channels?**
-**Probably, but not yet demonstrated, and capping channels is not a fix either.**
-Pooled at 8 nodes: `baseline` stalls 21/30, `NCCL_MAX_NCHANNELS=8` 7/15,
-`NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` 2/30. The interface pin looks markedly better
-than the channel cap and costs no bandwidth (it is not a cap) while also cutting
-first-collective setup time ~38%. But repeats within a job are not independent (see the
-correction above), so these are not rates with error bars, and **no setting tested has
-been shown to eliminate the stall** — the pin included, since it stalled 2/15 when run
-second. Honest current advice: prefer the pin over the cap, expect improvement rather
-than a cure, and do not remove long startup timeouts on the strength of it.
+**Not found. And capping channels is not a fix either.** On independent samples nothing
+tested prevents the stall: `socket_ifname` stalled 1 of 2 fresh allocations,
+`nchannels_8` leaves 7/15 within a job, `nchannels_16` 5/15. The apparent winners in
+the repeat runs were position artefacts. Two things are still worth setting on their own
+merits — `NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` for a ~38% cut in first-collective
+setup time at no bandwidth cost, and *not* setting `NCCL_NET_GDR_LEVEL` — but neither is
+a cure. Practical advice for the reporter: keep the generous startup timeouts, keep
+`NCCL_MAX_NCHANNELS=8` only if they measure it helping their own workload and can afford
+20% on bandwidth-bound jobs, and treat the underlying hang as an open platform issue
+rather than a configuration mistake on their side.
 
 **3. What does capping to 8 cost in collective bandwidth?**
 **Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
