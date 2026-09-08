@@ -258,6 +258,91 @@ Three things follow, and the second is the useful one:
    Cassini per node, i.e. ~100 GB/s. Measured 87.6 GB/s. Close to the per-node NIC
    ceiling without exceeding it, so the numbers can be trusted.
 
+## REPRODUCED: the reporter's stall, at defaults, in pure RCCL (job 21794113)
+
+8 nodes, world size 64 — the reporter's own geometry. `baseline` means no `NCCL_*` or
+`FI_CXI_*` variable set at all, which per F1/F2 is exactly what this repo and the
+platform give you.
+
+| variant | init | world_first | fresh_world_first | status |
+| --- | --- | --- | --- | --- |
+| `baseline` | 0.82 | 15.20 | **150.00** | **STALL 64/64 in `fresh_world_first`** |
+| `socket_ifname` | 0.74 | 9.87 | 1.56 | ok |
+| `runtime_connect_off` | 0.73 | 9.92 | 1.55 | ok |
+| `nchannels_8` | 0.76 | 9.72 | 1.33 | ok |
+| `nchannels_4` | 1.30 | 9.83 | 1.22 | ok |
+| `nchannels_16` | 0.70 | 9.82 | 1.55 | ok |
+| `nchannels_per_peer` | 0.72 | 9.88 | **150.00** | **STALL 64/64 in `fresh_world_first`** |
+| `cxi_cq_and_sw_match` | 1.23 | 10.43 | 1.60 | ok |
+| `proto_simple` | 5.03 | 14.22 | 1.56 | ok |
+| `cpu_bind` | 0.76 | 9.89 | **150.00** | **STALL 64/64 in `fresh_world_first`** |
+| `net_socket` | 0.73 | 9.62 | 1.25 | ok |
+
+**Why this table is valid**, unlike the one retracted above:
+
+- **The positive control passed.** `net_socket` completed in 9.62 s. That was the
+  stated pass condition, written before the run.
+- **`baseline` stalled as the first variant in the job**, so nothing preceded it that
+  could have contaminated it.
+- **Recovery after every stall.** `socket_ifname` was healthy immediately after
+  baseline's 64-rank stall, and six more variants were healthy after it. Contamination
+  can only *cause* stalls, never cure them, so repeated recovery is positive evidence
+  that the reaping fix works.
+
+**What is reproduced.** At 64 ranks, with no tuning, RCCL hangs indefinitely when a
+**second communicator** is created and first used — `fresh_world_first` — having already
+completed the first collective successfully in 15.20 s. This is the reporter's symptom
+stated precisely: getting through one stage does not prevent a stall at a later one,
+because each new communicator is a fresh opportunity to hang.
+
+**It is intermittent.** The same `baseline` at the same 64 ranks was healthy in job
+21790393 (1.56 s) and in job 21794114 (1.55 s), and stalled in 21794113. Three
+observations, one stall. That is why the reporter sees different runs freeze at
+different stages, and it is why a single run — in either direction — proves nothing.
+Job 21811023 repeats `baseline`, `nchannels_16`, `nchannels_8` and `net_socket` five
+times each to get an actual stall rate.
+
+`nchannels_per_peer` and `cpu_bind` also stalled in the same phase. Given the
+intermittency those may be nothing more than further samples of the same race, and must
+not be read as effects of their settings without repeats.
+
+## Q2 PARTIALLY ANSWERED: capping channels rescues an OFI/CXI setup hang; eager connect does not (job 21794114)
+
+Combination rows, run after the GDR hang was established. These deliberately move more
+than one variable, to ask which remedy rescues a *known* hang.
+
+| variant | world_first | status |
+| --- | --- | --- |
+| `baseline` | 14.77 | ok |
+| `gdr_level` (`NCCL_NET_GDR_LEVEL=PHB`) | **150.00** | **STALL 64/64** |
+| `gdr_cap` (+ `NCCL_MAX_NCHANNELS=8`) | 9.71 | **ok — rescued** |
+| `gdr_runtime_connect` (+ `NCCL_RUNTIME_CONNECT=0`) | **150.00** | **STALL 64/64** |
+| `gdr_ifname` (+ `NCCL_SOCKET_IFNAME=hsn0-3`) | **150.00** | **STALL 64/64** |
+| `gdr_socket_net` (+ `NCCL_NET=Socket`) | 9.52 | **ok — rescued** |
+
+Three things this establishes:
+
+1. **`NCCL_MAX_NCHANNELS=8` rescues a hang that nothing else does.** Eager connect and
+   the interface pin both fail to. This is a mechanism for *why the reporter's
+   workaround works* rather than a guess: fewer channels means fewer concurrent
+   connection setups, and the hang is in connection setup.
+2. **`NCCL_NET=Socket` also rescues it**, which places the hang in the OFI/CXI path
+   specifically — consistent with the reporter's own observation that `NCCL_NET=Socket`
+   avoids their stall, and with `FI_CXI_*` tuning doing nothing.
+3. **`gdr_cap` was healthy immediately after `gdr_level` stalled 64/64** on the same
+   nodes, which independently confirms the reaping fix.
+
+## The canary is unreliable and is now off by default
+
+The between-variant canary added after the retraction reported "node set contaminated"
+after **every** variant in both jobs 21794113 and 21794114 — including after `baseline`
+runs that had just completed healthily, and after the healthy `net_socket` control. A
+check that fails on known-good runs is worse than no check: taken at face value it
+would have discarded the valid table above. It is disabled by default
+(`CANARY=1` re-enables, `CANARY_LOG=<path>` captures its own error output) and its
+verdicts must not be used until diagnosed. Validity is instead argued from the positive
+control and from recovery-after-stall, both of which come from the measurement itself.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -265,11 +350,11 @@ Ordered by prior probability. Every row must resolve.
 | # | Hypothesis | Decided by | Status |
 | --- | --- | --- | --- |
 | 1 | `NCCL_SOCKET_IFNAME` unset → RCCL bootstrap on a non-HSN interface (**H-A**) | job 21790359 — `init` is 0.76 s with or without the pin | **refuted as stated at 2 nodes**; revised form (interface choice affects data-path connection setup, -33% on `world_first`) still open |
-| 2 | RCCL lazy connection setup makes each new communicator pay a fresh burst (**H-B**) | job 21790359 (clean); 8-node evidence retracted as contaminated | **strong form not supported**; setup is mostly one-time, per-comm increment ~1.3 s. Needs a clean re-run at 64 ranks |
+| 2 | New communicators are where multi-node RCCL fails (**H-B, revised**) | job 21794113 — `baseline` hangs 64/64 in `fresh_world_first` after a healthy first collective | **CONFIRMED as the failure site**, not as a cost: it is an intermittent hang, not a slow burst. Stall rate pending job 21811023 |
 | 3 | Burst cost scales with `channels x ranks` | jobs 21790359, 21790392, 21790393 | **rank scaling refuted**: `world_first` is 14.71/15.71/15.82 s at 16/32/64 ranks — flat. Channel dose-response still pending |
 | 4 | `NCCL_NET_GDR_LEVEL` unset degrades the chosen path | rung 2 `gdr_level` variant | _pending_ |
-| 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | `cxi_cq_and_sw_match` rows retracted as contaminated | _pending a clean re-run_ |
-| 6 | Missing CPU/NUMA/NIC affinity | `cpu_bind` was healthy at 4 nodes but ran post-contamination; 8-node row retracted | _pending a clean re-run_ |
+| 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | job 21794113 — `cxi_cq_and_sw_match` healthy; job 21794114 — `NCCL_NET=Socket` rescues the hang | **the hang is in the OFI/CXI path**, but CQ size and match mode are not the lever, matching the reporter's null result |
+| 6 | Missing CPU/NUMA/NIC affinity | job 21794113 — `cpu_bind` stalled in the same phase as `baseline` | **no evidence it helps**; likely just another sample of the same race, needs repeats |
 | 7 | Symptom B is the RunAI streamer throttle, not RCCL | rung 7, single node | _pending_ |
 | 8 | Symptom B is Lustre read bandwidth on a 959 GB checkpoint | rung 7 `lustre_read.sh` | _pending_ |
 | 9 | Per-job MIOpen cache re-pays kernel compilation — a startup cost, not the stall | rungs 4-5 `graph_capture` gap | _pending_ |
@@ -282,6 +367,9 @@ Ordered by prior probability. Every row must resolve.
 | --- | --- | --- | --- | --- |
 | 21790359 | 1 | 2 / 16 | baseline, `socket_ifname`, `nchannels_8` | all FAST, no stall; cost concentrated in `world_first` |
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
+| 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
+| 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
+| 21811023 | 2 | 8 / 64 | 5x repeats of baseline and caps | _running_ |
 | 21791400 | 5 | 8 / 64 | bandwidth vs channel cap | cap 16 free, cap 8 costs 20%, cap 4 costs 56% in the training band |
 | 21790393 | 2 | 8 / 64 | full variant table | **mostly invalid**: positive control `net_socket` stalled. Valid: baseline healthy, `socket_ifname` healthy, `gdr_level` STALL 64/64. Rest retracted |
 

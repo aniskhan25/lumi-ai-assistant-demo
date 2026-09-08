@@ -44,8 +44,10 @@ MANY_COMMS="${MANY_COMMS:-0}"
 # jobs 21790392/21790393 hit different variants at different scales, which is the
 # signature of a race rather than a setting. One run cannot tell those apart.
 REPEATS="${REPEATS:-1}"
-# Set CANARY=0 to skip the between-variant health check (faster, less safe).
-CANARY="${CANARY:-1}"
+# CANARY=1 re-enables the between-variant health check. It currently reports false
+# positives (see FINDINGS.md, job 21794113) so it is off; set CANARY_LOG=<path> to
+# capture its own error output when diagnosing it.
+CANARY="${CANARY:-0}"
 VARIANTS_ONLY="${VARIANTS_ONLY:-}"
 
 # See https://docs.lumi-supercomputer.eu/runjobs/scheduled-jobs/distribution-binding/#gpu-binding
@@ -211,7 +213,7 @@ for row in "${VARIANTS[@]}"; do
     # Canary: a plain baseline run must stay healthy between variants. If it does not,
     # the node set is contaminated and every later row is suspect -- say so in the log
     # rather than emitting numbers that look like measurements.
-    if [ "${CANARY:-1}" = "1" ] && [ "${run_name}" != "canary" ]; then
+    if [ "${CANARY}" = "1" ] && [ "${run_name}" != "canary" ]; then
       srun --kill-on-bad-exit=0 --ntasks="${SLURM_NPROCS}" \
         singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
         bash -c 'RANK=$SLURM_PROCID LOCAL_RANK=$SLURM_LOCALID \
@@ -224,7 +226,7 @@ t = torch.ones(1024, device=\"cuda:0\")
 dist.all_reduce(t)
 torch.cuda.synchronize()
 dist.destroy_process_group()
-"' >/dev/null 2>&1 \
+"' >"${CANARY_LOG:-/dev/null}" 2>&1 \
         && echo "  canary after ${run_name}: OK" \
         || echo "  canary after ${run_name}: FAILED -- node set contaminated, later rows are NOT valid"
       srun --overlap --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
