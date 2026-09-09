@@ -774,6 +774,79 @@ plus 8 communicators hangs 4 times in 5, at a quarter of the GPU cost of the 8-n
 Every candidate mitigation should now be tested against that rather than against a 25%
 background rate.
 
+## Q2 ANSWERED: `FI_MR_CACHE_MONITOR=userfaultfd` stops the hang (jobs 21838111, 21838114)
+
+Tested against the reliable reproducer found in job 21837919 — 4 nodes, world 32, 8
+communicators — where baseline hangs 4/5 and 5/5. 5 attempts per variant.
+
+| variant | stalled | position in job | bandwidth cost |
+| --- | --- | --- | --- |
+| `baseline` | **4/5**, **5/5** | 1st | - |
+| `cxi_no_host_register` (`FI_CXI_DISABLE_HOST_REGISTER=1`) | 3/5 | 2nd | - |
+| `runtime_connect_off` (`NCCL_RUNTIME_CONNECT=0`) | 3/5 | 2nd | none |
+| **`mr_cache_monitor` (`FI_MR_CACHE_MONITOR=userfaultfd`)** | **0/5** | 3rd | measuring (job 21838863) |
+| **`cxi_both` (monitor + host-register)** | **0/5** | 4th | measuring |
+| **`nchannels_8`** | **0/5** | 3rd | **-20%** |
+| **`nchannels_4`** | **0/5** | 4th | **-56%** |
+
+**Why this is a treatment effect and not another position artefact.** Two independent
+checks, both of which the earlier false findings failed:
+
+1. **The clean variants ran later**, which is the *disadvantaged* position — leaked state
+   accumulates through a job and can only cause hangs, never cure them. Every earlier
+   retracted "fix" had the opposite arrangement.
+2. **The pattern is a step change, not a gradient**: 4/5, 3/5, 0/5, 0/5. Cache warming
+   produces a smooth improvement with position; this drops to zero exactly at the two
+   variants containing `FI_MR_CACHE_MONITOR`, and the same step appears independently in
+   the second job at the two channel-cap rows.
+
+**Support's diagnosis is confirmed, including which variable matters.** LUMI support
+identified `FI_MR_CACHE_MONITOR=userfaultfd` as the crucial setting with the rest of
+HPE's list optional. `FI_CXI_DISABLE_HOST_REGISTER=1` on its own leaves 3/5, so the
+monitor is doing the work. Provenance: Samuel Antao (AMD), "Extreme Scale AI", Move your
+AI to LUMI, June 2026.
+
+**And it is better than the reporter's workaround.** `NCCL_MAX_NCHANNELS=8` also reaches
+0/5 against this reproducer, but costs 20% of training-band bandwidth (job 21791400).
+The monitor is a memory-registration setting rather than a channel cap, so it should cost
+nothing; job 21838863 measures that directly against the 87.6 GB/s uncapped baseline
+rather than leaving it to be asked about.
+
+Note `NCCL_MAX_NCHANNELS=8` reaching 0/5 here against 7/15 at 8 nodes with ~4
+communicators is consistent with everything else: the cap reduces per-communicator
+resource use, so its effectiveness depends on how far over the threshold the workload is.
+It mitigates; the monitor appears to remove the failure.
+
+## CORRECTION: symptom B is the same bug, not a filesystem problem
+
+Earlier revisions concluded the weight streamer sitting at `0% Completed` for 850+ s was
+Lustre read bandwidth, on the basis of a measured 1.46 GB/s single-node read implying a
+703 s floor for the 1.03 TB checkpoint. **That inference was wrong.**
+
+LUMI support reproduced the symptom and observed RCCL communication stuck *after* the
+`Loading safetensors using Runai Model Streamer: 0% Completed | 0/69` line, and found
+that disabling the distributed model loader
+(`--model-loader-extra-config '{"distributed":false, "concurrency":1}'`) avoids it. They
+also report normal load time of ~90 s, which for 1.03 TB implies ~11 GB/s aggregate —
+consistent with several nodes reading in parallel at ~1.4 GB/s each.
+
+The measurement was sound; it was applied to the wrong configuration. A single-node floor
+says nothing about a job whose loader reads in parallel across nodes, so 703 s was never
+the expected time and the 850 s was not filesystem-bound.
+
+**This unifies the picture rather than complicating it.** The distributed loader creates
+its own communicator, so symptom B is another instance of the communicator-count hang:
+
+| symptom | where it hangs | same bug? |
+| --- | --- | --- |
+| A: frozen at `cuda_communicator` "Using ['PYNCCL'] all-reduce" | one of the TP/PP/EP communicators | yes |
+| B: frozen at `0% Completed` | the distributed weight loader's communicator | yes |
+
+Support's second fix — disabling the distributed loader — works by *removing
+communicators*, which is independent confirmation of the root variable found in job
+21837919. Their fix and our finding are the same phenomenon approached from two
+directions.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -787,7 +860,7 @@ Ordered by prior probability. Every row must resolve.
 | 5 | CXI endpoint/resource exhaustion during setup, not CQ depth | job 21794113 — `cxi_cq_and_sw_match` healthy; job 21794114 — `NCCL_NET=Socket` rescues the hang | **the hang is in the OFI/CXI path**, but CQ size and match mode are not the lever, matching the reporter's null result |
 | 6 | Missing CPU/NUMA/NIC affinity | job 21794113 — `cpu_bind` stalled in the same phase as `baseline` | **no evidence it helps**; likely just another sample of the same race, needs repeats |
 | 7 | Symptom B is the RunAI streamer throttle, not RCCL | rung 7, single node | _pending_ |
-| 8 | Symptom B is Lustre read bandwidth on the (actually 1.03 TB) checkpoint | job 21819545 — 1.46 GB/s, floor 703 s vs reported 850 s | **CONFIRMED as the explanation for symptom B** |
+| 8 | Symptom B is Lustre read bandwidth | job 21819545 measured 1.46 GB/s single-node | **RETRACTED** — single-node floor misapplied to a job that reads in parallel; support observed RCCL stuck after the streamer line, and disabling the distributed loader avoids it. Symptom B is the communicator hang |
 | 9 | Per-job MIOpen cache re-pays kernel compilation — a startup cost, not the stall | rungs 4-5 `graph_capture` gap | _pending_ |
 | 10 | Container/plugin version — expected **negative**, since the reporter says every image reproduces | rung 2 `container_older` variant | _pending_ |
 | 11 | RCCL finds no network path for GCDs 1, 3, 7, forcing their traffic through peer GCDs | job 21790359 — 64 warnings per variant, identical across all three | **confirmed present at defaults**; effect on the stall not yet quantified |
@@ -803,6 +876,8 @@ Ordered by prior probability. Every row must resolve.
 | 21837499 | 2 | 1 / 8 | GDR at single node | `gdr_level` 0/3 — harmless intra-node |
 | 21837500 | 2 | 2 / 16 | GDR at two nodes | `gdr_level` 3/3 — deterministic from 2 nodes |
 | 21837919 | 2 | 4 / 32 | baseline + 8 communicators | **4/5 stalled** — communicator count is the driver, not rank count |
+| 21838111 | 2 | 4 / 32 | recipes#30 mitigations vs the reproducer | **`FI_MR_CACHE_MONITOR=userfaultfd` 0/5**; host-register alone 3/5; baseline 4/5 |
+| 21838114 | 2 | 4 / 32 | caps vs the reproducer | `nchannels_8` 0/5, `nchannels_4` 0/5, `runtime_connect_off` 3/5, baseline 5/5 |
 | 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
 | 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
 | 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |
@@ -834,19 +909,20 @@ much as theirs, and F3 shows we were already paying for it: our own README needs
 timeouts of 2700-14400 s for multi-node launches, which is this stall, undiagnosed.
 
 **2. Is there a better fix than capping channels?**
-**No fix was found, and capping channels is not one either.** On independent samples
-nothing tested prevents the stall. `NCCL_SOCKET_IFNAME` was recommended here three times
-and refuted three times — it has no effect on the stall, on setup time, or on vLLM
-startup. `NCCL_MAX_NCHANNELS=8` still leaves 7/15 stalls within a job and costs 20% of
-training-band bandwidth. The one clear negative recommendation stands: **do not set
-`NCCL_NET_GDR_LEVEL=PHB`**, which hangs deterministically at 4 and 8 nodes.
+**Yes: `FI_MR_CACHE_MONITOR=userfaultfd`.** 0 stalls in 5 attempts against a reproducer
+where baseline hangs 4/5 and 5/5, from the disadvantaged position in the job
+(job 21838111). It is a memory-registration setting rather than a channel cap, so it does
+not pay the 20% training-band bandwidth cost that `NCCL_MAX_NCHANNELS=8` does — job
+21838863 measures that. Identified by LUMI support, originating with Samuel Antao (AMD),
+"Extreme Scale AI", June 2026; also named in `laifs-container-recipes#30`.
 
-Practical advice for the reporter: keep the generous startup timeouts, keep
-`NCCL_MAX_NCHANNELS=8` only if they can measure it helping their own workload and can
-afford 20% on bandwidth-bound jobs, and treat the hang as an open platform issue rather
-than a configuration mistake on their side. Their `NCCL_NET=Socket` observation is
-consistent with everything measured here and remains the only thing that reliably
-avoided a hang in our tests too — at a throughput cost they have already rejected.
+Two caveats worth passing on. It is a **workaround for an open RCCL/libfabric bug**
+(recipes#44), not a root-cause fix. And 5 attempts against a high baseline rate is
+strong but not extensive — a rate this good deserves confirmation at 8 nodes and with
+the real vLLM workload before long startup timeouts are removed on the strength of it.
+
+Also still true: **do not set `NCCL_NET_GDR_LEVEL=PHB`**, which hangs every rank
+deterministically from 2 nodes upward.
 
 **3. What does capping to 8 cost in collective bandwidth?**
 **Answered** (job 21791400, 8 nodes / world 64). About **20%** of bus bandwidth in the
