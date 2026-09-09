@@ -914,6 +914,76 @@ the underlying defect is in RCCL or libfabric/CXI. Keep generous startup timeout
 it is closed, and do not let the issue be closed on the strength of an environment
 variable.
 
+## ROOT CAUSE NAMED: libfabric's `memhooks` MR-cache monitor (job 21844179)
+
+Each monitor set explicitly against the reliable reproducer — 4 nodes, world 32, 8
+communicators — 5 attempts each. Execution order was baseline, userfaultfd, kdreg2,
+memhooks, disabled.
+
+| `FI_MR_CACHE_MONITOR` | stalled | position | how it detects remapping |
+| --- | --- | --- | --- |
+| unset (**baseline**) | **3/5** | 1st | whatever libfabric picks |
+| `userfaultfd` | **0/5** | 2nd | Linux kernel userfaultfd notification |
+| `kdreg2` | **0/5** | 3rd | HPE loadable kernel module |
+| **`memhooks`** | **4/5** | 4th | **intercepts malloc/free/mmap in userspace** |
+| `disabled` | **0/5** | 5th | no MR caching at all |
+
+**`memhooks` reproduces the baseline failure and is therefore what libfabric defaults to
+here.** Every alternative is clean. This corrects the previous revision of this document,
+which inferred kdreg2 was the defaulted monitor and the culprit — from the facts that
+libfabric's help says "userfaultfd is the default if available" and `/dev/kdreg2` exists
+on these nodes. kdreg2 is clean. The inference was wrong; the behavioural test settled
+it where log-grepping had failed (job 21843529 timed out with no monitor lines).
+
+### The mechanism, now well supported
+
+`memhooks` is the only tested monitor that works by **intercepting userspace allocator
+calls**. `userfaultfd` and `kdreg2` both observe mappings at the kernel level, and
+`disabled` removes the cache entirely. All three avoid the hang; only the interception
+approach fails.
+
+So: ROCm/HIP memory operations are not reliably visible to allocator interception. A
+registration cached for a buffer whose mapping has since changed is never invalidated,
+the subsequent RDMA targets a stale registration, and the transfer silently never
+completes — no error, no timeout, which is exactly what recipes#44 reports after leaving
+a job blocked for an hour.
+
+`disabled` being clean confirms the **MR cache itself** is the mechanism rather than
+something incidental to monitor choice.
+
+This accounts for every observation in this investigation:
+
+| observation | explained |
+| --- | --- |
+| Hangs silently; PyTorch's own timeout never fires | an RDMA that never completes, not an error path |
+| Probability rises with communicator count | each communicator registers new buffers, so more registration churn |
+| `NCCL_NET=Socket` avoids it | no libfabric memory registration at all |
+| Channel caps help partially | fewer buffers registered per communicator |
+| `FI_CXI_DEFAULT_CQ_SIZE` / `RX_MATCH_MODE` do nothing | completion queues and message matching, wrong layer |
+| HPE's other ten variables are inert | none of them touches the MR cache monitor |
+
+### Not a fabric or infrastructure limitation
+
+The hardware is fine: uncapped all_reduce reaches 88.1 GB/s against the ~100 GB/s implied
+by four 200 Gb/s Cassini NICs per node, and the Socket transport works. This is a
+software defect in the interaction between libfabric's `memhooks` monitor and ROCm memory
+management, and it has three separate zero-cost escapes — which is not what a limitation
+looks like.
+
+**Owner:** libfabric (memhooks monitor), or ROCm's allocator, or the default-selection
+logic that lands on memhooks when libfabric's own documentation says userfaultfd should
+be preferred when available. That last point is worth raising on its own: userfaultfd is
+compiled into this container's libfabric, so why it is not selected is a question for the
+container or provider maintainers.
+
+### Two viable fixes, not one
+
+`FI_MR_CACHE_MONITOR=userfaultfd` (0/18 pooled) and `FI_MR_CACHE_MONITOR=kdreg2` (0/5)
+both work. kdreg2 is HPE's purpose-built kernel module and may carry less overhead than
+userfaultfd's page-fault path; neither was measured for registration-path cost here, only
+for collective bandwidth, where userfaultfd is free. Worth comparing before standardising
+on one.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -948,6 +1018,8 @@ Ordered by prior probability. Every row must resolve.
 | 21838863 | 5 | 8 / 64 | bandwidth with the monitor set | 88.1 GB/s vs 87.6 without — the fix is free |
 | 21838977 | 2 | 4 / 32 | HPE full set vs monitor alone | monitor 0/5, full set 0/5, **set minus monitor 4/5** — the other ten are inert |
 | 21838978 | 2 | 8 / 64 | confirmation, 8 attempts | baseline **8/8**, monitor **0/8** |
+| 21843529 | - | 2 / 16 | log-probe for monitor selection | **failed** — timed out, no monitor lines logged |
+| 21844179 | 2 | 4 / 32 | each MR monitor set explicitly | **`memhooks` 4/5 = the default and the culprit**; userfaultfd, kdreg2, disabled all 0/5 |
 | 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
 | 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
 | 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |

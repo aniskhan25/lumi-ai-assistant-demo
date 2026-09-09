@@ -27,6 +27,15 @@
 # This is a WORKAROUND for an open RCCL/libfabric bug (laifs-container-recipes#44), not
 # a root-cause fix. Keep generous startup timeouts until that is closed.
 #   justified by: jobs 21838111, 21838977, 21838978, 21838863    cost: none measured
+#
+# Root cause (job 21844179): libfabric defaults to the `memhooks` monitor here, which
+# detects remapping by intercepting userspace allocator calls and does not reliably see
+# ROCm memory operations -- so a stale registration is never invalidated and the RDMA
+# silently never completes. Setting memhooks explicitly reproduces the hang 4/5; every
+# kernel-level alternative is clean:
+#     userfaultfd  0/5      kdreg2  0/5      disabled  0/5      memhooks  4/5
+# kdreg2 (HPE's kernel module) is an equally valid fix and may cost less than
+# userfaultfd's page-fault path; not compared for registration overhead here.
 export FI_MR_CACHE_MONITOR=userfaultfd
 
 # --- HPE also recommends these; they are inert for this failure ----------------------
