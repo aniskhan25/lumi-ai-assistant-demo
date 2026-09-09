@@ -1016,6 +1016,53 @@ allocator, or in the selection logic that prefers memhooks despite libfabric doc
 userfaultfd as the default when available). Not tested at 16 nodes, which the issue also
 reports.
 
+## WHY it lands on memhooks: userfaultfd is blocked by kernel policy on LUMI
+
+Checked directly on LUMI:
+
+| check | result |
+| --- | --- |
+| `/proc/sys/vm/unprivileged_userfaultfd` | **0** (host and inside the container) |
+| `syscall(userfaultfd, O_CLOEXEC)` as our user, in the container | **EPERM — "Operation not permitted"** |
+| host kernel | `6.4.0-150600.23.73_15.0.14-cray_shasta_c` |
+| `/dev/kdreg2` | present |
+
+libfabric's own `fi_info -e` text: *"Userfaultfd is the default if available on the
+system."* It is **not** available — LUMI sets `vm.unprivileged_userfaultfd = 0`, which
+blocks unprivileged use of the syscall. That is deliberate kernel hardening (userfaultfd
+has featured in exploit primitives), not a misconfiguration. So libfabric's availability
+check fails and it falls back to `memhooks`, which is broken against ROCm memory.
+
+**That is the complete chain**, and it also corrects the question posed to the maintainers
+in the comment drafted earlier: it is not "why doesn't libfabric pick userfaultfd" — it
+cannot. The right question is that userfaultfd is unusable here by policy and memhooks is
+unsafe with ROCm, so the correct default on LUMI is `kdreg2`, whose device node is
+present.
+
+### Consequence: `FI_MR_CACHE_MONITOR=userfaultfd` is not doing what its name says
+
+If the syscall returns EPERM, requesting userfaultfd cannot engage userfaultfd. libfabric
+emits no warning at default log level, so it fails silently and ends up with no working
+monitor — i.e. **MR caching effectively disabled**. That explains why `userfaultfd` and
+`disabled` measured identically (both 0/5) and why both stop the hang.
+
+So the workaround works, but by removing the cache rather than by monitoring it
+correctly. Two things follow:
+
+1. **It may give up MR-cache benefit.** Our phase timings cannot detect this — all five
+   monitor settings were within noise (`world_first` ~9.5 s, `many_comms` ~12.2 s) —
+   because the probe allocates one payload buffer and reuses it, so the cache is never
+   exercised. A registration-heavy workload could pay a cost this investigation did not
+   measure.
+2. **`kdreg2` is the better recommendation.** It is a real, working monitor (device node
+   present, HPE's purpose-built kernel module), it measured 0/5 against the reproducer,
+   and it should preserve caching rather than silently drop it. Job 21846... confirms it
+   at 8 nodes with 8 attempts before this is stated as advice.
+
+This is worth a follow-up on recipes#44: the effective fix people are being given is
+"disable the MR cache by asking for a monitor that cannot load", which works but is not
+what anyone intends, and `kdreg2` looks like the answer that keeps the cache.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
