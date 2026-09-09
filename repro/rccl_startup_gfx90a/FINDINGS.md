@@ -739,6 +739,41 @@ indefinitely; it only bites when someone scales out. Note `baseline` was clean a
 2 nodes across 3 attempts here too, consistent with the intermittent hang needing more
 ranks (or more communicators) than world 16.
 
+## ROOT VARIABLE FOUND: communicator count, not rank count (job 21837919)
+
+4 nodes, world size 32, `baseline` with no env tuning, 5 attempts, with the probe's
+`many_comms` phase creating **8 additional communicators** and using each once:
+
+| configuration | scale | attempts | stalled | phase |
+| --- | --- | --- | --- | --- |
+| ~4 communicators (earlier runs) | 4 nodes / 32 | 32 | **0** | - |
+| **8 extra communicators** | 4 nodes / 32 | 5 | **4** | `many_comms` |
+
+Same scale, same settings, same nodes — only the number of communicators changed, and
+the hang went from never to 4 times in 5.
+
+**This retracts the "onset is between 32 and 64 ranks" claim** made earlier in this
+document. There is no rank threshold. The 4-node runs looked clean because the probe
+built about four communicators; the 8-node runs hung because vLLM-like geometry plus the
+probe's own groups pushed the count higher. Rank count was a proxy the whole time.
+
+It also reconciles exactly with `laifs-container-recipes#44`, which reports 13 of 17
+attempts hanging at **4 nodes** with a loop of eight `new_group()` calls — a result that
+directly contradicted our 4-node null until the group count was matched. Their
+reproducer was better than ours in precisely the way that mattered, which is the second
+concrete cost of not having checked the tracker first.
+
+**Practical consequence for the reporter.** The exposure scales with how many
+communicators the workload builds, not how many nodes it uses. vLLM with tensor,
+pipeline and expert parallel builds at least three at startup (plus the world group);
+DeepSpeed and Megatron build more. So a 2-node job with many groups can be at more risk
+than an 8-node job with few — which fits the report of stalls at both 2 and 8 nodes.
+
+This also gives the investigation a **reliable reproducer** for the first time: 4 nodes
+plus 8 communicators hangs 4 times in 5, at a quarter of the GPU cost of the 8-node runs.
+Every candidate mitigation should now be tested against that rather than against a 25%
+background rate.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -765,6 +800,9 @@ Ordered by prior probability. Every row must resolve.
 | 21790392 | 2 | 4 / 32 | full variant table | Valid: baseline and `socket_ifname` healthy, `gdr_level` STALL 32/32. Rows after the first stall retracted |
 | 21794113 | 2 | 8 / 64 | clean re-run, control passed | **reproduced the reporter's stall at defaults**: `baseline` 64/64 in `fresh_world_first` |
 | 21794114 | 2 | 8 / 64 | GDR rescue combos | `NCCL_MAX_NCHANNELS=8` and `NCCL_NET=Socket` rescue it; eager connect and interface pin do not |
+| 21837499 | 2 | 1 / 8 | GDR at single node | `gdr_level` 0/3 — harmless intra-node |
+| 21837500 | 2 | 2 / 16 | GDR at two nodes | `gdr_level` 3/3 — deterministic from 2 nodes |
+| 21837919 | 2 | 4 / 32 | baseline + 8 communicators | **4/5 stalled** — communicator count is the driver, not rank count |
 | 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
 | 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
 | 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |
