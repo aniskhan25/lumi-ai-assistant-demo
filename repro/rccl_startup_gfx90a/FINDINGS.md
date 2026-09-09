@@ -721,6 +721,24 @@ is that `/tmp` is node-local, so the cache only helps when Slurm reuses the same
 Persisting it on shared storage instead would need testing for lock contention before
 being recommended.
 
+## GDR hang threshold: harmless at 1 node, deterministic from 2 (jobs 21837499, 21837500)
+
+3 attempts per variant:
+
+| scale | world | `baseline` | `gdr_level` | `guide_pair` |
+| --- | --- | --- | --- | --- |
+| 1 node | 8 | 0/3 | **0/3** | **0/3** |
+| 2 nodes | 16 | 0/3 | **3/3** | **3/3** |
+
+With 4 nodes (32/32) and 8 nodes (64/64) already established, the picture is complete:
+`NCCL_NET_GDR_LEVEL=PHB` is harmless while all traffic is intra-node and hangs every rank
+deterministically as soon as any collective crosses a node boundary — from 2 nodes up.
+
+This is why the setting survives in circulation. A single-node script carries it safely
+indefinitely; it only bites when someone scales out. Note `baseline` was clean at
+2 nodes across 3 attempts here too, consistent with the intermittent hang needing more
+ranks (or more communicators) than world 16.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
