@@ -26,6 +26,7 @@
 #   VARIANTS_ONLY="baseline socket_ifname" sbatch ...                 # pick rows
 #   MANY_COMMS=8 sbatch ...                                           # communicator-count scaling
 #   MODE=upstream sbatch ...                                          # mitigations from recipes#30
+#   MODE=hpe sbatch ...                                               # HPE's recommended set
 #
 # The task layout (8 tasks/node, 7 cpus/task, --mem-per-gpu=60G) and the CPU bind mask
 # below are the LUMI AI Guide's, so the probe measures the configuration the guide
@@ -85,6 +86,21 @@ UPSTREAM=(
   "cxi_both|FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd|"
 )
 
+# The full set HPE recommends for RCCL workloads, as relayed by LUMI support, whose
+# origin is Samuel Antao's "Extreme Scale AI" talk (Move your AI to LUMI, June 2026).
+# Support identifies FI_MR_CACHE_MONITOR=userfaultfd as the crucial one and says the rest
+# are recommended but optional -- so both are measured, the single variable and the whole
+# set, to see whether the remainder buys anything.
+HPE_FULL="HSA_FORCE_FINE_GRAIN_PCIE=1 FI_MR_CACHE_MONITOR=userfaultfd \
+FI_CXI_DISABLE_HOST_REGISTER=1 FI_CXI_DEFAULT_CQ_SIZE=131072 \
+FI_CXI_RDZV_PROTO=alt_read FI_CXI_RDZV_EAGER_SIZE=0 FI_CXI_RDZV_THRESHOLD=0 \
+FI_CXI_RDZV_GET_MIN=0 FI_CXI_DEFAULT_TX_SIZE=2048 NCCL_CROSS_NIC=1 \
+FI_CXI_RX_MATCH_MODE=hybrid"
+HPE=(
+  "hpe_full|${HPE_FULL}|"
+  "hpe_minus_monitor|HSA_FORCE_FINE_GRAIN_PCIE=1 FI_CXI_DISABLE_HOST_REGISTER=1 FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_RDZV_PROTO=alt_read FI_CXI_RDZV_EAGER_SIZE=0 FI_CXI_RDZV_THRESHOLD=0 FI_CXI_RDZV_GET_MIN=0 FI_CXI_DEFAULT_TX_SIZE=2048 NCCL_CROSS_NIC=1 FI_CXI_RX_MATCH_MODE=hybrid|"
+)
+
 COMBOS=(
   "gdr_cap|NCCL_NET_GDR_LEVEL=PHB NCCL_MAX_NCHANNELS=8|"
   "gdr_runtime_connect|NCCL_NET_GDR_LEVEL=PHB NCCL_RUNTIME_CONNECT=0|"
@@ -93,6 +109,7 @@ COMBOS=(
 )
 VARIANTS+=("${COMBOS[@]}")
 VARIANTS+=("${UPSTREAM[@]}")
+VARIANTS+=("${HPE[@]}")
 
 # Rung 1 is the cheapest decisive cut: does it reproduce, does pinning the interface
 # alone fix it, and does the reported workaround fix it.
@@ -104,6 +121,8 @@ DEBUG_SET="baseline socket_ifname gdr_level"
 COMBO_SET="baseline gdr_level gdr_cap gdr_runtime_connect gdr_ifname gdr_socket_net"
 # The upstream-suggested mitigations, against a plain baseline.
 UPSTREAM_SET="baseline cxi_no_host_register mr_cache_monitor cxi_both"
+# hpe_minus_monitor isolates whether the crucial variable really is the monitor.
+HPE_SET="baseline mr_cache_monitor hpe_full hpe_minus_monitor"
 
 case "${MODE}" in
   probe) SELECTED="${RUNG1}" ;;
@@ -111,7 +130,8 @@ case "${MODE}" in
   debug) SELECTED="${DEBUG_SET}" ;;
   combos) SELECTED="${COMBO_SET}" ;;
   upstream) SELECTED="${UPSTREAM_SET}" ;;
-  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug, combos or upstream)" >&2; exit 2 ;;
+  hpe) SELECTED="${HPE_SET}" ;;
+  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug, combos, upstream or hpe)" >&2; exit 2 ;;
 esac
 [ -n "${VARIANTS_ONLY}" ] && SELECTED="${VARIANTS_ONLY}"
 
@@ -180,7 +200,9 @@ for row in "${VARIANTS[@]}"; do
   unset NCCL_SOCKET_IFNAME NCCL_NET_GDR_LEVEL NCCL_RUNTIME_CONNECT NCCL_MAX_NCHANNELS \
         NCCL_MIN_NCHANNELS NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
         FI_CXI_DEFAULT_CQ_SIZE FI_CXI_RX_MATCH_MODE \
-        FI_CXI_DISABLE_HOST_REGISTER FI_MR_CACHE_MONITOR
+        FI_CXI_DISABLE_HOST_REGISTER FI_MR_CACHE_MONITOR \
+        HSA_FORCE_FINE_GRAIN_PCIE FI_CXI_RDZV_PROTO FI_CXI_RDZV_EAGER_SIZE \
+        FI_CXI_RDZV_THRESHOLD FI_CXI_RDZV_GET_MIN FI_CXI_DEFAULT_TX_SIZE NCCL_CROSS_NIC
   if [ "${var_env}" != "-" ] && [ -n "${var_env}" ]; then
     for kv in ${var_env}; do export "${kv?}"; done
   fi

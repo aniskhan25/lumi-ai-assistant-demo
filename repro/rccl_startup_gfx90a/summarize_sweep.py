@@ -39,6 +39,8 @@ WHAT_IT_RULES_OUT = {
     "cxi_no_host_register": "FI_CXI_DISABLE_HOST_REGISTER=1, suggested in laifs-container-recipes#30",
     "mr_cache_monitor": "FI_MR_CACHE_MONITOR=userfaultfd, suggested in laifs-container-recipes#30",
     "cxi_both": "both recipes#30 mitigations together",
+    "hpe_full": "HPE's full recommended RCCL set, via LUMI support",
+    "hpe_minus_monitor": "HPE's set WITHOUT FI_MR_CACHE_MONITOR -- isolates whether the monitor is the crucial one",
 }
 
 # Ordered so the reader meets the phases in the order the process lives them.
