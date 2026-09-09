@@ -13,7 +13,35 @@
 # Shipping an unjustified NCCL variable is how cargo-cult tuning starts, and the point of
 # the reporter's fourth question is that no measured baseline exists yet.
 
-# --- nothing here earns a positive recommendation yet --------------------------------
+# --- THE FIX -------------------------------------------------------------------------
+# Prevents the multi-node RCCL startup hang. 0 stalls in 18 attempts across 4 and 8
+# nodes, against a baseline that hung 21 of 23 (jobs 21838111, 21838977, 21838978).
+# Costs nothing: uncapped all_reduce bus bandwidth is 88.1 GB/s with it set against
+# 87.6 GB/s without (jobs 21838863, 21791400), i.e. identical within noise -- unlike
+# NCCL_MAX_NCHANNELS=8, which also stops the hang but costs 21% of training-band
+# bandwidth.
+#
+# Identified by LUMI support; originates with Samuel Antao (AMD), "Extreme Scale AI",
+# Move your AI to LUMI, June 2026. Also named in laifs-container-recipes#30.
+#
+# This is a WORKAROUND for an open RCCL/libfabric bug (laifs-container-recipes#44), not
+# a root-cause fix. Keep generous startup timeouts until that is closed.
+#   justified by: jobs 21838111, 21838977, 21838978, 21838863    cost: none measured
+export FI_MR_CACHE_MONITOR=userfaultfd
+
+# --- HPE also recommends these; they are inert for this failure ----------------------
+# HPE's full RCCL list, relayed by LUMI support, adds ten more variables. Measured at
+# 4 nodes with 8 communicators (job 21838977): the full set gives 0/5, and the set with
+# FI_MR_CACHE_MONITOR REMOVED gives 4/5 -- identical to baseline. So the monitor does all
+# the work and the remainder changes nothing here. Left unset rather than carried as
+# unexamined ballast; they may still matter for other workloads.
+#   HSA_FORCE_FINE_GRAIN_PCIE=1  FI_CXI_DISABLE_HOST_REGISTER=1
+#   FI_CXI_DEFAULT_CQ_SIZE=131072  FI_CXI_RDZV_PROTO=alt_read
+#   FI_CXI_RDZV_EAGER_SIZE=0  FI_CXI_RDZV_THRESHOLD=0  FI_CXI_RDZV_GET_MIN=0
+#   FI_CXI_DEFAULT_TX_SIZE=2048  NCCL_CROSS_NIC=1  FI_CXI_RX_MATCH_MODE=hybrid
+# Note FI_CXI_DISABLE_HOST_REGISTER=1 on its own leaves 3/5 stalls (job 21838111).
+
+# --- measured, and NOT recommended ---------------------------------------------------
 # NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3 was recommended three times during this
 # investigation and refuted three times. Measured against independent single-variant
 # allocations it changes nothing: world_first 15.75 s vs baseline 15.73 s (jobs 21818931,

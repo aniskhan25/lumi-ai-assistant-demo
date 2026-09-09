@@ -573,7 +573,7 @@ cure for the stall, and it should not be presented as one.
 | 5 | ~~`NCCL_SOCKET_IFNAME` cuts first-collective setup ~38%~~ | **RETRACTED** — position artefact; 15.75 s vs baseline 15.73 s in independent single-variant jobs |
 | 6 | Attempts within one job share state (absorbing and alternating stall sequences) | **solid, and it invalidated our own statistics** |
 | 7 | RCCL finds no network path for GCDs 1, 3, 7 in every configuration | **solid**, mechanism unquantified |
-| 8 | Any *fix* for the stall | **not established** |
+| 8 | A working workaround | **`FI_MR_CACHE_MONITOR=userfaultfd`, 0/18 vs baseline 21/23, no bandwidth cost** |
 
 ### Why finding 3 is worth reporting regardless of the reporter's case
 
@@ -847,6 +847,73 @@ communicators*, which is independent confirmation of the root variable found in 
 21837919. Their fix and our finding are the same phenomenon approached from two
 directions.
 
+## RESOLVED (workaround): `FI_MR_CACHE_MONITOR=userfaultfd`, and HPE's other ten variables are inert (jobs 21838977, 21838978)
+
+### Isolation: the monitor does all the work
+
+4 nodes, world 32, 8 communicators, 5 attempts each:
+
+| variant | stalled |
+| --- | --- |
+| `baseline` | 4/5 |
+| `hpe_minus_monitor` — HPE's ten other variables, monitor removed | **4/5 — identical to baseline** |
+| `hpe_full` — all eleven | **0/5** |
+| `mr_cache_monitor` — the one variable | **0/5** |
+
+Support said the monitor was the crucial one and the rest optional. The measurement is
+stronger than that: with the monitor removed, the remaining ten make **no difference at
+all** to this failure. They are not merely optional here, they are inert.
+
+### Confirmation at the reporter's own scale
+
+8 nodes, world 64, 8 attempts:
+
+| variant | stalled |
+| --- | --- |
+| `baseline` | **8/8** |
+| `mr_cache_monitor` | **0/8** |
+
+### Pooled
+
+| | attempts | stalled |
+| --- | --- | --- |
+| `baseline` (4 and 8 nodes, 8 communicators) | 23 | **21** |
+| **`FI_MR_CACHE_MONITOR=userfaultfd`** | **18** | **0** |
+
+And it is free: uncapped all_reduce bus bandwidth measures 88.1 GB/s with the monitor set
+(job 21838863) against 87.6 GB/s without (job 21791400) — identical within noise. That
+answers the throughput question support put to the reporter, and makes the monitor
+strictly better than `NCCL_MAX_NCHANNELS=8`, which also reaches 0/5 but costs 21%.
+
+### The recommendation, complete
+
+```bash
+export FI_MR_CACHE_MONITOR=userfaultfd     # the fix: 0/18, no bandwidth cost
+# do NOT set NCCL_NET_GDR_LEVEL=PHB        # hangs every rank from 2 nodes upward
+```
+
+Everything else tested is either inert or a worse trade:
+
+| setting | effect on the hang | cost |
+| --- | --- | --- |
+| `FI_MR_CACHE_MONITOR=userfaultfd` | **0/18** | none |
+| `NCCL_MAX_NCHANNELS=8` | 0/5 here, 7/15 at lower communicator counts | -21% training band |
+| `NCCL_MAX_NCHANNELS=4` | 0/5 | -56% |
+| `NCCL_MAX_NCHANNELS=16` | 5/15 — no help | none |
+| `FI_CXI_DISABLE_HOST_REGISTER=1` | 3/5 — partial | none |
+| `NCCL_RUNTIME_CONNECT=0` | 3/5 — partial | none |
+| `NCCL_SOCKET_IFNAME=hsn0..3` | no effect | none |
+| `FI_CXI_DEFAULT_CQ_SIZE` / `RX_MATCH_MODE` | no effect (matches the reporter's own null result) | none |
+| HPE's other ten variables | no effect | unmeasured |
+| `NCCL_NET_GDR_LEVEL=PHB` | **causes** a deterministic hang from 2 nodes | - |
+
+### Still not closed
+
+This is a workaround, not a root-cause fix. `laifs-container-recipes#44` remains open and
+the underlying defect is in RCCL or libfabric/CXI. Keep generous startup timeouts until
+it is closed, and do not let the issue be closed on the strength of an environment
+variable.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -878,6 +945,9 @@ Ordered by prior probability. Every row must resolve.
 | 21837919 | 2 | 4 / 32 | baseline + 8 communicators | **4/5 stalled** — communicator count is the driver, not rank count |
 | 21838111 | 2 | 4 / 32 | recipes#30 mitigations vs the reproducer | **`FI_MR_CACHE_MONITOR=userfaultfd` 0/5**; host-register alone 3/5; baseline 4/5 |
 | 21838114 | 2 | 4 / 32 | caps vs the reproducer | `nchannels_8` 0/5, `nchannels_4` 0/5, `runtime_connect_off` 3/5, baseline 5/5 |
+| 21838863 | 5 | 8 / 64 | bandwidth with the monitor set | 88.1 GB/s vs 87.6 without — the fix is free |
+| 21838977 | 2 | 4 / 32 | HPE full set vs monitor alone | monitor 0/5, full set 0/5, **set minus monitor 4/5** — the other ten are inert |
+| 21838978 | 2 | 8 / 64 | confirmation, 8 attempts | baseline **8/8**, monitor **0/8** |
 | 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
 | 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
 | 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |
