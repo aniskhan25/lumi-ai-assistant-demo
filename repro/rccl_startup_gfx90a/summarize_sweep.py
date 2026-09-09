@@ -36,6 +36,9 @@ WHAT_IT_RULES_OUT = {
     "gdr_runtime_connect": "whether eager connect rescues the GDR hang",
     "gdr_ifname": "whether pinning the interface rescues the GDR hang",
     "gdr_socket_net": "whether the hang is specific to the OFI/CXI path",
+    "cxi_no_host_register": "FI_CXI_DISABLE_HOST_REGISTER=1, suggested in laifs-container-recipes#30",
+    "mr_cache_monitor": "FI_MR_CACHE_MONITOR=userfaultfd, suggested in laifs-container-recipes#30",
+    "cxi_both": "both recipes#30 mitigations together",
 }
 
 # Ordered so the reader meets the phases in the order the process lives them.

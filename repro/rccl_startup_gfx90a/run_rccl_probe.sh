@@ -24,7 +24,8 @@
 #   MODE=combos sbatch ...                                            # what rescues the GDR hang
 #   REPEATS=5 VARIANTS_ONLY="baseline" sbatch ...                     # is a stall reproducible?
 #   VARIANTS_ONLY="baseline socket_ifname" sbatch ...                 # pick rows
-#   MANY_COMMS=32 sbatch ...                                          # communicator-count scaling
+#   MANY_COMMS=8 sbatch ...                                           # communicator-count scaling
+#   MODE=upstream sbatch ...                                          # mitigations from recipes#30
 #
 # The task layout (8 tasks/node, 7 cpus/task, --mem-per-gpu=60G) and the CPU bind mask
 # below are the LUMI AI Guide's, so the probe measures the configuration the guide
@@ -75,6 +76,15 @@ VARIANTS=(
 # its own (jobs 21790392, 21790393). Each asks whether one of the reporter's remedies
 # rescues that specific hang -- which is the question "why does capping channels help?"
 # stated precisely enough to answer.
+# Mitigations named in laifs-container-recipes#30 that this investigation had not tried,
+# because the tracker was not checked until late. Both were reported there as resolving
+# hangs on real LUMI tickets.
+UPSTREAM=(
+  "cxi_no_host_register|FI_CXI_DISABLE_HOST_REGISTER=1|"
+  "mr_cache_monitor|FI_MR_CACHE_MONITOR=userfaultfd|"
+  "cxi_both|FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd|"
+)
+
 COMBOS=(
   "gdr_cap|NCCL_NET_GDR_LEVEL=PHB NCCL_MAX_NCHANNELS=8|"
   "gdr_runtime_connect|NCCL_NET_GDR_LEVEL=PHB NCCL_RUNTIME_CONNECT=0|"
@@ -82,6 +92,7 @@ COMBOS=(
   "gdr_socket_net|NCCL_NET_GDR_LEVEL=PHB NCCL_NET=Socket|"
 )
 VARIANTS+=("${COMBOS[@]}")
+VARIANTS+=("${UPSTREAM[@]}")
 
 # Rung 1 is the cheapest decisive cut: does it reproduce, does pinning the interface
 # alone fix it, and does the reported workaround fix it.
@@ -91,13 +102,16 @@ RUNG1="baseline socket_ifname nchannels_8"
 DEBUG_SET="baseline socket_ifname gdr_level"
 # The GDR hang is the one worth tracing, so combos get their own mode.
 COMBO_SET="baseline gdr_level gdr_cap gdr_runtime_connect gdr_ifname gdr_socket_net"
+# The upstream-suggested mitigations, against a plain baseline.
+UPSTREAM_SET="baseline cxi_no_host_register mr_cache_monitor cxi_both"
 
 case "${MODE}" in
   probe) SELECTED="${RUNG1}" ;;
   sweep) SELECTED="" ;;
   debug) SELECTED="${DEBUG_SET}" ;;
   combos) SELECTED="${COMBO_SET}" ;;
-  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug or combos)" >&2; exit 2 ;;
+  upstream) SELECTED="${UPSTREAM_SET}" ;;
+  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug, combos or upstream)" >&2; exit 2 ;;
 esac
 [ -n "${VARIANTS_ONLY}" ] && SELECTED="${VARIANTS_ONLY}"
 
@@ -165,7 +179,8 @@ for row in "${VARIANTS[@]}"; do
   # Clear everything a previous row may have set, so one variable really does move.
   unset NCCL_SOCKET_IFNAME NCCL_NET_GDR_LEVEL NCCL_RUNTIME_CONNECT NCCL_MAX_NCHANNELS \
         NCCL_MIN_NCHANNELS NCCL_NCHANNELS_PER_NET_PEER NCCL_PROTO NCCL_NET \
-        FI_CXI_DEFAULT_CQ_SIZE FI_CXI_RX_MATCH_MODE
+        FI_CXI_DEFAULT_CQ_SIZE FI_CXI_RX_MATCH_MODE \
+        FI_CXI_DISABLE_HOST_REGISTER FI_MR_CACHE_MONITOR
   if [ "${var_env}" != "-" ] && [ -n "${var_env}" ]; then
     for kv in ${var_env}; do export "${kv?}"; done
   fi
