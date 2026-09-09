@@ -1,12 +1,18 @@
 # Draft comment for lumi-ai-factory/laifs-container-recipes#44
 
-Status: verification against the issue's own reproducer is running as job 21845322.
-Hold the "Verified against your reproducer" line until that lands.
+Status: verified against the issue's own reproducer (job 21845322). Ready to post.
 
 ---
 
 We hit this independently via multi-node vLLM startup and traced it to the libfabric
-memory-registration cache monitor.
+memory-registration cache monitor. **Your reproducer, unmodified, hangs 3/5 at default
+and 0/5 with `FI_MR_CACHE_MONITOR=userfaultfd`** — 4 nodes / 32 ranks, `timeout 180` per
+attempt as in your script:
+
+| condition | hung | note |
+| --- | --- | --- |
+| default | **3/5** | hung attempts stopped after 160 and 64 `collective done` lines, i.e. at group 6 and group 3 — matching your "which group it stalls on varies" |
+| `FI_MR_CACHE_MONITOR=userfaultfd` | **0/5** | all 256 lines (32 ranks x 8 groups) every time |
 
 **`FI_MR_CACHE_MONITOR` defaults to `memhooks` here, and that is the culprit.** Setting
 each monitor explicitly, same container as yours, 4 nodes / 32 ranks, 8 successive

@@ -984,6 +984,38 @@ userfaultfd's page-fault path; neither was measured for registration-path cost h
 for collective bandwidth, where userfaultfd is free. Worth comparing before standardising
 on one.
 
+## VERIFIED against recipes#44's own reproducer (job 21845322)
+
+Their `hang.py` transcribed from the issue body, their geometry (4 nodes, 8 ranks/node,
+their CPU bind mask), their `timeout 180` wrapper so exit 124 marks a hang. The only
+change was a fallback to device 0 when Slurm exposes one GCD per task, since
+`torch.cuda.set_device(LOCAL_RANK)` assumes all eight are visible to every rank.
+
+| condition | hung | `collective done` lines on hung attempts |
+| --- | --- | --- |
+| default (`FI_MR_CACHE_MONITOR` unset) | **3/5** | 160, 160, 64 |
+| `FI_MR_CACHE_MONITOR=userfaultfd` | **0/5** | - (all reached 256) |
+
+256 = 32 ranks x 8 groups, so with the monitor set every group completed on every rank in
+all five attempts. The hung attempts stopped at 160 and 64 lines — group 6 and group 3 —
+which independently reproduces the issue's observation that the group it stalls on
+varies.
+
+**This closes the question of whether our finding is their bug: it is.** Same container
+digest, same RCCL/aws-ofi-nccl/ROCm versions, same geometry, their reproducer, and the
+monitor switch eliminates it. Combined with job 21844179 (memhooks 4/5; userfaultfd,
+kdreg2 and disabled all 0/5), the chain is:
+
+`memhooks` is libfabric's effective default here -> it detects remapping by intercepting
+userspace allocator calls -> ROCm memory operations are not reliably visible to it ->
+stale registrations are never invalidated -> RDMA silently never completes -> the
+collective on a newly created communicator blocks forever with no error and no timeout.
+
+Still a workaround rather than a repair: the defect is in `memhooks` (or in ROCm's
+allocator, or in the selection logic that prefers memhooks despite libfabric documenting
+userfaultfd as the default when available). Not tested at 16 nodes, which the issue also
+reports.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -1020,6 +1052,7 @@ Ordered by prior probability. Every row must resolve.
 | 21838978 | 2 | 8 / 64 | confirmation, 8 attempts | baseline **8/8**, monitor **0/8** |
 | 21843529 | - | 2 / 16 | log-probe for monitor selection | **failed** — timed out, no monitor lines logged |
 | 21844179 | 2 | 4 / 32 | each MR monitor set explicitly | **`memhooks` 4/5 = the default and the culprit**; userfaultfd, kdreg2, disabled all 0/5 |
+| 21845322 | - | 4 / 32 | **recipes#44's own reproducer** | default **3/5 hung**, `userfaultfd` **0/5** — our finding is their bug |
 | 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
 | 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
 | 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |
