@@ -27,6 +27,7 @@
 #   MANY_COMMS=8 sbatch ...                                           # communicator-count scaling
 #   MODE=upstream sbatch ...                                          # mitigations from recipes#30
 #   MODE=hpe sbatch ...                                               # HPE's recommended set
+#   MODE=monitors sbatch ...                                          # which monitor is the culprit
 #
 # The task layout (8 tasks/node, 7 cpus/task, --mem-per-gpu=60G) and the CPU bind mask
 # below are the LUMI AI Guide's, so the probe measures the configuration the guide
@@ -96,6 +97,18 @@ FI_CXI_DISABLE_HOST_REGISTER=1 FI_CXI_DEFAULT_CQ_SIZE=131072 \
 FI_CXI_RDZV_PROTO=alt_read FI_CXI_RDZV_EAGER_SIZE=0 FI_CXI_RDZV_THRESHOLD=0 \
 FI_CXI_RDZV_GET_MIN=0 FI_CXI_DEFAULT_TX_SIZE=2048 NCCL_CROSS_NIC=1 \
 FI_CXI_RX_MATCH_MODE=hybrid"
+# Which monitor is libfabric actually choosing by default? Log-grepping failed (job
+# 21843529 timed out with no monitor lines), so discriminate behaviourally instead:
+# set each one explicitly against the reliable reproducer. The monitor that reproduces
+# baseline's hang rate is the one being selected by default, and is the culprit.
+# libfabric documents userfaultfd as the default "if available", but /dev/kdreg2 exists
+# on these nodes and the CXI provider prefers its own kernel module when present.
+MONITORS=(
+  "mon_kdreg2|FI_MR_CACHE_MONITOR=kdreg2|"
+  "mon_memhooks|FI_MR_CACHE_MONITOR=memhooks|"
+  "mon_disabled|FI_MR_CACHE_MONITOR=disabled|"
+)
+
 HPE=(
   "hpe_full|${HPE_FULL}|"
   "hpe_minus_monitor|HSA_FORCE_FINE_GRAIN_PCIE=1 FI_CXI_DISABLE_HOST_REGISTER=1 FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_RDZV_PROTO=alt_read FI_CXI_RDZV_EAGER_SIZE=0 FI_CXI_RDZV_THRESHOLD=0 FI_CXI_RDZV_GET_MIN=0 FI_CXI_DEFAULT_TX_SIZE=2048 NCCL_CROSS_NIC=1 FI_CXI_RX_MATCH_MODE=hybrid|"
@@ -110,6 +123,7 @@ COMBOS=(
 VARIANTS+=("${COMBOS[@]}")
 VARIANTS+=("${UPSTREAM[@]}")
 VARIANTS+=("${HPE[@]}")
+VARIANTS+=("${MONITORS[@]}")
 
 # Rung 1 is the cheapest decisive cut: does it reproduce, does pinning the interface
 # alone fix it, and does the reported workaround fix it.
@@ -123,6 +137,8 @@ COMBO_SET="baseline gdr_level gdr_cap gdr_runtime_connect gdr_ifname gdr_socket_
 UPSTREAM_SET="baseline cxi_no_host_register mr_cache_monitor cxi_both"
 # hpe_minus_monitor isolates whether the crucial variable really is the monitor.
 HPE_SET="baseline mr_cache_monitor hpe_full hpe_minus_monitor"
+# Identifies the defaulted monitor by which one matches baseline.
+MONITOR_SET="baseline mon_kdreg2 mon_memhooks mon_disabled mr_cache_monitor"
 
 case "${MODE}" in
   probe) SELECTED="${RUNG1}" ;;
@@ -131,7 +147,8 @@ case "${MODE}" in
   combos) SELECTED="${COMBO_SET}" ;;
   upstream) SELECTED="${UPSTREAM_SET}" ;;
   hpe) SELECTED="${HPE_SET}" ;;
-  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug, combos, upstream or hpe)" >&2; exit 2 ;;
+  monitors) SELECTED="${MONITOR_SET}" ;;
+  *) echo "ERROR: unknown MODE=${MODE} (expected probe, sweep, debug, combos, upstream, hpe or monitors)" >&2; exit 2 ;;
 esac
 [ -n "${VARIANTS_ONLY}" ] && SELECTED="${VARIANTS_ONLY}"
 

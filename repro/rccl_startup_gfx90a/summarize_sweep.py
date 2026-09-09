@@ -41,6 +41,9 @@ WHAT_IT_RULES_OUT = {
     "cxi_both": "both recipes#30 mitigations together",
     "hpe_full": "HPE's full recommended RCCL set, via LUMI support",
     "hpe_minus_monitor": "HPE's set WITHOUT FI_MR_CACHE_MONITOR -- isolates whether the monitor is the crucial one",
+    "mon_kdreg2": "explicit kdreg2 -- if this matches baseline, kdreg2 is the default and the culprit",
+    "mon_memhooks": "explicit memhooks -- if this matches baseline, memhooks is the default and the culprit",
+    "mon_disabled": "MR caching off entirely -- upper bound on what the cache costs, and a check that the cache is the mechanism",
 }
 
 # Ordered so the reader meets the phases in the order the process lives them.
