@@ -54,3 +54,47 @@ worth more than documenting the workaround.
 
 Environment matches yours: `lumi-multitorch-full-u24r70f21m50t210-20260807_115122.sif`,
 PyTorch 2.10.0+rocm7.0, RCCL 2.26.6, ROCm 7.0.2, libfabric 2.1.0 in-container.
+
+
+---
+
+# Follow-up comment (why the default lands on memhooks)
+
+Ready to post as a follow-up.
+
+---
+
+Found the reason libfabric falls back to `memhooks` here, and it points at a one-line
+class of fix rather than a per-user workaround.
+
+**LUMI sets `vm.unprivileged_userfaultfd = 0`.** On this kernel that does not forbid
+userfaultfd — it requires the caller to pass `UFFD_USER_MODE_ONLY`. Measured directly in
+the container as an unprivileged user:
+
+| flags to `userfaultfd()` | result |
+| --- | --- |
+| `O_CLOEXEC` | EPERM |
+| `O_CLOEXEC \| UFFD_USER_MODE_ONLY` | **OK** |
+
+**libfabric's availability check for the default appears to omit that flag**, so it
+concludes uffd is unavailable and falls back to `memhooks`. Confirmed from inside a live
+process by inspecting its own fd table for `anon_inode:[userfaultfd]` after a collective:
+
+| `FI_MR_CACHE_MONITOR` | uffd fds open |
+| --- | --- |
+| unset (default) | **0** |
+| `userfaultfd` | **1** |
+| `memhooks` / `kdreg2` / `disabled` | 0 |
+
+So the explicit request takes the monitor's real open path, which does pass the flag, and
+works — while the default silently degrades to `memhooks`, which is the monitor that
+misses ROCm remapping.
+
+Worth stressing: setting `FI_MR_CACHE_MONITOR=userfaultfd` is a **genuine fix, not a
+cache bypass**. It opens a real userfaultfd and the MR cache stays active. (`kdreg2` also
+works, 0/5, and is another option.)
+
+**Suggested fix:** have the userfaultfd availability probe pass `UFFD_USER_MODE_ONLY`, or
+set `FI_MR_CACHE_MONITOR` in the container's environment defaults. Either would retire
+this for every LUMI user without anyone setting a variable — and the same mis-detection
+will affect any hardened kernel with `vm.unprivileged_userfaultfd = 0`, not just LUMI.

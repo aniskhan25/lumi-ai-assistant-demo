@@ -1063,6 +1063,72 @@ This is worth a follow-up on recipes#44: the effective fix people are being give
 "disable the MR cache by asking for a monitor that cannot load", which works but is not
 what anyone intends, and `kdreg2` looks like the answer that keeps the cache.
 
+## PROVEN: the userfaultfd monitor really is active, and why the default misses it (jobs 21846186, plus syscall probe)
+
+Two measurements close this out.
+
+**1. userfaultfd is usable on LUMI, but only with `UFFD_USER_MODE_ONLY`.** Direct syscall
+probe in the container, as our unprivileged user:
+
+| flags to `userfaultfd()` | result |
+| --- | --- |
+| `O_CLOEXEC` | **EPERM** |
+| `O_CLOEXEC \| UFFD_USER_MODE_ONLY` | **OK** |
+| `UFFD_USER_MODE_ONLY` alone | **OK** |
+| none | **EPERM** |
+
+`vm.unprivileged_userfaultfd = 0` does not forbid userfaultfd outright on this kernel
+(`6.4.0-…cray_shasta_c`); it requires the caller to pass `UFFD_USER_MODE_ONLY`.
+
+**2. libfabric opens a real userfaultfd when asked explicitly.** After a live collective,
+inspecting the process's own fd table for `anon_inode:[userfaultfd]`:
+
+| `FI_MR_CACHE_MONITOR` | uffd fds open |
+| --- | --- |
+| unset (default) | **0** |
+| `userfaultfd` | **1** |
+| `memhooks` | 0 |
+| `kdreg2` | 0 |
+| `disabled` | 0 |
+
+### The complete, verified chain
+
+1. LUMI sets `vm.unprivileged_userfaultfd = 0`, so a userfaultfd can only be created with
+   `UFFD_USER_MODE_ONLY`.
+2. libfabric's default-selection availability check does not pass that flag, so it
+   concludes userfaultfd is unavailable — proven by the unset default opening **zero**
+   uffd fds — and falls back to `memhooks`, which behaviourally matches baseline's hang
+   rate (4/5, job 21844179).
+3. `memhooks` detects remapping by intercepting userspace allocator calls, which does not
+   reliably see ROCm memory operations, so stale registrations are never invalidated and
+   the RDMA silently never completes.
+4. Naming `userfaultfd` explicitly takes the monitor's real open path, which does pass the
+   flag — proven by the **1** open uffd fd — so the monitor works and the hang disappears
+   (0/18 pooled, and 0/5 on recipes#44's own reproducer).
+
+### Two earlier claims withdrawn
+
+- **"`FI_MR_CACHE_MONITOR=userfaultfd` is silently disabling the MR cache."** Wrong. It
+  opens a genuine userfaultfd and the cache is retained. That claim came from a syscall
+  probe written without `UFFD_USER_MODE_ONLY`, which returned EPERM and led to the
+  conclusion that uffd could not work here at all. The measurement was real; the flag was
+  missing.
+- **"`kdreg2` is the better recommendation because userfaultfd is inert."** The premise
+  was false, so the conclusion does not follow. `kdreg2` remains a valid alternative
+  (0/5) and may differ in overhead, but `userfaultfd` needs no correction and matches what
+  LUMI support recommends.
+
+Note that "it did not hang" could never have distinguished a working monitor from a
+disabled cache — both avoid the hang. Only the fd inspection separates them, and that is
+the measurement that should have come first.
+
+### The upstream defect, stated precisely
+
+**libfabric's userfaultfd availability detection omits `UFFD_USER_MODE_ONLY`, so on any
+system with `vm.unprivileged_userfaultfd = 0` it wrongly falls back to `memhooks`** —
+which is unsafe with ROCm memory. That is a one-line class of fix upstream and it would
+retire this failure for every LUMI user without anyone setting an environment variable.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
@@ -1100,6 +1166,7 @@ Ordered by prior probability. Every row must resolve.
 | 21843529 | - | 2 / 16 | log-probe for monitor selection | **failed** — timed out, no monitor lines logged |
 | 21844179 | 2 | 4 / 32 | each MR monitor set explicitly | **`memhooks` 4/5 = the default and the culprit**; userfaultfd, kdreg2, disabled all 0/5 |
 | 21845322 | - | 4 / 32 | **recipes#44's own reproducer** | default **3/5 hung**, `userfaultfd` **0/5** — our finding is their bug |
+| 21846186 | - | 2 / 16 | uffd fd inspection per monitor | `userfaultfd` opens **1** uffd fd, default opens **0** — the monitor is genuinely active |
 | 21819544 | 3 | 8 / 64 | vLLM `gpt-oss-120b` startup | all READY; the 354 s vs 124 s gap was cache warming, not the pin; 3 communicators (tp/pp/ep) |
 | 21822747 | 3 | 8 / 64 | `baseline` x3, own allocation | 290 / 123 / 121 s — cold-start penalty, not a variant effect |
 | 21822748 | 3 | 8 / 64 | `socket_ifname` x3, own allocation | 287 / 123 / 139 s — identical to baseline |
