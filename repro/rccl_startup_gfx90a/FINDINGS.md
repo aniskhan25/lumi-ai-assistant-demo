@@ -1122,12 +1122,42 @@ Note that "it did not hang" could never have distinguished a working monitor fro
 disabled cache — both avoid the hang. Only the fd inspection separates them, and that is
 the measurement that should have come first.
 
-### The upstream defect, stated precisely
+### CORRECTION: there is no failed probe. `memhooks` is simply the documented default
 
-**libfabric's userfaultfd availability detection omits `UFFD_USER_MODE_ONLY`, so on any
-system with `vm.unprivileged_userfaultfd = 0` it wrongly falls back to `memhooks`** —
-which is unsafe with ROCm memory. That is a one-line class of fix upstream and it would
-retire this failure for every LUMI user without anyone setting an environment variable.
+An earlier revision of this section claimed libfabric's userfaultfd availability check
+omits `UFFD_USER_MODE_ONLY`, fails with EPERM, and falls back to `memhooks`. **That
+mechanism was invented, not measured.** What had actually been measured was only the
+outcome: the default opens zero uffd fds and behaves like `memhooks`.
+
+HPE documents `memhooks` as the default MR cache monitor
+(`support.hpe.com` docId `dp00004854en_us`), and three pieces of our own evidence agree:
+
+| evidence | reading |
+| --- | --- |
+| `variable mr_cache_monitor=<not set>` in the MR log (job 21846418) | no value is read, so libfabric uses its compiled default |
+| **no `"Memory monitor uffd failed to start"` in any log**, though that `FI_WARN` string is in the binary and warnings are visible at the default log level | uffd is **never attempted** — so there is no probe to have failed |
+| the default's hang rate (3-5/5) matches explicit `memhooks` (4/5), and not `userfaultfd`/`kdreg2`/`disabled` (0/5) | the default is behaving as `memhooks` |
+
+So the chain is simpler than claimed: **the vendor-documented default monitor is
+`memhooks`, and `memhooks` is unsafe with ROCm memory.** Nothing mis-detects anything.
+
+Note also that libfabric's own `fi_info -e` help text says *"Userfaultfd is the default if
+available on the system"*, which contradicts HPE's documented default and is what led to
+the invented mechanism. That text is at best misleading on this platform and is worth
+reporting as a documentation bug in its own right.
+
+### The upstream ask, restated
+
+Not "fix the probe". The actionable requests are:
+
+1. **The container should set `FI_MR_CACHE_MONITOR` explicitly** to `userfaultfd` or
+   `kdreg2`, since the documented default is unsafe for ROCm workloads. This is a
+   container-recipes change and would retire the failure for every LUMI user without
+   anyone setting a variable.
+2. **`memhooks` + ROCm is the underlying defect** — allocator interception does not see
+   ROCm memory operations. That belongs with libfabric or ROCm.
+3. **`fi_info -e`'s help text contradicts the documented default.** Minor, but it actively
+   misleads anyone debugging this.
 
 ## Hypotheses
 
