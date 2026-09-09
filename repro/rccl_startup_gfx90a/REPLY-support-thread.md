@@ -8,7 +8,10 @@ Every figure below carries a Slurm job id in `FINDINGS.md`, including the withdr
 
 ## Answers
 
-**1. Known LUMI behaviour, or your misconfiguration?** Platform behaviour at defaults.
+**1. Known LUMI behaviour, or your misconfiguration?** **Known, and already tracked
+upstream** — both hangs are open issues against `lumi-ai-factory/laifs-container-recipes`:
+**#44** for the intermittent one, **#30** for the `NCCL_NET_GDR_LEVEL` one. Platform
+behaviour at defaults.
 This repo sets no `NCCL_*`/`RCCL_*`/`FI_CXI_*` variable anywhere, the
 `lumi-aif-singularity-bindings` module sets only `SINGULARITY_BIND` and
 `SLURM_MPI_TYPE`, and the container sets none at all — and the hang still reproduces.
@@ -84,7 +87,9 @@ checkpoint. Capping channels never had anything to do with this symptom.
 - **Keep the generous startup timeouts.** The hang is real and unfixed.
 - **Check whether anything in your environment sets `NCCL_NET_GDR_LEVEL`.** If it does,
   that alone explains your report end to end. Nothing on the platform sets it, so it
-  would come from your own scripts. This is the single most useful thing you can tell us.
+  would come from your own scripts — it originates in HPE's `ccl_env.sh`, not the LUMI AI
+  Guide, which sets no NCCL variables at all. This is the single most useful thing you can
+  tell us.
 - **Treat the weight-loader symptom separately**: `/flash`, higher streamer concurrency.
 - **Keep `NCCL_MAX_NCHANNELS=8` only if you can measure it helping your workload** and can
   afford 20% on bandwidth-bound jobs. It lowers the hang rate; it does not remove it.
@@ -95,7 +100,13 @@ rejected.
 
 ## Still open
 
-- No fix. Needs escalation to the RCCL or libfabric/CXI layer, not more env-var search.
+- No fix from anything we tested. recipes#44 has a stronger reproducer: eight successive
+  `new_group()` calls, hanging 13/17 attempts, at 4 and 16 nodes. Our probe creates ~4
+  communicators and saw nothing at 4 nodes, so **communicator count rather than rank
+  count is the likely driver** — the next thing to test.
+- Two mitigations from recipes#30 remain untested here: `FI_CXI_DISABLE_HOST_REGISTER=1`
+  and an `FI_MR_CACHE_MONITOR` setting, both reported there as resolving hangs on real
+  LUMI tickets.
 - Why attempts within one allocation share state — probably our most informative
   unexplained observation. Our CXI telemetry captured nothing usable: `cxi_stat` reports
   device inventory, not counters, so the counter source still has to be found.

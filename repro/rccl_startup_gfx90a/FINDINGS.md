@@ -27,7 +27,7 @@ measurement, and they frame everything below.
 | F2 | `lumi-aif-singularity-bindings` sets only `SINGULARITY_BIND` and `SLURM_MPI_TYPE=pmi2` — the bindings configure defaults, but none of them are comms tuning | `/appl/local/laifs/modules/lumi-aif-singularity-bindings/1.0.{0,1}.lua` |
 | F3 | Our own multi-node recipes already need `STARTUP_TIMEOUT_S` of 2700 / 3600 / **14400** s and all reached health | root `README.md`, "Successful Launch Commands" |
 | F4 | The elapsed startup time is computed and discarded, so those minutes were never attributed | `run_vllm_demo_multinode.sh:62` vs `:67` |
-| F5 | The LUMI AI Guide sets `NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3` and `NCCL_NET_GDR_LEVEL=PHB` in lesson 5, but **not** in lesson 3 where multi-node RCCL lives | `5-experiment-tracking/run_*.sh` vs `3-multi-gpu-and-node/*` |
+| F5 | **CORRECTED.** The official guide (`Lumi-supercomputer/LUMI-AI-Guide`) sets **no** `NCCL_*`/`RCCL_*`/`FI_*` variable anywhere. The `NCCL_SOCKET_IFNAME` + `NCCL_NET_GDR_LEVEL=PHB` block this case originally cited came from an unofficial fork, not from the guide | grep for `NCCL_`/`FI_` across the official repo returns nothing |
 | F6 | The guide prescribes no `NCCL_MAX_NCHANNELS`, `NCCL_RUNTIME_CONNECT`, `FI_CXI_*` or `FI_PROVIDER` anywhere — so no measured comms baseline for LUMI exists yet | grep across the whole guide |
 | F7 | `run_vllm_demo_multinode.sh` has no LAIFS reachability guard, so a stalled `/appl/local/laifs` mount is indistinguishable from the stall under investigation | absent vs `repro/mistral3_gfx90a/run_repro.sh:44-51` |
 | F8 | The multi-node launcher sets `RUNAI_STREAMER_CONCURRENCY=1` / `MEMORY_LIMIT=8` but never passes `--load-format runai_streamer`, so they are inert there; the README's recipes pass concurrency 4 and also never pass the flag | `launch_vllm_multinode_rank.sh:27-28` vs `:30-41` |
@@ -120,11 +120,12 @@ cross-node collective indefinitely — 300.00 s is the watchdog timeout, not a
 measurement. `init` completes normally in the same runs, so the failure is in
 connection setup for the data path, not in the rendezvous.
 
-This is a setting **the LUMI AI Guide recommends**, in
-`5-experiment-tracking/run_*.sh`. Those are single-node jobs, where it is harmless. It
-is absent from `3-multi-gpu-and-node/`. The planning note for this case treated that
-absence as a gap in the guide; it is the opposite — lesson 3 is right to omit it, and
-copying it from lesson 5 into a multi-node job is actively harmful.
+**CORRECTED.** Earlier revisions of this document said the LUMI AI Guide recommends
+this setting. It does not: the official guide (`Lumi-supercomputer/LUMI-AI-Guide`) sets no `NCCL_*`,
+`RCCL_*` or `FI_*` variable in any lesson. The block that was cited came from an
+unofficial fork. The setting's real provenance, per
+`lumi-ai-factory/laifs-container-recipes#30`, is HPE's own `ccl_env.sh`, which sets
+`NCCL_NET_GDR_LEVEL=PHB` — guidance participants in that thread consider outdated.
 
 It plugs into finding 11: RCCL reports no local path to the network for GCDs 1, 3 and 7.
 Forcing GPU-direct RDMA across the host bridge for GCDs that have no working path is a
@@ -578,10 +579,10 @@ cure for the stall, and it should not be presented as one.
 
 At 4 nodes the background stall rate is zero across 32 attempts, so `gdr_level` stalling
 32/32 there is unambiguous — no accumulated state, no position effect, no race to
-confound it. `NCCL_NET_GDR_LEVEL=PHB` is set by the LUMI AI Guide's
-`5-experiment-tracking/run_*.sh`. Those lessons are single-node, where it is harmless,
-but anyone copying that block into a multi-node job gets a deterministic hang. That is
-worth fixing in the guide whether or not it is what the reporter hit.
+confound it. The setting is **not** recommended by the official guide (see the
+correction to F5); it comes from HPE's `ccl_env.sh` per
+`lumi-ai-factory/laifs-container-recipes#30`. Anyone who picks it up from HPE guidance
+or an unofficial script and carries it into a multi-node job gets a deterministic hang.
 
 ## Rung 3: vLLM at 8 nodes / world 64 (job 21819544)
 
@@ -713,7 +714,7 @@ claims were not. It is also actionable: roughly **167 seconds of every cold 8-no
 launch is one-time cost** — MIOpen kernel compilation and first-touch of the weights on
 Lustre — not model loading or communication.
 
-The LUMI AI Guide's persistent per-user MIOpen cache (`MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen-cache-$USER`)
+The official guide's persistent per-user MIOpen cache (`MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen-cache-$USER`)
 is the right idea for this, and this repo's launchers do **not** use it: they set a
 per-job `mktemp -d` (F10), which guarantees paying compilation every launch. The caveat
 is that `/tmp` is node-local, so the cache only helps when Slurm reuses the same nodes.
@@ -829,10 +830,29 @@ presents its multi-node recipes as "Successful Launch Commands" without noting t
 several needed startup timeouts of 45 minutes to 4 hours, which in hindsight is the
 same symptom being reported.
 
-## Open questions for the LUMI AI Guide
+## Already reported upstream — check before filing anything
 
-- F5: should `NCCL_SOCKET_IFNAME` and `NCCL_NET_GDR_LEVEL` move into, or be duplicated
-  in, `3-multi-gpu-and-node/`? They currently appear only in lesson 5, which is
-  single-node.
-- F10: should the persistent per-user MIOpen cache path from `setup.sh` be adopted by
-  this repo's launchers?
+Both hangs found here were already open issues in
+`lumi-ai-factory/laifs-container-recipes` and this was not checked until late, which is
+a process failure worth recording:
+
+| our finding | existing issue |
+| --- | --- |
+| Intermittent hang creating/using an additional communicator | **#44** "Creating a second process group intermittently hangs forever with no error" (open 2026-08-25). Their report is stronger than ours: 13/17 attempts across four allocations, and seen at 4 and 16 nodes |
+| `NCCL_NET_GDR_LEVEL=PHB` hangs deterministically | **#30** "Setting NCCL_NET_GDR_LEVEL may cause jobs to hang" (open 2026-04-23, 8 comments) |
+
+#44 hangs at 4 nodes where we measured 0/32. The likely reconciliation is **group
+count**: their reproducer loops eight successive `new_group()` calls, while our probe
+creates about four communicators. That makes communicator count, not rank count, the
+probable driver — testable with the `MANY_COMMS` knob, which this investigation added
+and never ran.
+
+#30's thread names two mitigations we never tested, both reported there as resolving
+hangs on real LUMI tickets: `FI_CXI_DISABLE_HOST_REGISTER=1` and an `FI_MR_CACHE_MONITOR`
+setting. These are now variants under `MODE=upstream`.
+
+## Open question for this repo
+
+- F10: should the persistent per-user MIOpen cache path be adopted by this repo's
+  launchers? Measured worth ~167 s per cold 8-node launch, and the launchers currently
+  use a per-job `mktemp -d` that guarantees paying it every time.

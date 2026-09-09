@@ -25,7 +25,7 @@ throws it away one line later.
 | Account | `project_462000131` |
 | RCCL | `librccl.so.1.0.70002`, net plugin `/usr/lib/x86_64-linux-gnu/librccl-net-ofi.so` |
 | libfabric | 1.22.0, CXI provider |
-| Task layout, rungs 1/2/5 | the LUMI AI Guide's: 8 tasks/node, 7 cpus/task, `--mem-per-gpu=60G`, `--cpu-bind=v,mask_cpu=<8 masks>` |
+| Task layout, rungs 1/2/5 | the official guide's lesson 05: 8 tasks/node, 7 cpus/task, `--mem-per-gpu=60G`, `--cpu-bind=v,mask_cpu=<8 masks>` |
 | Task layout, rungs 3/4/6 | the repo's own: 1 task/node, 56 cpus/task, vLLM spawning its own workers |
 | Models | `openai/gpt-oss-120b` (61 GB) for iteration, `moonshotai/Kimi-K2-Instruct-0905` (959 GB) for confirmation |
 

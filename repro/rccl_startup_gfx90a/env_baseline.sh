@@ -1,17 +1,17 @@
 #!/bin/bash
 # Recommended NCCL/RCCL + libfabric baseline for multi-node RCCL on LUMI.
 #
-# Source this AFTER the LUMI AI Guide's setup.sh, which it is meant to extend rather
-# than replace:
+# Source this after whatever module/cache setup your job already does.
 #
-#   source ../setup.sh
-#   source repro/rccl_startup_gfx90a/env_baseline.sh
+# The official LUMI AI Guide (Lumi-supercomputer/LUMI-AI-Guide) sets no
+# NCCL_*/RCCL_*/FI_* variable in any lesson, so there is no guide baseline to extend --
+# its multi-node lesson runs at stock defaults, which is exactly where the intermittent
+# hang lives.
 #
-# TEMPLATE. Every line below is either (a) already established by the LUMI AI Guide, or
-# (b) a candidate this investigation has not yet decided. A candidate stays commented
-# out until a Slurm job in FINDINGS.md justifies it, with its bandwidth cost stated.
-# Shipping an unjustified NCCL variable is how cargo-cult tuning starts, and the whole
-# point of the reporter's fourth question is that no measured baseline exists yet.
+# Every line below is either measured here or deliberately left unset. A candidate stays
+# commented out until a Slurm job in FINDINGS.md justifies it, with its cost stated.
+# Shipping an unjustified NCCL variable is how cargo-cult tuning starts, and the point of
+# the reporter's fourth question is that no measured baseline exists yet.
 
 # --- nothing here earns a positive recommendation yet --------------------------------
 # NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3 was recommended three times during this
@@ -26,8 +26,9 @@
 # NCCL_NET_GDR_LEVEL=PHB hangs the first cross-node collective on every rank,
 # deterministically, at 4 nodes (32/32) and 8 nodes (64/64) -- jobs 21790392, 21790393,
 # 21794114. At 4 nodes the background stall rate is zero, so this is unambiguous.
-# The LUMI AI Guide sets it in 5-experiment-tracking/run_*.sh, which are single-node
-# jobs where it is harmless; do not carry that line into a multi-node script.
+# It comes from HPE's ccl_env.sh (see laifs-container-recipes#30, which has tracked this
+# hang since April 2026); the official LUMI AI Guide does not set it. Do not carry it
+# into a multi-node script from HPE guidance or third-party examples.
 # export NCCL_NET_GDR_LEVEL=PHB   # <-- deliberately left unset
 
 # --- candidates, pending measurement --------------------------------------------------
