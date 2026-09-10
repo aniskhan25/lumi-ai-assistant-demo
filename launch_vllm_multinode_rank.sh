@@ -13,12 +13,23 @@ export HOME="/runtime"
 export XDG_CACHE_HOME="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/vllm-cache"
 export HF_HOME="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache"
 export VLLM_CACHE_ROOT="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/vllm-cache"
-MIOPEN_DIR="$(mktemp -d)"
-export MIOPEN_CUSTOM_CACHE_DIR="${MIOPEN_DIR}/cache"
-export MIOPEN_USER_DB="${MIOPEN_DIR}/config"
-mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_CACHE_DIR}" "${MIOPEN_USER_DB}"
+# A per-job mktemp here re-pays MIOpen kernel compilation on every launch: measured at
+# ~167 s of a cold 8-node vLLM startup (290 s cold vs 123 s warm). Pin per user instead,
+# as the LUMI AI Guide does. /tmp is node-local, so this only helps when Slurm reuses
+# nodes -- which is still most of the benefit for repeated runs.
+export MIOPEN_CUSTOM_CACHE_DIR="${MIOPEN_CUSTOM_CACHE_DIR:-/tmp/miopen-cache-${USER}}"
+export MIOPEN_USER_DB_PATH="${MIOPEN_USER_DB_PATH:-/tmp/miopen-config-${USER}}"
+export MIOPEN_USER_DB="${MIOPEN_USER_DB_PATH}"
+mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_CACHE_DIR}" "${MIOPEN_USER_DB_PATH}"
 
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
+
+# Multi-node RCCL hangs indefinitely creating/using additional communicators with the
+# vendor-default MR cache monitor (memhooks), which does not see ROCm memory remapping.
+# 0 hangs in 18 attempts with this set, against 21/23 without, and it costs no collective
+# bandwidth. See repro/rccl_startup_gfx90a/FINDINGS.md and
+# github.com/lumi-ai-factory/laifs-container-recipes/issues/44
+export FI_MR_CACHE_MONITOR="${FI_MR_CACHE_MONITOR:-userfaultfd}"
 
 # Cap RunAI streamer RAM buffer to prevent OOM on large checkpoints.
 # Without a limit the streamer accumulates all loaded tensors in RAM before

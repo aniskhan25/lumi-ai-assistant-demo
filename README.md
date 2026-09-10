@@ -255,11 +255,17 @@ vLLM logs:
 
 ## Known Issues
 
-Multi-node vLLM startup on LUMI stalls for 10-60+ minutes, and not in one fixed phase:
-different runs freeze at different stages, and clearing one stage does not prevent a
-stall later. `NCCL_MAX_NCHANNELS=8` works around it. Note that the multi-node recipes
-above already need `STARTUP_TIMEOUT_S` of 2700-14400 s, which is likely the same
-symptom paid for with a long timeout rather than diagnosed.
+**Fixed in the launchers.** Multi-node RCCL hung indefinitely while creating additional
+communicators, which is why the multi-node recipes above carry `STARTUP_TIMEOUT_S` of
+2700-14400 s. Cause: libfabric's vendor-default MR cache monitor (`memhooks`) does not
+see ROCm memory remapping, so a stale registration makes an RDMA silently never complete.
+The launchers now set `FI_MR_CACHE_MONITOR=userfaultfd` — 0 hangs in 18 attempts against
+21/23 without it, at no bandwidth cost. Tracked upstream as
+[laifs-container-recipes#44](https://github.com/lumi-ai-factory/laifs-container-recipes/issues/44);
+the fix here is a workaround, so keep generous startup timeouts until that closes.
+
+Also do **not** set `NCCL_NET_GDR_LEVEL=PHB`: harmless on one node, hangs every rank from
+two nodes upward ([#30](https://github.com/lumi-ai-factory/laifs-container-recipes/issues/30)).
 
 `repro/rccl_startup_gfx90a/` times RCCL startup phase by phase with no model in the
 picture, then checks whether the same signature appears in real vLLM startup, and

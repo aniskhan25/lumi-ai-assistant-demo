@@ -16,6 +16,13 @@ mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" "${MIOPEN_CUSTOM_
 
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 
+# Multi-node RCCL hangs indefinitely creating/using additional communicators with the
+# vendor-default MR cache monitor (memhooks), which does not see ROCm memory remapping.
+# 0 hangs in 18 attempts with this set, against 21/23 without, and it costs no collective
+# bandwidth. See repro/rccl_startup_gfx90a/FINDINGS.md and
+# github.com/lumi-ai-factory/laifs-container-recipes/issues/44
+export FI_MR_CACHE_MONITOR="${FI_MR_CACHE_MONITOR:-userfaultfd}"
+
 # Serialize RunAI streamer tensor loading to prevent concurrent buffer spikes
 # that exhaust memory when TP workers load in parallel (especially for large models).
 export RUNAI_STREAMER_CONCURRENCY="${RUNAI_STREAMER_CONCURRENCY:-1}"
