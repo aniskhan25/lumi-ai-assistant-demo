@@ -252,6 +252,32 @@ vLLM logs:
 |  | `meta-llama/Llama-3.1-405B-Instruct` | 2 nodes, 16 GCDs | 32 | 34.373 | 113.057 | 7.066 |
 |  | `meta-llama/Llama-3.1-405B-Instruct` | 4 nodes, 32 GCDs | 160 | 66.241 | 227.973 | 7.124 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` | 4 nodes, 32 GCDs | 64 | 121.763 | 62.749 | 1.961 |
+|  | `moonshotai/Kimi-K2-Instruct-0905` (re-measured, job 22028722) | 4 nodes, 32 GCDs | 32 | 62.142 | 61.620 | 1.926 |
+|  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, job 22028721) | 4 nodes, 32 GCDs | 64 | 139.097 | 54.403 | 1.700 |
+
+### Expert parallelism for Kimi-K2: a startup win, not a throughput win
+
+Measured head to head on 4 nodes, same day, same harness (jobs 22028721 / 22028722):
+
+| | startup | best concurrency | p95 | tok/s per GCD |
+| --- | ---: | ---: | ---: | ---: |
+| no expert parallelism | **7603 s** | 32 | 62.1 s | **1.926** |
+| `--enable-expert-parallel --all2all-backend deepep_high_throughput` | **1547 s** | 64 | 139.1 s | 1.700 |
+
+Expert parallelism makes startup **5x faster** — each rank loads only its own experts
+rather than the full expert set for TP sharding, which matters a lot for a 958 GiB
+checkpoint on Lustre (weight loading alone took 6459-7117 s without it). It costs about
+12% of throughput, so enable it when iteration speed or queue time matters and leave it
+off when steady-state throughput is the goal.
+
+The re-measured no-EP row reproduces the original 1.961 to within 2%, so the original
+measurement was sound.
+
+**Both configurations saturate at concurrency 32** — throughput is flat from 32 to 128
+while p95 quadruples — because the recipe sets `--max-num-seqs 32`. The throughput
+ceiling here is the micro-batch setting, not the parallelism strategy or the hardware.
+Compare the two DeepSeek-R1 rows above, which differ only in batch parameters and differ
+by 1.8x.
 
 ## Known Issues
 
