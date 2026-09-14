@@ -69,3 +69,26 @@ suggest userfaultfd is unusable here.
   cure a hang in the real service, only in the probe and in your reproducer.
 - Root cause of `memhooks` + ROCm (why allocator interception misses ROCm remapping) is
   not established — that belongs with libfabric or ROCm.
+
+
+---
+
+# Short comment: when does this actually bite?
+
+---
+
+One practical note on when this is reachable, since it explains why some multi-node jobs
+never see it. Communicator count matters more than scale — measured with a plain
+`torch.distributed` probe, stock settings:
+
+| nodes / world | communicators | hung |
+| --- | --- | --- |
+| 4 / 32 | ~4 | **0/32** |
+| 4 / 32 | 8 | **4/5** |
+| 8 / 64 | ~4 | 2/8 |
+| 8 / 64 | 8 | 8/8 |
+
+So a 4-node job building only a handful of groups can run clean indefinitely, which is
+why our own production vLLM runs at that size never hit it, while the same nodes with
+your 8-group reproducer hang 4 times in 5. Worth knowing for triage: "does it affect me?"
+depends mainly on how many process groups the workload creates, not on node count.
