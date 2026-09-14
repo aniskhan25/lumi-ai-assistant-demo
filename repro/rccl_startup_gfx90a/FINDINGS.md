@@ -25,7 +25,7 @@ measurement, and they frame everything below.
 | --- | --- | --- |
 | F1 | This repo sets no `NCCL_*`/`RCCL_*`/`FI_CXI_*` variable anywhere, in the working tree or in any commit | `git log --all -S'NCCL_'`, `-S'FI_CXI'`, `-S'aws-ofi'` all empty |
 | F2 | `lumi-aif-singularity-bindings` sets only `SINGULARITY_BIND` and `SLURM_MPI_TYPE=pmi2` — the bindings configure defaults, but none of them are comms tuning | `/appl/local/laifs/modules/lumi-aif-singularity-bindings/1.0.{0,1}.lua` |
-| F3 | Our own multi-node recipes already need `STARTUP_TIMEOUT_S` of 2700 / 3600 / **14400** s and all reached health | root `README.md`, "Successful Launch Commands" |
+| F3 | Our own multi-node recipes need `STARTUP_TIMEOUT_S` of 2700 / 3600 / **14400** s and all reached health. **Not evidence of the hang** — see the correction below; these are genuine startup costs (1 TB Lustre read, cold MIOpen compile) in a configuration measured at 0/32 hangs | root `README.md`, "Successful Launch Commands" |
 | F4 | The elapsed startup time is computed and discarded, so those minutes were never attributed | `run_vllm_demo_multinode.sh:62` vs `:67` |
 | F5 | **CORRECTED.** The official guide (`Lumi-supercomputer/LUMI-AI-Guide`) sets **no** `NCCL_*`/`RCCL_*`/`FI_*` variable anywhere. The `NCCL_SOCKET_IFNAME` + `NCCL_NET_GDR_LEVEL=PHB` block this case originally cited came from an unofficial fork, not from the guide | grep for `NCCL_`/`FI_` across the official repo returns nothing |
 | F6 | The guide prescribes no `NCCL_MAX_NCHANNELS`, `NCCL_RUNTIME_CONNECT`, `FI_CXI_*` or `FI_PROVIDER` anywhere — so no measured comms baseline for LUMI exists yet | grep across the whole guide |
@@ -1158,6 +1158,43 @@ Not "fix the probe". The actionable requests are:
    ROCm memory operations. That belongs with libfabric or ROCm.
 3. **`fi_info -e`'s help text contradicts the documented default.** Minor, but it actively
    misleads anyone debugging this.
+
+## CORRECTION: the README's long startup timeouts were not hidden hangs
+
+Stated repeatedly in earlier revisions, in the published report, and in the support
+reply: that the root README needing `STARTUP_TIMEOUT_S` of 2700-14400 s for its
+multi-node recipes was "this stall, undiagnosed". **That was inference presented as
+fact, and the evidence contradicts it.**
+
+The recorded runs reached health and produced benchmark numbers, so they did not hang.
+Three reasons the claim does not hold:
+
+1. **A longer timeout cannot rescue a hang.** The failure is permanent — recipes#44
+   reports a run left blocked for an hour, and none of our watchdogged attempts ever
+   recovered. Waiting longer yields a walltime kill, not a healthy server.
+2. **That timeout could never even fire.** The Kimi-K2 recipe pairs
+   `STARTUP_TIMEOUT_S=14400` (4 h) with `sbatch --time=02:00:00`, so Slurm would kill the
+   job two hours before the poll loop gave up. A hung run would have produced no
+   benchmark row at all.
+3. **The configuration is the one we measured as safe.** 4 nodes, `TP_SIZE=8 PP_SIZE=4`
+   -> world 32, with vLLM building ~4 communicators (`tp:0`, `pp:0`, `ep:0`, plus world).
+   Measured hang rate for 4 nodes at ~4 communicators: **0 in 32 attempts**. The hang
+   needs either more communicators (4/5 at 8 comms, same 4 nodes) or more ranks (2/8 at
+   8 nodes with ~4 comms).
+
+The long startups are ordinary cost: ~1.03 TB of Kimi-K2 weights read from Lustre, cold
+MIOpen kernel compilation (~167 s measured, 290 s cold vs 123 s warm for an 8-node vLLM
+launch), plus graph capture and memory profiling. The timeouts were defensive padding
+around genuinely slow startup.
+
+**Caveat kept deliberately:** the README records only successful launches. If attempts
+hung and were retried, that would not appear. The defensible statement is "the recorded
+runs did not hang", not "we never hung at that scale".
+
+**Why this matters beyond the record:** it means the risk is predictable rather than
+mysterious. Exposure rises with communicator count first and rank count second, so a
+2-node DeepSeek job with DeepEP groups and a 4-node Kimi job with four communicators were
+both genuinely low-risk, while an 8-node job with expert parallelism is not.
 
 ## Hypotheses
 

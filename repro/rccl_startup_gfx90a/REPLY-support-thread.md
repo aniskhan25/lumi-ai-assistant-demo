@@ -15,8 +15,13 @@ behaviour at defaults.
 This repo sets no `NCCL_*`/`RCCL_*`/`FI_CXI_*` variable anywhere, the
 `lumi-aif-singularity-bindings` module sets only `SINGULARITY_BIND` and
 `SLURM_MPI_TYPE`, and the container sets none at all — and the hang still reproduces.
-Nothing you configured causes it. We were already paying for it too: our own multi-node
-recipes carry `STARTUP_TIMEOUT_S` of 2700-14400 s, which is this stall, undiagnosed.
+Nothing you configured causes it.
+
+(Correction to an earlier version of this note: we suggested our own 2700-14400 s startup
+timeouts were this stall undiagnosed. They are not — those runs reached health, and their
+configuration, 4 nodes with ~4 communicators, measures 0 hangs in 32 attempts. The long
+startups are ordinary cost: ~1 TB of weights off Lustre plus cold MIOpen kernel
+compilation.)
 
 **2. Better fix than capping channels?** None found, and capping channels is not a fix
 either — `NCCL_MAX_NCHANNELS=8` still hung 7 of 15 attempts. The one firm recommendation
