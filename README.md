@@ -206,7 +206,20 @@ EXTRA_VLLM_ARGS="--max-model-len 16384 --max-num-seqs 32 --max-num-batched-token
 sbatch run_vllm_demo_multinode.sh
 ```
 
-Four full nodes:
+Four full nodes, Kimi-K2 — best configuration measured (2.928 tok/s per GCD, ~31 min
+startup). Expert parallelism for the startup win, `--max-num-seqs 64` for the throughput:
+
+```bash
+MODE=bench BENCH_PROFILE=kimi MODEL=moonshotai/Kimi-K2-Instruct-0905 \
+TP_SIZE=8 PP_SIZE=4 STARTUP_TIMEOUT_S=5400 CONCURRENCIES="64 128" \
+EXTRA_VLLM_ARGS="--trust-remote-code --quantization fp8 --kv-cache-dtype fp8 \
+  --enable-expert-parallel --all2all-backend deepep_high_throughput \
+  --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.95" \
+sbatch --nodes=4 --time=03:00:00 run_vllm_bench_multinode.sh
+```
+
+Four full nodes, original recipe (kept for comparison; 1.961 tok/s per GCD, ~2 h startup):
 
 ```bash
 STARTUP_TIMEOUT_S=14400 \
@@ -255,6 +268,7 @@ vLLM logs:
 |  | `moonshotai/Kimi-K2-Instruct-0905` (re-measured, job 22028722) | 4 nodes, 32 GCDs | 32 | 62.142 | 61.620 | 1.926 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, job 22028721) | 4 nodes, 32 GCDs | 64 | 139.097 | 54.403 | 1.700 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 64`, job 22060642) | 4 nodes, 32 GCDs | 128 | 156.561 | 93.695 | **2.928** |
+|  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 128`, job 22065599) | 4 nodes, 32 GCDs | 256 | 189.897 | 77.048 | 2.408 |
 
 ### Expert parallelism for Kimi-K2: a startup win, not a throughput win
 
@@ -283,14 +297,20 @@ p95 quadruples — because the recipe sets `--max-num-seqs 32`. Raising it to 64
 nothing else, gives **1.72x** the throughput (54.4 -> 93.7 tok/s) and beats the original
 row by 1.5x:
 
-| `--max-num-seqs` | best concurrency | tok/s | per GCD |
-| ---: | ---: | ---: | ---: |
-| 32 | 64 | 54.403 | 1.700 |
-| **64** | **128** | **93.695** | **2.928** |
+| `--max-num-seqs` | best concurrency | p95 | tok/s | per GCD |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 64 | 139.1 s | 54.403 | 1.700 |
+| **64** | **128** | **156.6 s** | **93.695** | **2.928** |
+| 128 | 256 | 189.9 s | 77.048 | 2.408 |
 
-It saturates again one doubling up (92.4 at concurrency 64 vs 93.7 at 128), so there is
-likely more to get. KV cache is not the limit: rank 0 reports 28.77 GiB / 2,914,560
-tokens, which at `--max-model-len 16384` is room for ~178 concurrent sequences.
+**64 is an optimum, not a floor.** Going to 128 costs 18% of throughput and pushes p95 to
+190 s. It is not a memory limit — rank 0 reports 28.77 GiB / 2,914,560 KV tokens and
+`Maximum concurrency for 16,384 tokens per request: 177.89x`, so 128 sequences fit
+comfortably. Admitting more sequences than the batched-token budget can feed just trades
+throughput for queueing, most likely prefill/decode interference at a fixed
+`--max-num-batched-tokens 8192`. The untested middle is 96; the useful pairing to try
+next is a higher `--max-num-seqs` **with** a higher `--max-num-batched-tokens`, which
+needs care because that combination lost a worker (see below).
 
 What does bind is **activation memory**: a run at `--max-num-seqs 128
 --max-num-batched-tokens 16384` lost a worker during startup before KV sizing (job
