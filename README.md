@@ -254,6 +254,7 @@ vLLM logs:
 |  | `moonshotai/Kimi-K2-Instruct-0905` | 4 nodes, 32 GCDs | 64 | 121.763 | 62.749 | 1.961 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (re-measured, job 22028722) | 4 nodes, 32 GCDs | 32 | 62.142 | 61.620 | 1.926 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, job 22028721) | 4 nodes, 32 GCDs | 64 | 139.097 | 54.403 | 1.700 |
+|  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 64`, job 22060642) | 4 nodes, 32 GCDs | 128 | 156.561 | 93.695 | **2.928** |
 
 ### Expert parallelism for Kimi-K2: a startup win, not a throughput win
 
@@ -264,6 +265,9 @@ Measured head to head on 4 nodes, same day, same harness (jobs 22028721 / 220287
 | no expert parallelism | **7603 s** | 32 | 62.1 s | **1.926** |
 | `--enable-expert-parallel --all2all-backend deepep_high_throughput` | **1547 s** | 64 | 139.1 s | 1.700 |
 
+Best configuration found so far: **expert parallelism plus `--max-num-seqs 64`**, at
+2.928 tok/s per GCD and a ~31 minute startup.
+
 Expert parallelism makes startup **5x faster** — each rank loads only its own experts
 rather than the full expert set for TP sharding, which matters a lot for a 958 GiB
 checkpoint on Lustre (weight loading alone took 6459-7117 s without it). It costs about
@@ -273,11 +277,25 @@ off when steady-state throughput is the goal.
 The re-measured no-EP row reproduces the original 1.961 to within 2%, so the original
 measurement was sound.
 
-**Both configurations saturate at concurrency 32** — throughput is flat from 32 to 128
-while p95 quadruples — because the recipe sets `--max-num-seqs 32`. The throughput
-ceiling here is the micro-batch setting, not the parallelism strategy or the hardware.
-Compare the two DeepSeek-R1 rows above, which differ only in batch parameters and differ
-by 1.8x.
+**The throughput ceiling was `--max-num-seqs`, not the parallelism strategy.** Both
+configurations above saturate at concurrency 32 — flat throughput from 32 to 128 while
+p95 quadruples — because the recipe sets `--max-num-seqs 32`. Raising it to 64, changing
+nothing else, gives **1.72x** the throughput (54.4 -> 93.7 tok/s) and beats the original
+row by 1.5x:
+
+| `--max-num-seqs` | best concurrency | tok/s | per GCD |
+| ---: | ---: | ---: | ---: |
+| 32 | 64 | 54.403 | 1.700 |
+| **64** | **128** | **93.695** | **2.928** |
+
+It saturates again one doubling up (92.4 at concurrency 64 vs 93.7 at 128), so there is
+likely more to get. KV cache is not the limit: rank 0 reports 28.77 GiB / 2,914,560
+tokens, which at `--max-model-len 16384` is room for ~178 concurrent sequences.
+
+What does bind is **activation memory**: a run at `--max-num-seqs 128
+--max-num-batched-tokens 16384` lost a worker during startup before KV sizing (job
+22032772). Since the KV figures show 128 sequences fit, the batched-token increase is the
+likely cause — raise `--max-num-seqs` alone and leave `--max-num-batched-tokens` at 8192.
 
 ## Known Issues
 
