@@ -101,6 +101,14 @@ VERDICT="TIMEOUT"
 while [ "${SECONDS}" -lt "${STARTUP_TIMEOUT_S}" ]; do
   if ! kill -0 "${LAUNCH_PID}" 2>/dev/null; then VERDICT="DIED"; break; fi
   if curl -fsS --max-time 5 "${READY_URL}" >/dev/null 2>&1; then VERDICT="READY"; break; fi
+  # A dead worker is terminal: the srun stays alive, so without this the poll runs to the
+  # full timeout. Job 22032772 burned 2.5 h of 4 nodes after a worker died at ~30 min.
+  if grep -qlE "died unexpectedly|EngineDeadError|Engine core initialization failed" \
+       "${RUNTIME_DIR}"/vllm_server_rank*.log 2>/dev/null; then
+    VERDICT="WORKER_DIED"
+    echo "A worker died; not waiting out the startup timeout."
+    break
+  fi
   sleep "${STARTUP_POLL_S}"
 done
 STARTUP_SECONDS="${SECONDS}"
