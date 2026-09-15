@@ -1196,6 +1196,32 @@ mysterious. Exposure rises with communicator count first and rank count second, 
 2-node DeepSeek job with DeepEP groups and a 4-node Kimi job with four communicators were
 both genuinely low-risk, while an 8-node job with expert parallelism is not.
 
+## Kimi-K2 throughput tuning: what worked and what is ruled out
+
+Best so far: **2.928 tok/s per GCD** (job 22060642) with expert parallelism and
+`--max-num-seqs 64`, against 1.961 for the original recipe. All runs 4 nodes / 32 GCDs,
+120 requests x 128 tokens, concurrency swept.
+
+| lever | result | verdict |
+| --- | --- | --- |
+| `--enable-expert-parallel` | startup 1547 s vs 7603 s; -12% throughput at fixed batch | **keep** for startup; costs throughput |
+| `--max-num-seqs` 32 -> 64 | 1.700 -> **2.928** per GCD (1.72x) | **the main win** |
+| `--max-num-seqs` 64 -> 128 | 2.928 -> 2.408 | worse; 64 is an optimum |
+| `--max-num-batched-tokens` 8192 -> 16384 | 2.928 -> 2.866 | **no gain** (decode-dominated benchmark); lever exhausted |
+| `--max-num-seqs 128` + `--max-num-batched-tokens 16384` | worker died before KV sizing (job 22032772) | activation memory binds, not KV — KV reports 177.89x concurrency available |
+| `TP=32 PP=1` | **impossible**: `ValueError: Weight input_size_per_partition = 576 is not divisible by weight quantization block_k = 128` | architectural, not tuning |
+| `TP=16 PP=2` | job 22069526 -> running | halves the pipeline bubble; TP=16 divides cleanly (1152 = 128*9) |
+
+**The TP=32 result is worth recording as a constraint rather than a failure.** The fp8
+checkpoint is block-quantized with `block_k=128`, and the full weight dimension is 18432.
+So valid tensor-parallel widths are those where 18432/TP is a multiple of 128: TP=8
+(2304), TP=16 (1152) are fine; TP=32 (576) is not. Any fp8 block-quantized model has this
+kind of divisibility constraint on TP width, which bounds how far the pipeline bubble can
+be traded away for tensor parallelism.
+
+Model shape, for reference: 64 attention heads, 64 KV heads, 384 routed experts, 61
+layers.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
