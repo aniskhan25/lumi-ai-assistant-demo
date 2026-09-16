@@ -272,6 +272,7 @@ vLLM logs:
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 128`, job 22065599) | 4 nodes, 32 GCDs | 256 | 189.897 | 77.048 | 2.408 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (`TP=8 PP=4`, default all2all, job 22088253) | 4 nodes, 32 GCDs | 128 | 157.663 | 92.834 | 2.901 |
 |  | **`moonshotai/Kimi-K2-Instruct-0905` (`TP=16 PP=2`, default all2all, job 22088252)** | 4 nodes, 32 GCDs | 128 | **125.847** | **116.732** | **3.648** |
+|  | `moonshotai/Kimi-K2-Instruct-0905` (`TP=16 PP=2`, `--max-num-seqs 96`, job 22092278) | 4 nodes, 32 GCDs | 128 | 196.703 | 75.284 | 2.353 |
 
 ### Expert parallelism for Kimi-K2: a startup win, not a throughput win
 
@@ -289,7 +290,7 @@ Three independent levers, each measured against a same-day control:
 
 | lever | gain | why |
 | --- | --- | --- |
-| `--max-num-seqs` 32 -> 64 | **1.72x** | 32 was the throughput ceiling; the server saturated at concurrency 32 while p95 quadrupled |
+| `--max-num-seqs` 32 -> 64 | **1.72x** | 32 was the throughput ceiling; the server saturated at concurrency 32 while p95 quadrupled. 64 is a sharp optimum — at `TP=16 PP=2`, 96 gives 2.353 and 128 times out every request |
 | `TP=16 PP=2` instead of `TP=8 PP=4` | **1.26x** | halves the pipeline bubble; p95 also improves 20% (157.7 s -> 125.8 s) |
 | `--enable-expert-parallel` | 5x faster startup | each rank loads only its own experts from a 958 GiB checkpoint |
 
