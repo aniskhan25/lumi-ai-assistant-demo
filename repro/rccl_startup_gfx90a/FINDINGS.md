@@ -1227,6 +1227,35 @@ be traded away for tensor parallelism.
 Model shape, for reference: 64 attention heads, 64 KV heads, 384 routed experts, 61
 layers.
 
+## Kimi-K2 final tuning: 3.648 tok/s per GCD, 1.86x the original
+
+| config | startup | best conc | p95 | tok/s | per GCD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| original recipe (`TP=8 PP=4`, no EP, seqs 32) | ~2 h | 64 | 121.8 s | 62.7 | 1.961 |
+| EP, seqs 32 | 1547 s | 64 | 139.1 s | 54.4 | 1.700 |
+| EP, seqs 64 | 1866 s | 128 | 156.6 s | 93.7 | 2.928 |
+| EP, seqs 64, `TP=8 PP=4`, default all2all | 1838 s | 128 | 157.7 s | 92.8 | 2.901 |
+| **EP, seqs 64, `TP=16 PP=2`, default all2all** | **1877 s** | **128** | **125.8 s** | **116.7** | **3.648** |
+
+Three levers, each isolated against a same-day control on the same harness:
+
+1. `--max-num-seqs` 32 -> 64: **1.72x**
+2. `TP=16 PP=2` instead of `TP=8 PP=4`: **1.26x**, and p95 improves 20%
+3. `--enable-expert-parallel`: **5x faster startup**, -12% throughput at fixed layout
+
+### Dead ends, recorded so they are not retried
+
+| attempt | outcome |
+| --- | --- |
+| `--max-num-batched-tokens` 16384 | 2.866 vs 2.928 — nothing; benchmark is decode-dominated |
+| `--all2all-backend deepep_high_throughput` | 2.928 vs 2.901 default — noise at `TP=8`, and fatal at `TP=16` (EP group tracks TP width, so EP 8 -> 16 doubles DeepEP buffers and a worker dies) |
+| `TP=32 PP=1` | impossible: fp8 `block_k=128` vs full dim 18432 means 18432/TP must be a multiple of 128; TP=32 gives 576 |
+| `--max-num-seqs 128` at `TP=16` | **every request timed out**. KV reports `Maximum concurrency ... 97.76x`, so 128 over-admits; `max-num-seqs` is an admission limit, not an allocation — KV capacity was identical (97.75 vs 97.76) in both runs |
+| `--max-num-seqs 128` + `--max-num-batched-tokens 16384` at `TP=8` | worker died before KV sizing; activation memory, not KV |
+
+The KV ceiling gives the one untested setting worth trying: **96**, the largest admission
+limit below 97.76. Job 22089105's failure mode is what identifies it.
+
 ## Hypotheses
 
 Ordered by prior probability. Every row must resolve.
