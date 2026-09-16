@@ -206,16 +206,17 @@ EXTRA_VLLM_ARGS="--max-model-len 16384 --max-num-seqs 32 --max-num-batched-token
 sbatch run_vllm_demo_multinode.sh
 ```
 
-Four full nodes, Kimi-K2 — best configuration measured (2.928 tok/s per GCD, ~31 min
-startup). Expert parallelism for the startup win, `--max-num-seqs 64` for the throughput:
+Four full nodes, Kimi-K2 — best configuration measured: **3.648 tok/s per GCD**, 1.86x
+the original recipe, with p95 down from 121.8 s to 125.8 s at nearly double the
+throughput and startup down from ~2 h to ~31 min. `TP=16 PP=2` to halve the pipeline
+bubble, expert parallelism for the startup win, `--max-num-seqs 64` for the throughput:
 
 ```bash
 MODE=bench BENCH_PROFILE=kimi MODEL=moonshotai/Kimi-K2-Instruct-0905 \
-TP_SIZE=8 PP_SIZE=4 STARTUP_TIMEOUT_S=5400 CONCURRENCIES="64 128" \
+TP_SIZE=16 PP_SIZE=2 STARTUP_TIMEOUT_S=5400 CONCURRENCIES="64 128" \
 EXTRA_VLLM_ARGS="--trust-remote-code --quantization fp8 --kv-cache-dtype fp8 \
-  --enable-expert-parallel --all2all-backend deepep_high_throughput \
-  --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 8192 \
-  --gpu-memory-utilization 0.95" \
+  --enable-expert-parallel --max-model-len 16384 --max-num-seqs 64 \
+  --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
 sbatch --nodes=4 --time=03:00:00 run_vllm_bench_multinode.sh
 ```
 
@@ -269,6 +270,8 @@ vLLM logs:
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, job 22028721) | 4 nodes, 32 GCDs | 64 | 139.097 | 54.403 | 1.700 |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 64`, job 22060642) | 4 nodes, 32 GCDs | 128 | 156.561 | 93.695 | **2.928** |
 |  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 128`, job 22065599) | 4 nodes, 32 GCDs | 256 | 189.897 | 77.048 | 2.408 |
+|  | `moonshotai/Kimi-K2-Instruct-0905` (`TP=8 PP=4`, default all2all, job 22088253) | 4 nodes, 32 GCDs | 128 | 157.663 | 92.834 | 2.901 |
+|  | **`moonshotai/Kimi-K2-Instruct-0905` (`TP=16 PP=2`, default all2all, job 22088252)** | 4 nodes, 32 GCDs | 128 | **125.847** | **116.732** | **3.648** |
 
 ### Expert parallelism for Kimi-K2: a startup win, not a throughput win
 
@@ -279,8 +282,30 @@ Measured head to head on 4 nodes, same day, same harness (jobs 22028721 / 220287
 | no expert parallelism | **7603 s** | 32 | 62.1 s | **1.926** |
 | `--enable-expert-parallel --all2all-backend deepep_high_throughput` | **1547 s** | 64 | 139.1 s | 1.700 |
 
-Best configuration found so far: **expert parallelism plus `--max-num-seqs 64`**, at
-2.928 tok/s per GCD and a ~31 minute startup.
+Best configuration: **`TP=16 PP=2`, expert parallelism, `--max-num-seqs 64`, default
+all2all** — 3.648 tok/s per GCD, 1.86x the original recipe.
+
+Three independent levers, each measured against a same-day control:
+
+| lever | gain | why |
+| --- | --- | --- |
+| `--max-num-seqs` 32 -> 64 | **1.72x** | 32 was the throughput ceiling; the server saturated at concurrency 32 while p95 quadrupled |
+| `TP=16 PP=2` instead of `TP=8 PP=4` | **1.26x** | halves the pipeline bubble; p95 also improves 20% (157.7 s -> 125.8 s) |
+| `--enable-expert-parallel` | 5x faster startup | each rank loads only its own experts from a 958 GiB checkpoint |
+
+Two things that turned out not to matter, and one hard constraint:
+
+- **`--all2all-backend deepep_high_throughput` is not worth setting here.** At
+  `TP=8 PP=4` it measured 2.928 against 2.901 for vLLM's default — within noise. It is
+  also actively harmful at `TP=16`: the expert-parallel group tracks TP width, so EP goes
+  from 8 to 16 and the DeepEP buffers double, which killed a worker during startup.
+  Dropping it is what made the wider layout possible.
+- **`--max-num-batched-tokens` 8192 -> 16384 gave nothing** (2.866 vs 2.928). This
+  benchmark is decode-dominated at 128 output tokens.
+- **`TP=32` is impossible**, not merely slow: the fp8 checkpoint is block-quantized with
+  `block_k=128` and the full weight dimension is 18432, so valid widths are those where
+  18432/TP is a multiple of 128 — TP=8 (2304) and TP=16 (1152) work, TP=32 (576) fails
+  with `Weight input_size_per_partition = 576 is not divisible by ... block_k = 128`.
 
 Expert parallelism makes startup **5x faster** — each rank loads only its own experts
 rather than the full expert set for TP sharding, which matters a lot for a 958 GiB
