@@ -1210,7 +1210,12 @@ Best so far: **2.928 tok/s per GCD** (job 22060642) with expert parallelism and
 | `--max-num-batched-tokens` 8192 -> 16384 | 2.928 -> 2.866 | **no gain** (decode-dominated benchmark); lever exhausted |
 | `--max-num-seqs 128` + `--max-num-batched-tokens 16384` | worker died before KV sizing (job 22032772) | activation memory binds, not KV — KV reports 177.89x concurrency available |
 | `TP=32 PP=1` | **impossible**: `ValueError: Weight input_size_per_partition = 576 is not divisible by weight quantization block_k = 128` | architectural, not tuning |
-| `TP=16 PP=2` | job 22069526 -> running | halves the pipeline bubble; TP=16 divides cleanly (1152 = 128*9) |
+| `TP=16 PP=2` + `deepep_high_throughput` | worker died silently after weight load (job 22071090) | **not the layout**: worker labels show `PP0_TP7_EP7`, so the EP group tracks TP width — EP=8 at `TP=8 PP=4` but EP=16 here, doubling DeepEP buffers at exactly the allocation point |
+
+The pipeline-bubble question therefore remains open, and needs the all2all backend
+separated from the layout. Jobs in flight: `TP=16 PP=2` and `TP=8 PP=4`, both on vLLM's
+default all2all rather than `deepep_high_throughput`, so the layout effect can be read
+without the backend confound.
 
 **The TP=32 result is worth recording as a constraint rather than a failure.** The fp8
 checkpoint is block-quantized with `block_k=128`, and the full weight dimension is 18432.
