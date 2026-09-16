@@ -1253,8 +1253,21 @@ Three levers, each isolated against a same-day control on the same harness:
 | `--max-num-seqs 128` at `TP=16` | **every request timed out**. KV reports `Maximum concurrency ... 97.76x`, so 128 over-admits; `max-num-seqs` is an admission limit, not an allocation — KV capacity was identical (97.75 vs 97.76) in both runs |
 | `--max-num-seqs 128` + `--max-num-batched-tokens 16384` at `TP=8` | worker died before KV sizing; activation memory, not KV |
 
-The KV ceiling gives the one untested setting worth trying: **96**, the largest admission
-limit below 97.76. Job 22089105's failure mode is what identifies it.
+**96 tested and rejected** (job 22092278): 2.353 per GCD, p95 196.7 s — far worse than
+64's 3.648 / 125.8 s. So `--max-num-seqs` has a sharp optimum at 64 at this layout, with
+96 degrading badly and 128 timing out entirely. Throughput and latency worsen together
+above the optimum, which is the signature of KV pressure forcing preemption rather than
+of a queue simply lengthening.
+
+**Tuning is complete on this axis.** Final: `TP=16 PP=2`, `--enable-expert-parallel`,
+`--max-num-seqs 64`, default all2all, `--max-num-batched-tokens 8192` —
+**3.648 tok/s per GCD, 1.86x the original recipe**, with p95 125.8 s against the
+original 121.8 s at nearly double the throughput, and startup ~31 min against ~2 h.
+
+Remaining levers would change what is being measured rather than how it runs: a lower
+`--max-model-len` would raise the KV concurrency ceiling above 97.76 and might then make
+a larger `--max-num-seqs` viable, and different quantization would change the TP
+divisibility constraint. Neither is tuning.
 
 ## Hypotheses
 
