@@ -489,6 +489,45 @@ def main() -> int:
              f"partition `{head['partition']}`. {len(slots)} slots.\n",
              f"Nodelists: {', '.join(sorted({str(s['nodelist']) for s in slots}))}\n"]
 
+    # Enforce the sentinel gate rather than merely reporting it. An allocation whose
+    # opening and closing sentinels disagree by more than 3 sigma_pos drifted under
+    # the variants it was supposed to be measuring, and the pre-registration says to
+    # discard and resubmit it. Printing that verdict while still pooling the block
+    # makes the gate decorative, which is how a drifting allocation silently reaches
+    # a conclusion.
+    gated_out: list[str] = []
+    if args.cv_pos_pct:
+        limit = 3 * args.cv_pos_pct
+        by_job_all = defaultdict(list)
+        for slot in slots:
+            by_job_all[slot["job_id"]].append(slot)
+        for job_id, job_slots in by_job_all.items():
+            # Stage 0 is exempt. Its blocks are entirely sentinels and carry no
+            # warm-up slot, precisely so the cold-start step can be measured; judging
+            # them by a drift bound derived from that measurement would discard the
+            # stage that produces the bound.
+            if any(s["stage"] == "0" for s in job_slots):
+                continue
+            sent = sorted((s for s in job_slots if s["role"] == "sentinel"),
+                          key=lambda s: s["position"])
+            if len(sent) < 2:
+                continue
+            first, last = band_value(sent[0]), band_value(sent[-1])
+            if not first or not last:
+                continue
+            if abs(math.log(last / first)) * 100 > limit:
+                gated_out.append(job_id)
+        if gated_out:
+            slots = [s for s in slots if s["job_id"] not in gated_out]
+
+    if gated_out:
+        lines.append(f"> **{len(gated_out)} allocation(s) discarded by the sentinel gate** "
+                     f"and excluded from every number below: "
+                     f"`{'`, `'.join(str(j) for j in gated_out)}`. Their opening and closing "
+                     f"sentinels disagree by more than 3 sigma_pos, so the fabric moved under "
+                     f"the variants they were measuring. Resubmit to restore the "
+                     f"pre-registered replicate count.\n")
+
     if discarded:
         lines.append(f"{len(discarded)} cold warm-up slot(s) run and discarded, so both "
                      "sentinels in every block are warm and the drift gate measures drift "
