@@ -30,8 +30,14 @@ ACCOUNT="${ACCOUNT:-project_462000131}"
 # Partition is pinned per stage and never mixed within one: dev-g and standard-g
 # have different node populations and different queue dynamics, and a stage split
 # across both has partition as an uncontrolled factor.
+# Stage 0 runs entirely on standard-g even though dev-g would take 8 nodes (its
+# MaxNodes is 32). The noise floor has to characterise the partition the real
+# measurements happen in: an MDE estimated on dev-g and applied to standard-g
+# results would be describing a different node population and a different set of
+# neighbours. Stage 1 stays on dev-g because it is a verification pass, not a
+# timing measurement, so partition cannot confound it.
 case "${STAGE}" in
-  0)  TIERS=("2 3 dev-g 00:40:00" "4 5 dev-g 00:40:00" "8 2 standard-g 00:35:00"); BLOCKS=1 ;;
+  0)  TIERS=("2 3 standard-g 01:00:00" "4 5 standard-g 01:00:00" "8 2 standard-g 00:50:00"); BLOCKS=1 ;;
   1)  TIERS=("2 2 dev-g 00:50:00"); BLOCKS=1 ;;
   2)  TIERS=("4 3 standard-g 01:00:00"); BLOCKS=2 ;;
   3a) TIERS=("4 3 standard-g 00:50:00"); BLOCKS=1 ;;
@@ -95,7 +101,11 @@ if [ "${CONFIRM:-0}" != "1" ]; then
   exit 0
 fi
 
-if [ -n "$(git -C "${REPO}" status --porcelain 2>/dev/null)" ]; then
+# Untracked files are ignored on purpose: Slurm drops .out/.err into the repo root
+# and they are not part of the commit the pre-registration names. Modified *tracked*
+# files are the real hazard, because then the recorded commit does not describe the
+# code that is about to run.
+if [ -n "$(git -C "${REPO}" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
   echo "WARNING: the working tree is dirty, so the recorded commit does not describe" >&2
   echo "         the code that is about to run. Commit first." >&2
   exit 1

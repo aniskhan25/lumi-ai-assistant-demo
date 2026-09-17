@@ -4,3 +4,5 @@ benchmarks/results/
 vllm_runtime/
 repro/*/results/
 __pycache__/
+/*.out
+/*.err
