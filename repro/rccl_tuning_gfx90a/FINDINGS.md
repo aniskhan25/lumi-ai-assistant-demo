@@ -365,6 +365,53 @@ effects left to interact. Recorded rather than silently skipped.
 
 **Array ids:** `<recorded on submission>`
 
+
+## Stage 3c RESULT: the winner is scale-dependent and dies at 8 nodes (jobs 22121050-22121052)
+
+`NCCL_MIN_NCHANNELS` ladder, `auto/24/32/48/64/96`, three tiers.
+
+| tier | `minch_32` gain on the promotion scalar | allocations | verdict |
+| --- | --- | --- | --- |
+| 2-node | **+15.45% ± 4.97** | 2 (one gated out) | promote |
+| 4-node | **+7.55% ± 3.04** | 3 | promote |
+| 8-node | **+0.50% ± 0.87** | 3 | **inert** |
+
+### The 4-node ladder is sharply peaked, not a ramp
+
+| level | PS gain, 4 nodes |
+| --- | --- |
+| `auto` (default, 16 channels) | -1.33% ± 1.40 |
+| 24 | +2.68% ± 2.81 |
+| **32** | **+7.55% ± 3.04** |
+| 48 | -0.92% ± 2.71 |
+| 64 | -1.09% ± 1.80 |
+| 96 | -0.57% ± 2.69 |
+
+So "more channels is better" is false. 32 is an optimum, 24 gets a third of it, and
+everything above 32 gives nothing back.
+
+### Two independent corroborations
+
+- **+7.55% at 4 nodes reproduces Stage 2's +7.87%** from a different design, a different
+  randomisation and a different set of allocations.
+- **`minch_auto` is an unplanned second sham.** It is the reference under another name and
+  reads -1.33% ± 1.40 at 4 nodes, +0.19% ± 0.61 at 8. A harness manufacturing gains would
+  show one there.
+
+`cap4` fired hard in every tier (-26.6%, -34.7%, -45.1% on the scalar), so the null at 8
+nodes is a real null and not a dead harness.
+
+### The 8-node null is the tightest measurement in the study
+
+±0.87% at three allocations. This is not underpowered; it is a confident zero. Whatever
+`NCCL_MIN_NCHANNELS=32` does at 2 and 4 nodes, it stops doing at 8.
+
+**Consequence for shipping:** this cannot go into `env_tuned.sh` as an unconditional line.
+The repo's own Kimi-K2 config is `TP=16 PP=2` on 4 nodes, which is exactly where the gain
+is real -- but a reader running 8 nodes would get nothing, and a blanket recommendation
+would be wrong for them. A mechanism is being measured separately (job 22121788) before
+this is written up.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
