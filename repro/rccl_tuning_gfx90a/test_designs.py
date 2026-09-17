@@ -91,6 +91,27 @@ def test_reproducible_and_varying() -> bool:
     return ok
 
 
+def test_no_variable_can_leak_between_slots() -> bool:
+    """Regression for job 22117498.
+
+    MANAGED_VARS was derived from FACTORS only, so NCCL_ALGO and NCCL_PROTO -- set
+    by the Stage 1 checks and the Stage 3a grid but by no factor -- were never unset
+    between slots. They accumulated, and a slot that asked for neither ran with both,
+    which RCCL rejects for bfloat16. Every key any stage can set must be unsettable.
+    """
+    ok = True
+    stages = {"1": designs.verify_blocks(1, 0),
+              "2": designs.screen_blocks(1, 0),
+              "3a": [designs.algo_proto_block(1, 0)],
+              "3b": [designs.channels_buffsize_block(1, 0)]}
+    for stage, blocks in stages.items():
+        keys = {k for b in blocks for s in b["slots"] for k in s["env"]}
+        missing = sorted(keys - set(designs.MANAGED_VARS))
+        ok &= check(f"stage {stage}: every key it sets is in MANAGED_VARS",
+                    not missing, f"unmanaged: {missing}")
+    return ok
+
+
 def test_env_hygiene() -> bool:
     slots = [s for b in designs.screen_blocks(1, 0) for s in b["slots"]]
     ok = check("every slot inherits the bug study's monitor fix",
@@ -117,7 +138,8 @@ def main() -> int:
               ("blocking on a dummy column", test_blocking),
               ("block structure and controls", test_block_structure),
               ("reproducibility", test_reproducible_and_varying),
-              ("environment hygiene", test_env_hygiene)]
+              ("environment hygiene", test_env_hygiene),
+              ("no variable can leak between slots", test_no_variable_can_leak_between_slots)]
     ok = True
     for label, fn in suites:
         print(f"\n{label}")

@@ -279,7 +279,11 @@ def main() -> int:
     dist.init_process_group(backend="nccl")
 
     rows = []
+    unsupported = 0
+    report_early = False
     for nbytes in sizes:
+        if report_early:
+            break
         for op in ops:
             dtypes = [("bf16", torch.bfloat16)]
             if nbytes in fp32_sizes:
@@ -304,6 +308,14 @@ def main() -> int:
                     # A missing point is data. Recording the ceiling stops the
                     # summariser from quietly averaging a shorter curve.
                     row["skipped"] = "OOM"
+                except Exception as exc:  # noqa: BLE001 - the reason is the result
+                    # RCCL rejects some algorithm/protocol/dtype combinations outright
+                    # (2.26.6 has no Ring+LL128 path for bfloat16). The rejection
+                    # message is exactly what the grid is asking about, so keep it.
+                    row["skipped"] = f"{type(exc).__name__}: {str(exc).splitlines()[-1][:160]}"
+                    unsupported += 1
+                    if unsupported >= 3:
+                        report_early = True
                 finally:
                     del built, fn
                     torch.cuda.empty_cache()
@@ -344,6 +356,8 @@ def main() -> int:
             "libraries": library_paths(),
         },
         "rows": rows,
+        "unsupported_count": unsupported,
+        "aborted_early": report_early,
     }
 
     os.makedirs(args.results_dir, exist_ok=True)

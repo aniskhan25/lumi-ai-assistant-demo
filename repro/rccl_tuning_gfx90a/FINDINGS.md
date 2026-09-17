@@ -135,6 +135,38 @@ and a noisier day would widen sigma_pos. That is what the per-allocation sentine
 for -- it is now the main thing pairing buys, and it should be enforced with
 `--cv-pos-pct 0.73` at 4 nodes rather than assumed.
 
+## Stage 1 attempts: two harness bugs, one real constraint (jobs 22115267, 22117498)
+
+Neither run produced a verification table. Both failures were mine, not LUMI's.
+
+**Job 22115267 — TIMEOUT at 50:24.** No slot hung; every slot was uniformly slow, the
+sentinel taking 263 s against ~17 s in the smoke run. `NCCL_DEBUG=INFO` with
+`SUBSYS=INIT,NET,GRAPH,TUNING` writing per-rank logs to Lustre was the whole cost. The
+bug study's README warns about exactly this and its job 21843529 died the same way.
+Fixed: logs to node-local `/tmp`, only rank 0 copied back, `SUBSYS` cut to `INIT,TUNING`,
+and Stage 1 now runs `--verify-only` — one 1 MiB all-reduce, which is all it takes to
+make RCCL build a communicator and log its configuration.
+
+> I predicted `chk_cxi_rdzv` had hung. **Retracted**: it never ran. The block died three
+> slots earlier at `chk_buffsize`, and nothing hung at all.
+
+**Job 22117498 — FAILED.** Two bugs:
+
+- **Variables leaked between slots.** `MANAGED_VARS` was derived from `FACTORS` alone, so
+  `NCCL_ALGO` and `NCCL_PROTO` — set by the Stage 1 checks and the Stage 3a grid but by no
+  factor — were never unset. They accumulated until a slot that asked for neither ran with
+  both. `MANAGED_VARS` is now computed by walking every stage's design, with a regression
+  test that fails if any stage can set a key the runner cannot unset.
+- **An empty field shifted every field after it.** Tab is IFS whitespace, so bash collapses
+  consecutive tabs; `chk_cpu_bind` has empty `srun_flags` and its JSON landed in the
+  environment field, producing `export: '{"FI_MR_CACHE_MONITOR":' not a valid identifier`.
+  Now uses the repo's existing `-` placeholder.
+
+**The real constraint, found by accident.** RCCL 2.26.6 has no Ring + LL128 path for
+bfloat16 all-reduce. That cell is in the Stage 3a grid. `collective_profile.py` now records
+a rejected combination as a `skipped` row carrying RCCL's message rather than dying, so the
+grid maps its own holes. See KNOBS.md.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a

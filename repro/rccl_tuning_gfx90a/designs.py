@@ -85,11 +85,29 @@ FACTORS = [
            note="microbenchmark-only: the vLLM path runs 1 task/node where the mask is moot"),
 ]
 
-# Every key any factor can set. run_block.sh unsets all of these before each slot,
-# so a variable can never leak from one slot into the next.
-MANAGED_VARS = sorted(
-    {k for f in FACTORS for k in list(f.low) + list(f.high)} | set(REF_ENV)
-)
+def _all_managed_vars() -> list[str]:
+    """Every key any slot in any stage can set.
+
+    Derived from FACTORS alone this missed NCCL_ALGO and NCCL_PROTO, which only the
+    Stage 1 checks and the Stage 3a grid set. run_block.sh therefore never unset
+    them, they leaked from one slot into the next, and job 22117498 died with
+    "no algorithm/protocol available for AllReduce with ncclBfloat16, NCCL_ALGO was
+    set to Ring, NCCL_PROTO was set to LL128" -- a combination no single slot asked
+    for. Walking the actual designs is self-maintaining; a new knob cannot be added
+    to a stage without appearing here.
+    """
+    keys = set(REF_ENV) | {k for f in FACTORS for k in list(f.low) + list(f.high)}
+    for build in (verify_blocks, screen_blocks,
+                  lambda r, s: [algo_proto_block(r, s)],
+                  lambda r, s: [channels_buffsize_block(r, s)]):
+        for block in build(1, 0):
+            for slot in block["slots"]:
+                keys.update(slot["env"])
+    return sorted(keys)
+
+
+# Populated at the bottom of the module, once every design function exists.
+MANAGED_VARS: list[str] = []
 
 # Plackett-Burman N=20, cyclic construction. 19 columns: FACTORS take the first
 # len(FACTORS), the rest are dummies and carry the pure-error estimate.
@@ -278,6 +296,8 @@ def confirm_block(candidates: list[dict], replicate: int, seed: int = 0) -> dict
             for c in candidates]
     return _grid_block("4", replicate, seed, body)
 
+
+MANAGED_VARS = _all_managed_vars()
 
 STAGES = {
     "0": lambda rep, seed: noise_blocks(1, 10, seed, first_replicate=rep),

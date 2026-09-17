@@ -89,9 +89,12 @@ srun --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
 import json, sys
 block = json.load(open(sys.argv[1]))
 for slot in block["slots"]:
-    kv = " ".join(f"{k}={v}" for k, v in sorted(slot["env"].items()))
+    kv = " ".join(f"{k}={v}" for k, v in sorted(slot["env"].items())) or "-"
+    # "-" rather than "": tab is IFS whitespace, so bash collapses consecutive tabs
+    # and an empty field silently shifts every field after it.
     print("\t".join([slot["name"], slot["role"], str(slot["position"]),
-                     slot.get("srun_flags", ""), kv, json.dumps(slot["env"], sort_keys=True)]))
+                     slot.get("srun_flags") or "-", kv,
+                     json.dumps(slot["env"], sort_keys=True)]))
 ' "${RESULTS_HOST}/block.json" > "${RESULTS_HOST}/slots.tsv"
 
 MANAGED_VARS="$("${IN_CONTAINER[@]}" python3 -c '
@@ -120,7 +123,10 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
   # set is the only way to be sure -- the ancestor unset one variable by name and
   # that only worked because it swept exactly one knob.
   for var in ${MANAGED_VARS}; do unset "${var}" || true; done
-  for pair in ${kv}; do export "${pair?}"; done
+  [ "${flags}" = "-" ] && flags=""
+  if [ "${kv}" != "-" ]; then
+    for pair in ${kv}; do export "${pair?}"; done
+  fi
 
   # A stale port from a slot that died mid-rendezvous will hang the next one.
   export MASTER_PORT="$(( 20000 + (SLURM_JOB_ID % 10000) + RANDOM % 1000 ))"

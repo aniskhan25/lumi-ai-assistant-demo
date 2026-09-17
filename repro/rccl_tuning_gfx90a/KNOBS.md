@@ -30,7 +30,7 @@ nothing" are different claims and the difference has to survive.
 
 | knob | why | where |
 | --- | --- | --- |
-| `NCCL_ALGO` × `NCCL_PROTO` | multi-level and strongly interacting. Forcing either globally overrides RCCL's per-size tuner, which is usually a loss; the only real question is whether the tuner picks wrong at the decode size | Stage 3a, full 3×3 |
+| `NCCL_ALGO` × `NCCL_PROTO` | multi-level and strongly interacting. Forcing either globally overrides RCCL's per-size tuner, which is usually a loss; the only real question is whether the tuner picks wrong at the decode size | Stage 3a, **3×3 with holes** — see below |
 | `NCCL_MAX_NCHANNELS` × `NCCL_BUFFSIZE` | the one interaction PB deliberately does not resolve | Stage 3b, full 3×3 |
 
 ## Dropped before the screen
@@ -67,3 +67,24 @@ Filled in as stages complete. `UNVERIFIED` is a disposition, not a gap.
 | `ignore_cpu_affinity` | | | | pending | |
 | `cxi_rdzv` | | | | pending | |
 | `cpu_bind` | | | | pending | |
+
+## The algo × proto grid is not full (job 22117498)
+
+RCCL 2.26.6 refuses some combinations outright for bf16, which is the dtype that
+matters here:
+
+```
+Error : no algorithm/protocol available for function AllReduce with datatype
+ncclBfloat16. NCCL_ALGO was set to Ring. NCCL_PROTO was set to LL128.
+```
+
+Found accidentally, by an environment leak that set both when no slot asked for
+both — but the constraint is real and it lands squarely on the Stage 3a grid, which
+asks for exactly that cell. `collective_profile.py` now records a rejected
+combination as a `skipped` row carrying RCCL's own message instead of dying, so the
+grid maps its own holes rather than losing the slot. **Stage 3a must report which
+cells are unavailable, not silently average over the ones that ran.**
+
+This also narrows what a global `NCCL_PROTO=LL128` recommendation could even mean on
+gfx90a: if it is unavailable for bf16 all-reduce under Ring, it cannot be shipped as
+a blanket setting for an inference workload whose collectives are bf16.
