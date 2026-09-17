@@ -20,7 +20,7 @@
 set -euo pipefail
 
 STAGE="${1:-}"
-[ -n "${STAGE}" ] || { echo "usage: $0 <stage>   (0, 1, 2, 3a, 3b)" >&2; exit 2; }
+[ -n "${STAGE}" ] || { echo "usage: $0 <stage>   (0, 1, 2, 3a, 3b, 3c)" >&2; exit 2; }
 
 SEED="${SEED:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +42,9 @@ case "${STAGE}" in
   2)  TIERS=("4 3 standard-g 01:00:00"); BLOCKS=2 ;;
   3a) TIERS=("4 3 standard-g 00:50:00"); BLOCKS=1 ;;
   3b) TIERS=("4 3 standard-g 00:50:00"); BLOCKS=1 ;;
+  # The ladder for the screen's only winner, at all three scales: channel counts
+  # interact with node count, so a level chosen at 4 nodes cannot be shipped for 8.
+  3c) TIERS=("2 3 standard-g 00:50:00" "4 3 standard-g 00:50:00" "8 3 standard-g 00:50:00"); BLOCKS=1 ;;
   *)  echo "unknown stage ${STAGE}" >&2; exit 2 ;;
 esac
 

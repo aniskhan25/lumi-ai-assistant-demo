@@ -259,6 +259,67 @@ is the right side to be on.
 
 A first attempt, arrays `22119621`/`22119622`, was cancelled seconds after launch: the LUMI checkout was three commits behind, so it carried the two factors Stage 1 had just disproved and no `cap4` control. Its job directories are quarantined with `INCOMPLETE_BLOCK`. The staleness guard added in `c4758d5` exists so that cannot recur.
 
+
+## Stage 2 RESULT: one winner, nine inert (jobs 22119697-22119706, 22120182, 22120183)
+
+PB-20, 10 factors, 6 valid allocations at 4 nodes. Metric is the promotion scalar --
+predicted collective ms per decode step. Positive means faster.
+
+| factor | effect | p | survives BH | verdict |
+| --- | --- | --- | --- | --- |
+| **`min_nchannels`** (`NCCL_MIN_NCHANNELS=32`) | **+7.87%** | 0.000 | yes | **promote** |
+| `cxi_rdzv` (HPE's rendezvous set) | +2.15% | 0.061 | no | inert |
+| `cpu_bind` (dropping the mask) | -1.39% | 0.217 | no | inert |
+| `cross_nic` | -1.00% | 0.377 | no | inert |
+| `ignore_cpu_affinity` | -0.99% | 0.382 | no | inert |
+| `net_gdr_read` | -0.75% | 0.505 | no | inert |
+| `max_nchannels` | +0.76% | 0.507 | no | **uninformative, see below** |
+| `nchannels_per_peer` | +0.50% | 0.661 | no | inert |
+| `buffsize` | -0.34% | 0.764 | no | inert |
+| `scratch_reclaim` | -0.12% | 0.914 | no | inert |
+
+Lenth PSE 1.14%, Benjamini-Hochberg at q=0.10, all pre-registered.
+
+### The winner is stable across every cut
+
++7.22% over all 6 original allocations, +7.60% over the 4 that passed the gate, +7.87%
+over the 6 valid ones once the replacements landed. It is not an artifact of which
+blocks survived.
+
+RCCL's default here is **16 coll channels** (job 22119061), so `NCCL_MIN_NCHANNELS=32`
+is simply "twice the default". Note the direction: the bug study only ever *capped*
+channels, and capping cost 20% at 8 and 56% at 4. Raising the floor is worth about as
+much as capping cost.
+
+### `max_nchannels` is uninformative by construction -- my error
+
+Its high level was 16, which **is** the default at 4 nodes, so the factor compared the
+default against itself. Its +0.76% is not evidence that capping does not matter: `cap4`
+in the same blocks measured -57% to -60%. A level ladder would have to use values below
+16 to say anything, and `cap4` already does.
+
+### Controls held in all six blocks
+
+| control | observed | rule |
+| --- | --- | --- |
+| `cap4` known-sign | -57.3% to -60.3% in B3 | must be strongly negative |
+| sham | 0.31% to 1.95% | must stay under 3% |
+| sentinel drift | 0.31% to 1.77% on the kept blocks | <= 3 sigma_pos = 2.2% |
+
+Two allocations, 22119702 and 22119705, drifted 3.04% and 3.23% and were **discarded by
+the gate** and resubmitted as 22120182 and 22120183. The gate had to be fixed first: it
+printed DISCARD and then pooled the blocks anyway.
+
+### Two negative results worth shipping
+
+- **`HSA_NO_SCRATCH_RECLAIM=1` does nothing here** (-0.12%, p=0.91). AMD documents a
+  5-10x small-message latency penalty on MI200 without it. This container is ROCm 7.0 and
+  AMD documents the knob for ROCm 7.13+, which is the likely explanation, but the measured
+  fact is that it is inert on the stack LUMI actually ships.
+- **HPE's rendezvous set is inert** (+2.15%, p=0.061, does not survive BH). It neither
+  helps nor hurts at the sizes this repo sends, which is worth stating given it is
+  presented as a recommendation.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
@@ -267,12 +328,12 @@ resolution; it moves the row to a stated limitation.
 | # | hypothesis | why it is worth a design column | status | job ids |
 | --- | --- | --- | --- | --- |
 | T-1 | The position effect within an allocation is under 1%/slot, so variants may share one | decides whether the study costs ~260 or ~490 GPU-h | **confirmed** — slope -0.04 to -0.08%/slot; sigma_alloc turned out smaller than sigma_pos, not larger | 22114936-22114945 |
-| T-2 | `HSA_NO_SCRATCH_RECLAIM=1` cuts B0/B1 latency materially on gfx90a | AMD reports 5–10×; absent from every LUMI and HPE document | pending | |
+| T-2 | `HSA_NO_SCRATCH_RECLAIM=1` cuts B0/B1 latency materially on gfx90a | AMD reports 5–10×; absent from every LUMI and HPE document | **refuted** — -0.12%, p=0.91 | 22119697-22120183 |
 | T-3 | `kdreg2` costs less than `userfaultfd` in registration-heavy traffic | both fix the hang; `env_baseline.sh:38` flags the comparison as never made | **unanswerable, and the premise is refuted** — libfabric refuses kdreg2 here | 22119061 |
 | T-4 | MSCCL/MSCCL++ is not compiled into this container for gfx90a | would remove a factor before it costs allocations | **confirmed** — RCCL refuses it outright | 22119061 |
-| T-5 | HPE's rendezvous set costs small-message latency | `RDZV_THRESHOLD=0` forces every message through rendezvous; measured inert for hangs, never for latency | pending | |
-| T-6 | Raising `NCCL_MIN_NCHANNELS` helps where capping hurt | the bug study only ever capped | pending | |
-| T-7 | No knob clears +3% on the promotion scalar — the defaults plus the monitor are already good | the likeliest outcome, and a shippable one | pending | |
+| T-5 | HPE's rendezvous set costs small-message latency | `RDZV_THRESHOLD=0` forces every message through rendezvous; measured inert for hangs, never for latency | **refuted** — +2.15%, p=0.061, inert not costly | 22119697-22120183 |
+| T-6 | Raising `NCCL_MIN_NCHANNELS` helps where capping hurt | the bug study only ever capped | **confirmed** — +7.87% at 32 vs a default of 16 | 22119697-22120183 |
+| T-7 | No knob clears +3% on the promotion scalar — the defaults plus the monitor are already good | the likeliest outcome, and a shippable one | **refuted** — `min_nchannels` clears it at +7.87%; the other nine do not | 22119697-22120183 |
 | T-8 | A microbenchmark gain predicts the tok/s gain within [0.3×, 1.2×] | if it does not, the microbenchmark is measuring the wrong thing | pending | |
 
 ## Verdicts

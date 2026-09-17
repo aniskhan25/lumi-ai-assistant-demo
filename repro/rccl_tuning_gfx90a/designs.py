@@ -103,7 +103,8 @@ def _all_managed_vars() -> list[str]:
     keys = set(REF_ENV) | {k for f in FACTORS for k in list(f.low) + list(f.high)}
     for build in (verify_blocks, screen_blocks,
                   lambda r, s: [algo_proto_block(r, s)],
-                  lambda r, s: [channels_buffsize_block(r, s)]):
+                  lambda r, s: [channels_buffsize_block(r, s)],
+                  lambda r, s: [min_nchannels_block(r, s)]):
         for block in build(1, 0):
             for slot in block["slots"]:
                 keys.update(slot["env"])
@@ -257,6 +258,26 @@ def algo_proto_block(replicate: int, seed: int = 0) -> dict:
     return _grid_block("3a", replicate, seed, body)
 
 
+def min_nchannels_block(replicate: int, seed: int = 0) -> dict:
+    """Stage 3c. The level ladder for the screen's one winner.
+
+    Stage 2 measured NCCL_MIN_NCHANNELS=32 at +7.87% on the promotion scalar, but 32
+    was a single arbitrary point. RCCL's own default here is 16 coll channels
+    (job 22119061), so 32 is simply "twice the default" and nothing yet says whether
+    the gain saturates, keeps climbing, or turns over.
+
+    `auto` is the reference level and must stay in the ladder: without it the ladder
+    measures differences between forced values and never says whether forcing helps
+    at all.
+    """
+    body = []
+    for level in ("auto", "24", "32", "48", "64", "96"):
+        env = {} if level == "auto" else {"NCCL_MIN_NCHANNELS": level}
+        body.append(_slot(f"minch_{level}", env, BIND_FLAG, "design",
+                          levels={"min_nchannels": level}))
+    return _grid_block("3c", replicate, seed, body)
+
+
 def channels_buffsize_block(replicate: int, seed: int = 0) -> dict:
     """Stage 3b. The one interaction PB deliberately does not resolve."""
     body = []
@@ -313,7 +334,12 @@ STAGES = {
     "1": verify_blocks,
     "2": screen_blocks,
     "3a": lambda rep, seed: [algo_proto_block(rep, seed)],
+    # 3b's premise was a channels x buffsize interaction. Stage 2 measured buffsize at
+    # -0.34% (p=0.76) and max_nchannels at +0.76% (p=0.51), so there is no pair of
+    # effects left to interact. Kept runnable, but 3c is what the screen actually
+    # pointed at.
     "3b": lambda rep, seed: [channels_buffsize_block(rep, seed)],
+    "3c": lambda rep, seed: [min_nchannels_block(rep, seed)],
 }
 
 
