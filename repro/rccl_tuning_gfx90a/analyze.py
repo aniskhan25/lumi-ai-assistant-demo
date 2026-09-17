@@ -435,7 +435,24 @@ def main() -> int:
     # run_block.sh drops this marker when it ran fewer slots than its design. Such a
     # job is not a block: its sentinels may be missing and its randomisation is
     # truncated, so pooling it would quietly bias everything it touches.
-    incomplete = [d for d in dirs if os.path.exists(os.path.join(d, "INCOMPLETE_BLOCK"))]
+    def _short_block(d: str) -> bool:
+        """Fewer measured slots than the design asked for.
+
+        Derived rather than trusted: run_block.sh drops INCOMPLETE_BLOCK when it
+        notices, but a job killed by scancel or by walltime never reaches that line,
+        and its partial results would pool in looking perfectly healthy.
+        """
+        design = os.path.join(d, "slots.tsv")
+        if not os.path.exists(design):
+            return False
+        with open(design, encoding="utf-8") as handle:
+            expected = sum(1 for line in handle if line.strip())
+        found = {os.path.basename(p).split("_rank")[0]
+                 for p in glob.glob(os.path.join(d, "*_rank*.json"))}
+        return len(found) < expected
+
+    incomplete = [d for d in dirs
+                  if os.path.exists(os.path.join(d, "INCOMPLETE_BLOCK")) or _short_block(d)]
     if incomplete and not args.allow_incomplete:
         print("refusing to analyse incomplete blocks (pass --allow-incomplete to override):")
         for d in incomplete:

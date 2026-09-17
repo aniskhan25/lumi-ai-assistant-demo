@@ -111,6 +111,26 @@ if [ -n "$(git -C "${REPO}" status --porcelain --untracked-files=no 2>/dev/null)
   exit 1
 fi
 
+# Staleness is as bad as dirtiness and much easier to miss. A `git fetch && git reset`
+# that fails on the fetch leaves the checkout silently behind, and the stage then runs
+# old code under a pre-registration naming a commit it never used. That happened once:
+# arrays 22119621/22119622 launched three commits behind and had to be cancelled.
+BRANCH="$(git -C "${REPO}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+if ! git -C "${REPO}" fetch -q origin "${BRANCH}" 2>/dev/null; then
+  echo "WARNING: could not reach origin to check for staleness. Refusing to submit" >&2
+  echo "         rather than risk running code the pre-registration does not name." >&2
+  exit 1
+fi
+LOCAL_HEAD="$(git -C "${REPO}" rev-parse HEAD)"
+REMOTE_HEAD="$(git -C "${REPO}" rev-parse FETCH_HEAD)"
+if [ "${LOCAL_HEAD}" != "${REMOTE_HEAD}" ]; then
+  echo "WARNING: this checkout is not origin/${BRANCH}." >&2
+  echo "         local  ${LOCAL_HEAD}" >&2
+  echo "         origin ${REMOTE_HEAD}" >&2
+  echo "         Reset to origin before submitting; the pre-registration names a commit." >&2
+  exit 1
+fi
+
 for tier in "${TIERS[@]}"; do
   read -r nodes reps partition walltime <<<"${tier}"
   for block in $(seq 1 "${BLOCKS}"); do
