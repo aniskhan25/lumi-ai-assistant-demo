@@ -35,6 +35,13 @@ PROFILE_ARGS="${PROFILE_ARGS:-}"
 # logging from 32 ranks measurably changes the timings it is meant to explain.
 SLOT_DEBUG="${SLOT_DEBUG:-0}"
 REAP_SETTLE_S="${REAP_SETTLE_S:-10}"
+# Per-slot wall limit, in minutes. Without it one hung slot consumes the whole
+# allocation and takes every slot after it down with it -- the block is then
+# INCOMPLETE and the GPU-hours are gone. RCCL hangs are the documented failure mode
+# on this machine (laifs-container-recipes#44), so a slot that stops making progress
+# is expected, not hypothetical. Slurm kills just the step; the loop continues and
+# the slot is recorded with its non-zero exit code.
+SLOT_TIMEOUT_MIN="${SLOT_TIMEOUT_MIN:-10}"
 
 # The LAIFS mount stalls rather than failing, so probe it before committing the
 # allocation to anything.
@@ -102,7 +109,7 @@ export BLOCK_PERMUTATION="$(cut -f1 "${RESULTS_HOST}/slots.tsv" | paste -sd, -)"
 echo "permutation: ${BLOCK_PERMUTATION}"
 
 STATUS_FILE="${RESULTS_HOST}/slot_status.tsv"
-printf 'name\trole\tposition\texit_code\twall_s\n' > "${STATUS_FILE}"
+printf 'name\trole\tposition\texit_code\twall_s\tnote\n' > "${STATUS_FILE}"
 
 while IFS=$'\t' read -r name role position flags kv env_json <&3; do
   [ -n "${name}" ] || continue
@@ -132,7 +139,7 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
   # --kill-on-bad-exit=0 so one rank dying does not tear down the block; the
   # reaping step below is what stops the survivors poisoning the next slot.
   set +e
-  srun --kill-on-bad-exit=0 ${flags} \
+  srun --kill-on-bad-exit=0 --time="${SLOT_TIMEOUT_MIN}" ${flags} \
     "${IN_CONTAINER[@]}" \
     bash -c "export RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID \
       HIP_VISIBLE_DEVICES=\${ROCR_VISIBLE_DEVICES:-0} HOME=/runtime; \
@@ -140,9 +147,13 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
         --results-dir '${RESULTS_CONT}' ${PROFILE_ARGS}"
   rc=$?
   set -e
-  printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${role}" "${position}" "${rc}" \
-    "$(( SECONDS - slot_start ))" >> "${STATUS_FILE}"
-  echo "slot ${name} exit=${rc}"
+  slot_wall=$(( SECONDS - slot_start ))
+  note="ok"
+  [ "${rc}" -ne 0 ] && note="failed"
+  [ "${slot_wall}" -ge $(( SLOT_TIMEOUT_MIN * 60 - 15 )) ] && note="TIMED_OUT"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${role}" "${position}" "${rc}" \
+    "${slot_wall}" "${note}" >> "${STATUS_FILE}"
+  echo "slot ${name} exit=${rc} wall=${slot_wall}s ${note}"
 
   # Ranks left blocked inside RCCL hold their GCDs and counterfeit an intermittent
   # bug in whatever runs next. Job 21790393 produced 11 invalid rows without this.
