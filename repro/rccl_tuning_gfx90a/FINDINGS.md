@@ -16,7 +16,7 @@ Two rules this study adds to the ones inherited from `../rccl_startup_gfx90a/FIN
 
 ## Status
 
-Nothing has run. The harness is built and its off-cluster checks pass:
+**Stage 0 is complete.** The harness is built, its off-cluster checks pass, and two smoke blocks plus 10 noise-floor allocations have run on LUMI:
 
 | check | what it proves |
 | --- | --- |
@@ -84,6 +84,57 @@ the study is sized from that MDE and not before.
 
 Smoke blocks that validated the harness, not part of the stage: job 22114824 (found the stdin, pkill and library-path bugs) and job 22114859 (10/10 slots, sentinel drift 0.51%, environment confirmed reaching the ranks).
 
+## Stage 0 RESULT: the fabric is far quieter than the design assumed (jobs 22114936-22114945)
+
+10 allocations on `standard-g`, every slot `ref`, 10 slots each. Metric is the B1 decode
+band (16 KiB - 1 MiB, burst-timed). All 10 blocks complete, no `INCOMPLETE_BLOCK`, no
+environment mismatch on any slot.
+
+| tier | allocs | CV_alloc | CV_pos | position slope | slot-1 step | MDE at k=3 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2-node | 3 | 0.12% | 1.09% | -0.08%/slot | -0.46% | **2.48%** |
+| 4-node | 5 | 0.30% | 0.73% | -0.04%/slot | +0.06% | **1.68%** |
+| 8-node | 2 | 0.09% | 0.45% | -0.06%/slot | -0.19% | **1.03%** |
+
+The 896 KiB all-reduce, the exact size the promotion scalar is built on:
+
+| tier | per-allocation means | between-allocation spread |
+| --- | --- | --- |
+| 2-node | 205.5, 205.7, 205.7 us | **0.09%** |
+| 4-node | 272.0, 272.1, 272.5, 274.4, 275.5 us | **1.29%** |
+| 8-node | 360.0, 361.4 us | **0.37%** |
+
+### T-1 CONFIRMED, and the design's central assumption was wrong
+
+The position slope is **-0.04 to -0.08%/slot** and the slot-1 step never exceeds 0.46%.
+Variants may share an allocation. More importantly the ordering of the two noise terms
+is the reverse of what this harness was built to defend against:
+
+> **sigma_alloc (0.09-0.30%) is SMALLER than sigma_pos (0.45-1.09%), not larger.**
+
+Pairing every variant against a sentinel in its own allocation was designed to cancel a
+term that turns out to be nearly absent. It stays -- it costs two slots per block and it
+is what makes the sentinel gate possible -- but it is now insurance, not the load-bearing
+element. Node placement across `standard-g` contributes almost nothing to collective
+timing at 2-8 nodes: the three 2-node allocations landed on nid005148, nid005182 and
+nid005202 and agreed to 0.09%.
+
+This also retrospectively clears `run_bandwidth.sh`'s shared-allocation design for the
+*bandwidth* numbers it produced (jobs 21791400, 21838863). It was never valid for stall
+rates and still is not.
+
+### What this does to the budget
+
+MDE at 3 allocations is **1.68% at 4 nodes**, against a pre-registered promotion floor of
+3%. The screen is comfortably powered at 3 replicates and would still clear the floor at
+2 (MDE 2.05%). The ~490 GPU-h full plan is unnecessary; the ~260 GPU-h trimmed plan has
+margin to spare.
+
+**Caveat to carry forward.** This is an uncontended snapshot. `standard-g` neighbours vary,
+and a noisier day would widen sigma_pos. That is what the per-allocation sentinel gate is
+for -- it is now the main thing pairing buys, and it should be enforced with
+`--cv-pos-pct 0.73` at 4 nodes rather than assumed.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
@@ -91,7 +142,7 @@ resolution; it moves the row to a stated limitation.
 
 | # | hypothesis | why it is worth a design column | status | job ids |
 | --- | --- | --- | --- | --- |
-| T-1 | The position effect within an allocation is under 1%/slot, so variants may share one | decides whether the study costs ~260 or ~490 GPU-h | pending | |
+| T-1 | The position effect within an allocation is under 1%/slot, so variants may share one | decides whether the study costs ~260 or ~490 GPU-h | **confirmed** — slope -0.04 to -0.08%/slot; sigma_alloc turned out smaller than sigma_pos, not larger | 22114936-22114945 |
 | T-2 | `HSA_NO_SCRATCH_RECLAIM=1` cuts B0/B1 latency materially on gfx90a | AMD reports 5–10×; absent from every LUMI and HPE document | pending | |
 | T-3 | `kdreg2` costs less than `userfaultfd` in registration-heavy traffic | both fix the hang; `env_baseline.sh:38` flags the comparison as never made | pending | |
 | T-4 | MSCCL/MSCCL++ is not compiled into this container for gfx90a | would remove a factor before it costs allocations | pending | |
@@ -104,7 +155,11 @@ resolution; it moves the row to a stated limitation.
 
 | job id | stage | nodes | purpose | result |
 | --- | --- | --- | --- | --- |
-| | | | | |
+| 22114824 | smoke | 2 | first hardware run of the harness | **harness bugs**: srun ate the loop's stdin (1 of 10 slots ran, exit 0); pkill matched itself; library_paths mis-keyed librccl |
+| 22114859 | smoke | 2 | re-run after the fixes | 10/10 slots, drift 0.51%, env confirmed reaching the ranks |
+| 22114936, 22114940, 22114941 | 0 | 2 | noise floor | CV_alloc 0.12%, CV_pos 1.09%, MDE(3) 2.48% |
+| 22114937, 22114942-22114945 | 0 | 4 | noise floor | CV_alloc 0.30%, CV_pos 0.73%, MDE(3) 1.68% |
+| 22114938, 22114939 | 0 | 8 | noise floor | CV_alloc 0.09%, CV_pos 0.45%, MDE(3) 1.03% |
 
 ## Controls
 
@@ -113,7 +168,8 @@ stage; it is recorded here either way.
 
 | job id | sentinel drift | sham | `cap4` | env reached the ranks | kept? |
 | --- | --- | --- | --- | --- | --- |
-| | | | | | |
+| 22114859 (smoke) | 0.51% | n/a | n/a | yes | yes |
+| all 10 Stage 0 blocks | <= 1.1% | n/a at stage 0 | n/a at stage 0 | yes, every slot | **10/10 kept** |
 
 ## Limitations, stated up front
 
