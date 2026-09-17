@@ -80,7 +80,9 @@ the study is sized from that MDE and not before.
 > (job 22114824) exposed three harness bugs. **No threshold changed** — the diff is the
 > code commit and the timestamp. The original stamp is in this file's git history.
 
-**Array ids:** `<recorded on submission>`
+**Array ids:** `22114936` (2-node x3), `22114937` (4-node x5), `22114938` (8-node x2). Submitted 2026-09-17 from commit `d4014d9`.
+
+Smoke blocks that validated the harness, not part of the stage: job 22114824 (found the stdin, pkill and library-path bugs) and job 22114859 (10/10 slots, sentinel drift 0.51%, environment confirmed reaching the ranks).
 
 ## Hypotheses
 
