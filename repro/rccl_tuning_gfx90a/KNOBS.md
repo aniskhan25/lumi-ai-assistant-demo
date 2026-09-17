@@ -88,3 +88,22 @@ cells are unavailable, not silently average over the ones that ran.**
 This also narrows what a global `NCCL_PROTO=LL128` recommendation could even mean on
 gfx90a: if it is unavailable for bf16 all-reduce under Ring, it cannot be shipped as
 a blanket setting for an inference workload whose collectives are bf16.
+
+## NCCL_MIN_NCHANNELS has a hard maximum of 32, and exceeding it is silent (job 22121788)
+
+```
+NCCL WARN NCCL_MIN_NCHANNELS set by environment is ignored due to
+greater than max allowed 32 channels.
+```
+
+RCCL 2.26.6 does not clamp an over-large request, it **discards the variable** and uses
+the default (16 coll channels on LUMI at 2, 4 and 8 nodes). So `NCCL_MIN_NCHANNELS=64`
+does not give you 32 channels; it gives you 16, the same as not setting it at all.
+
+Anyone tuning this by bisection upward will see the gain appear and then vanish, and
+conclude there is an optimum in the middle. There is not: the relationship is monotone up
+to the cap. This cost one retraction here and is the single most transferable thing the
+ladder produced.
+
+Verify with `NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,TUNING` and grep for
+`coll channels` -- the realised count, not the requested one, is what matters.

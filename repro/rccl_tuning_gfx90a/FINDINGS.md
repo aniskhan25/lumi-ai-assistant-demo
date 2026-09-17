@@ -376,19 +376,40 @@ effects left to interact. Recorded rather than silently skipped.
 | 4-node | **+7.55% ± 3.04** | 3 | promote |
 | 8-node | **+0.50% ± 0.87** | 3 | **inert** |
 
-### The 4-node ladder is sharply peaked, not a ramp
+### The 4-node ladder ~~is sharply peaked, not a ramp~~ CORRECTED below
 
-| level | PS gain, 4 nodes |
-| --- | --- |
-| `auto` (default, 16 channels) | -1.33% ± 1.40 |
-| 24 | +2.68% ± 2.81 |
-| **32** | **+7.55% ± 3.04** |
-| 48 | -0.92% ± 2.71 |
-| 64 | -1.09% ± 1.80 |
-| 96 | -0.57% ± 2.69 |
+| level | channels actually used | PS gain, 4 nodes |
+| --- | --- | --- |
+| `auto` | 16 (default) | -1.33% ± 1.40 |
+| 24 | 24 | +2.68% ± 2.81 |
+| **32** | **32** | **+7.55% ± 3.04** |
+| 48 | **16 — setting ignored** | -0.92% ± 2.71 |
+| 64 | **16 — setting ignored** | -1.09% ± 1.80 |
+| 96 | **16 — setting ignored** | -0.57% ± 2.69 |
 
-So "more channels is better" is false. 32 is an optimum, 24 gets a third of it, and
-everything above 32 gives nothing back.
+> ~~So "more channels is better" is false. 32 is an optimum, 24 gets a third of it, and
+> everything above 32 gives nothing back.~~
+>
+> **RETRACTED (job 22121788).** That read the shape off the gains alone without checking
+> what each level actually did. RCCL says it plainly:
+>
+> ```
+> NCCL WARN NCCL_MIN_NCHANNELS set by environment is ignored due to
+> greater than max allowed 32 channels.
+> ```
+>
+> **32 is RCCL's hard maximum, and a request above it is discarded rather than clamped**
+> -- the run silently falls back to the default 16. So 48, 64 and 96 were never high
+> channel counts performing badly; they were the baseline under three different names.
+> The true relationship is **monotone up to the cap**: 16 -> 24 -> 32 buys progressively
+> more, and there is nothing above 32 to buy.
+>
+> This is itself the more useful finding. `NCCL_MIN_NCHANNELS` above 32 is a silent
+> footgun on RCCL 2.26.6: it does not clamp, it disables the setting you asked for and
+> hands back the default.
+>
+> Those three cells also serve as three more accidental shams. All read within noise of
+> `minch_auto`, which is exactly right if they were all running the default.
 
 ### Two independent corroborations
 
@@ -400,6 +421,17 @@ everything above 32 gives nothing back.
 
 `cap4` fired hard in every tier (-26.6%, -34.7%, -45.1% on the scalar), so the null at 8
 nodes is a real null and not a dead harness.
+
+### The 8-node null survives the correction, and is not a channel-count artifact
+
+The obvious explanation -- that RCCL's default already reaches 32 at 8 nodes, making the
+knob a no-op there -- is **refuted**. At 8 nodes the default is still 16, and `minch_32`
+genuinely obtained 32 channels (job 22121788). Same setting, same realised channel count,
++7.55% at 4 nodes and +0.50% ± 0.87 at 8.
+
+So the scale dependence is real and remains unexplained. The plausible reading is that at
+8 nodes the collective is bounded by something other than channel parallelism, but this
+study has not measured that and the writeup must say so rather than guess.
 
 ### The 8-node null is the tightest measurement in the study
 
