@@ -444,6 +444,34 @@ is real -- but a reader running 8 nodes would get nothing, and a blanket recomme
 would be wrong for them. A mechanism is being measured separately (job 22121788) before
 this is written up.
 
+
+## Stage 4b RESULT: the candidate does not reintroduce the hang (job 22122188)
+
+The mandatory gate, and it passes.
+
+| | |
+| --- | --- |
+| allocations | 5, independent, one attempt each |
+| scale | 4 nodes, world 32, 8 communicators |
+| ranks recording a verdict | 160 / 160 |
+| **STALL verdicts** | **0** |
+| env confirmed at the ranks | `FI_MR_CACHE_MONITOR=userfaultfd`, `NCCL_MIN_NCHANNELS=32` |
+
+Phases exercised: `init`, `world_first`, `world_second`, `fresh_world_first_create`,
+`fresh_world_first`, `tp_like_create`, `tp_like_first`, `pp_like_create`, `pp_like_first`,
+`many_comms`. That is the shape that reproduced the original hang -- vLLM builds TP, PP,
+world and all2all groups and meets each one's first collective at a different startup
+stage.
+
+**Five separate allocations, not five repeats in one job.** The plan budgeted one
+allocation with five attempts; that would have been the same non-independence that
+produced five retracted findings in the bug study, and it would be absurd to reintroduce
+it in the gate protecting against that very bug. It cost about 2 GPU-h either way because
+the probe now completes in under a minute.
+
+`rccl_probe.py` was reused unmodified. Nothing under `rccl_startup_gfx90a/` was edited --
+those files are evidence for claims already sent upstream.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
