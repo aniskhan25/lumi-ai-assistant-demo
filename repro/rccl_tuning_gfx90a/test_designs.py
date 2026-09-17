@@ -122,10 +122,17 @@ def test_env_hygiene() -> bool:
                 not any("NCCL_NET_GDR_LEVEL" in s["env"] for s in slots),
                 "it hangs deterministically -- jobs 21790392, 21790393, 21794114")
 
-    monitor = next(f for f in designs.FACTORS if f.key == "mr_monitor")
-    ok &= check("the monitor factor never leaves the monitor unset",
-                bool(monitor.low) and bool(monitor.high),
-                "an unset level would reintroduce the memhooks hang")
+    # Stage 1 (job 22119061) showed libfabric refuses kdreg2 here -- "kdreg2 monitor
+    # not available" -- and falls back to neither kdreg2 nor userfaultfd. The monitor
+    # is therefore a constant, and every slot must carry the one value proven to work.
+    # Varying it again, or leaving it unset, reintroduces the memhooks hang.
+    ok &= check("the MR-cache monitor is a constant, never a factor",
+                not any(f.key == "mr_monitor" for f in designs.FACTORS))
+    ok &= check("and no factor can touch it",
+                not any("FI_MR_CACHE_MONITOR" in dict(f.low, **f.high)
+                        for f in designs.FACTORS))
+    ok &= check("every slot pins it to userfaultfd",
+                all(s["env"].get("FI_MR_CACHE_MONITOR") == "userfaultfd" for s in slots))
 
     bind = next(f for f in designs.FACTORS if f.key == "cpu_bind")
     ok &= check("cpu_bind varies srun flags, not environment",

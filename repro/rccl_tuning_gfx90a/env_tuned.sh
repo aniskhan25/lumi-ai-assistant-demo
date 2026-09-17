@@ -31,11 +31,14 @@
 #   justified by: jobs 21838111, 21838977, 21838978, 21838863    cost: none measured
 export FI_MR_CACHE_MONITOR=userfaultfd
 
-# kdreg2 is HPE's kernel module and fixes the hang equally well. It may cost less
-# than userfaultfd's page-fault path on registration-heavy workloads, or more.
-# env_baseline.sh:38 flagged this as never compared; it is factor 2 of the screen.
-#   justified by: <stage 4 job id>    cost: <measured, B1 decode and B2 prefill>
-# export FI_MR_CACHE_MONITOR=kdreg2
+# DO NOT use kdreg2 here. It is requested, it reaches the rank, and libfabric refuses
+# it -- `kdreg2 monitor not available` (job 22119061) -- even though /dev/kdreg2 exists
+# on the nodes. The monitor that results is neither kdreg2 nor userfaultfd, so setting
+# it buys an unknown fallback in place of the one value measured to fix the hang.
+#
+# This withdraws env_baseline.sh:37-38, which called kdreg2 "an equally valid fix" on
+# the strength of a 0/5 stall count. Whatever produced that 0/5, it was not kdreg2.
+#   refuted by: job 22119061
 
 # Not a comms setting, but the one measured win: ~167 s of every cold 8-node vLLM
 # launch is one-time MIOpen compilation plus first touch of the weights on Lustre.
@@ -56,12 +59,11 @@ export MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
 #   justified by: <job id>    cost: <measured>
 # export HSA_NO_SCRATCH_RECLAIM=1
 
-# MSCCL is off by default on non-MI300X. Stage 1 checks whether it is even compiled
-# into this container before the screen spends allocations on it.
-#   justified by: <job id>    cost: <measured>
-# export RCCL_MSCCL_FORCE_ENABLE=1
+# MSCCL++ cannot be enabled on this container at all. RCCL says so itself:
+#   NCCL WARN MSCCL++: Cannot enable MSCCL++; environment is not MSCCL compatible
+# So the knob is a no-op on gfx90a here, not an untested opportunity.
+#   refuted by: job 22119061
 # export RCCL_MSCCLPP_ENABLE=1
-# export RCCL_MSCCLPP_THRESHOLD=1048576
 
 # Channel count. Note the direction: the bug study only ever *capped* channels, and
 # capping costs 20% of bulk bandwidth at 8 and 56% at 4 (jobs 21791400, 21838863).
@@ -97,9 +99,14 @@ export MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
 # tuner, which is usually a loss. The only question Stage 3a asks is whether the
 # tuner picks wrong at the decode size. Recommending them per-size would need an
 # ncclTunerPlugin_v6, which is deliberately out of scope for this study.
+# NCCL_PROTO=LL128 is not merely untested, it is unavailable: RCCL 2.26.6 has no
+# LL128 path for bf16 all-reduce and fails outright (job 22118353):
+#   no algorithm/protocol available for function AllReduce with datatype ncclBfloat16
+# Since every collective in this serving path is bf16, LL128 cannot ship as a blanket
+# setting regardless of what it would do for throughput.
+#   refuted by: job 22118353
 #   justified by: <job id>    cost: <measured>
 # export NCCL_ALGO=Ring
-# export NCCL_PROTO=LL128
 
 # --- measured, and NOT recommended -----------------------------------------------------
 # NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3 was recommended three times during the bug

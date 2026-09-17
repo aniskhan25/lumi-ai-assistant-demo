@@ -64,14 +64,18 @@ class Factor:
 
 # Order is fixed and load-bearing: it is the column assignment into PB-20, and
 # changing it changes which interactions alias where. Append, never reorder.
+#
+# Two candidates were removed after Stage 1 (job 22119061) proved they cannot take
+# effect on this machine, which is exactly what that stage is for:
+#   mr_monitor (userfaultfd vs kdreg2) -- libfabric answers "kdreg2 monitor not
+#     available" and falls back, so the high level is unreachable and the factor is
+#     a constant. This also withdraws env_baseline.sh's claim that kdreg2 is an
+#     equally valid fix.
+#   mscclpp -- RCCL answers "Cannot enable MSCCL++; environment is not MSCCL
+#     compatible". The knob is a no-op here.
 FACTORS = [
     Factor("scratch_reclaim", {}, {"HSA_NO_SCRATCH_RECLAIM": "1"},
            note="AMD documents 5-10x small-message latency on gfx90a without it"),
-    Factor("mr_monitor", {"FI_MR_CACHE_MONITOR": "userfaultfd"},
-           {"FI_MR_CACHE_MONITOR": "kdreg2"},
-           note="env_baseline.sh:38 -- both fix the hang, never compared for cost"),
-    Factor("mscclpp", {}, {"RCCL_MSCCLPP_ENABLE": "1", "RCCL_MSCCLPP_THRESHOLD": "1048576"},
-           note="off by default on non-MI300X; may be compiled out of this container"),
     Factor("min_nchannels", {}, {"NCCL_MIN_NCHANNELS": "32"}),
     Factor("max_nchannels", {}, {"NCCL_MAX_NCHANNELS": "16"}),
     Factor("nchannels_per_peer", {}, {"NCCL_NCHANNELS_PER_NET_PEER": "2"}),

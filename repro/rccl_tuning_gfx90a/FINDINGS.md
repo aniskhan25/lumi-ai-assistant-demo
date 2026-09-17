@@ -167,6 +167,51 @@ bfloat16 all-reduce. That cell is in the Stage 3a grid. `collective_profile.py` 
 a rejected combination as a `skipped` row carrying RCCL's message rather than dying, so the
 grid maps its own holes. See KNOBS.md.
 
+
+## Stage 1 RESULT: two factors removed, one shipped claim withdrawn (job 22119061)
+
+18 slots, 17 debug captures, one slot failed and that failure is itself a result. Every
+slot's requested environment was observed at the rank, so Layer 1 passes throughout.
+
+| knob | verdict | evidence |
+| --- | --- | --- |
+| `NCCL_MAX_NCHANNELS` | **verified** | RCCL reported `4` and `16` coll channels |
+| `NCCL_MIN_NCHANNELS` | **verified** | RCCL reported `32` coll channels |
+| `NCCL_NCHANNELS_PER_NET_PEER` | **verified** | RCCL reported its channel count |
+| `FI_MR_CACHE_MONITOR=userfaultfd` | **verified** | one userfaultfd fd open at the rank |
+| `RCCL_MSCCLPP_ENABLE` | **REFUSED** | `MSCCL++: Cannot enable MSCCL++; environment is not MSCCL compatible` |
+| `FI_MR_CACHE_MONITOR=kdreg2` | **REFUSED** | `kdreg2 monitor not available`; 0 userfaultfd fds, no kdreg2 fd |
+| `NCCL_PROTO=LL128` | **REFUSED** | no LL128 path for bf16 all-reduce (job 22118353) |
+| everything else | `no-proxy` | RCCL logs no line for it, or it is libfabric's and goes to stderr |
+
+### The screen drops from 12 factors to 10
+
+`mscclpp` and `mr_monitor` are gone. Both are dead levels: their high level cannot be
+reached on this machine, so screening them would have spent allocations producing a null
+that means nothing -- the precise failure Stage 1 exists to prevent, for 3 GPU-h.
+
+### A shipped claim is withdrawn
+
+`env_baseline.sh:37-38` says kdreg2 is "an equally valid fix" and "may cost less than
+userfaultfd's page-fault path", on the strength of a measured 0/5 stall count. But
+libfabric refuses kdreg2 on these nodes and falls back to something that is neither
+kdreg2 nor userfaultfd. **Whatever produced that 0/5, it was not kdreg2.** The claim
+cannot stand, and `env_tuned.sh` now carries kdreg2 in its DO-NOT-SET section instead.
+
+Note `/dev/kdreg2` **does** exist on the nodes (`crw-rw-rw- 243, 0`), so presence of the
+device is not evidence the monitor is usable -- which is how the original claim survived.
+
+### LL128 is unavailable, not untested
+
+RCCL 2.26.6 has no LL128 path for bf16 all-reduce. Every collective in this serving path
+is bf16, so LL128 cannot ship as a blanket setting whatever it would do for throughput,
+and the Stage 3a grid loses a column rather than a cell.
+
+### Environment captured
+
+RCCL `2.26.6-HEAD:64f48b6`, aws-ofi-nccl `1.20.0`, libfabric plugin `Libfabric (v10)`,
+ROCr `1.18`, kernel `6.4.0-150600.23.73_15.0.14-cray_shasta_c`.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
@@ -176,8 +221,8 @@ resolution; it moves the row to a stated limitation.
 | --- | --- | --- | --- | --- |
 | T-1 | The position effect within an allocation is under 1%/slot, so variants may share one | decides whether the study costs ~260 or ~490 GPU-h | **confirmed** — slope -0.04 to -0.08%/slot; sigma_alloc turned out smaller than sigma_pos, not larger | 22114936-22114945 |
 | T-2 | `HSA_NO_SCRATCH_RECLAIM=1` cuts B0/B1 latency materially on gfx90a | AMD reports 5–10×; absent from every LUMI and HPE document | pending | |
-| T-3 | `kdreg2` costs less than `userfaultfd` in registration-heavy traffic | both fix the hang; `env_baseline.sh:38` flags the comparison as never made | pending | |
-| T-4 | MSCCL/MSCCL++ is not compiled into this container for gfx90a | would remove a factor before it costs allocations | pending | |
+| T-3 | `kdreg2` costs less than `userfaultfd` in registration-heavy traffic | both fix the hang; `env_baseline.sh:38` flags the comparison as never made | **unanswerable, and the premise is refuted** — libfabric refuses kdreg2 here | 22119061 |
+| T-4 | MSCCL/MSCCL++ is not compiled into this container for gfx90a | would remove a factor before it costs allocations | **confirmed** — RCCL refuses it outright | 22119061 |
 | T-5 | HPE's rendezvous set costs small-message latency | `RDZV_THRESHOLD=0` forces every message through rendezvous; measured inert for hangs, never for latency | pending | |
 | T-6 | Raising `NCCL_MIN_NCHANNELS` helps where capping hurt | the bug study only ever capped | pending | |
 | T-7 | No knob clears +3% on the promotion scalar — the defaults plus the monitor are already good | the likeliest outcome, and a shippable one | pending | |
