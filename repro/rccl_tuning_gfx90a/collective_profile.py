@@ -243,7 +243,15 @@ def main() -> int:
     parser.add_argument("--burst-k", type=int, default=50)
     parser.add_argument("--dry-run", action="store_true",
                         help="print the grid and exit; no GPU, no process group")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="one collective, then exit: enough to make RCCL log its "
+                             "configuration for Stage 1, without sweeping anything")
     args = parser.parse_args()
+
+    if args.verify_only:
+        args.ops, args.min_bytes, args.max_bytes = "all_reduce", 1048576, 1048576
+        args.serving_sizes, args.fp32_sizes = "", ""
+        args.reps, args.warmup, args.bursts = 2, 1, 1
 
     extra = [int(s) for s in args.serving_sizes.split(",") if s.strip()]
     fp32_sizes = {int(s) for s in args.fp32_sizes.split(",") if s.strip()}

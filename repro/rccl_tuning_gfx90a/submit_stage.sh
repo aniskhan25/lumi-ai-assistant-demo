@@ -38,7 +38,7 @@ ACCOUNT="${ACCOUNT:-project_462000131}"
 # timing measurement, so partition cannot confound it.
 case "${STAGE}" in
   0)  TIERS=("2 3 standard-g 01:00:00" "4 5 standard-g 01:00:00" "8 2 standard-g 00:50:00"); BLOCKS=1 ;;
-  1)  TIERS=("2 2 dev-g 00:50:00"); BLOCKS=1 ;;
+  1)  TIERS=("2 2 dev-g 01:30:00"); BLOCKS=1 ;;
   2)  TIERS=("4 3 standard-g 01:00:00"); BLOCKS=2 ;;
   3a) TIERS=("4 3 standard-g 00:50:00"); BLOCKS=1 ;;
   3b) TIERS=("4 3 standard-g 00:50:00"); BLOCKS=1 ;;
@@ -118,7 +118,7 @@ for tier in "${TIERS[@]}"; do
     # Stage 1 asserts, it does not time, so it runs a minimal grid with INFO logging
     # on. INFO from every rank would contaminate a timing measurement, which is
     # exactly why this is a separate stage.
-    [ "${STAGE}" = "1" ] && extra+=(--export=ALL,SLOT_DEBUG=1,PROFILE_ARGS=--max-bytes\ 262144\ --reps\ 2\ --warmup\ 1\ --bursts\ 1\ --burst-k\ 5)
+    [ "${STAGE}" = "1" ] && extra+=(--export=ALL,SLOT_DEBUG=1,PROFILE_ARGS=--verify-only,SLOT_TIMEOUT_MIN=4)
     jobid=$(STAGE="${STAGE}" BLOCK="${block}" SEED="${SEED}" REPO_DIR="${REPO}" \
       sbatch --parsable \
         --account="${ACCOUNT}" --partition="${partition}" \

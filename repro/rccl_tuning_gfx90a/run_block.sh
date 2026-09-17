@@ -128,9 +128,13 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
   export SLOT_ENV_JSON="${env_json}"
   export SLOT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [ "${SLOT_DEBUG}" = "1" ]; then
-    export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH,TUNING
+    # INFO from every rank, written to Lustre, took job 22115267 from ~17 s a slot to
+    # 263 s and timed the whole block out -- the same way job 21843529 died in the bug
+    # study. Log to node-local /tmp and drop GRAPH and NET, which are the verbose ones
+    # and assert nothing that verify_effect.py reads.
+    export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,TUNING
     export FI_LOG_LEVEL=warn FI_LOG_PROV=cxi
-    export NCCL_DEBUG_FILE="${RESULTS_CONT}/debug_${name}_rank%d.log"
+    export NCCL_DEBUG_FILE="/tmp/nccl_${name}_rank%d.log"
   else
     export NCCL_DEBUG=WARN
   fi
@@ -144,7 +148,11 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
     bash -c "export RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID \
       HIP_VISIBLE_DEVICES=\${ROCR_VISIBLE_DEVICES:-0} HOME=/runtime; \
       python3 /work/${REL}/collective_profile.py --variant '${name}' \
-        --results-dir '${RESULTS_CONT}' ${PROFILE_ARGS}"
+        --results-dir '${RESULTS_CONT}' ${PROFILE_ARGS}; \
+      rc=\$?; \
+      if [ \"\${SLURM_PROCID}\" = 0 ] && [ -f /tmp/nccl_${name}_rank0.log ]; then \
+        cp /tmp/nccl_${name}_rank0.log '${RESULTS_CONT}/debug_${name}_rank0.log' || true; fi; \
+      exit \$rc"
   rc=$?
   set -e
   slot_wall=$(( SECONDS - slot_start ))
