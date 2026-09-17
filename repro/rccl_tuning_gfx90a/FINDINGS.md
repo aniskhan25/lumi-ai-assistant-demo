@@ -255,7 +255,9 @@ ROCr `1.18`, kernel `6.4.0-150600.23.73_15.0.14-cray_shasta_c`.
 1.68% against a 3% promotion floor. The screen is over-powered rather than under-, which
 is the right side to be on.
 
-**Array ids:** `<recorded on submission>`
+**Array ids:** `22119697` (block 1 x3), `22119698` (block 2 x3). Submitted 2026-09-17 from commit `c4758d5`, staleness guard passed.
+
+A first attempt, arrays `22119621`/`22119622`, was cancelled seconds after launch: the LUMI checkout was three commits behind, so it carried the two factors Stage 1 had just disproved and no `cap4` control. Its job directories are quarantined with `INCOMPLETE_BLOCK`. The staleness guard added in `c4758d5` exists so that cannot recur.
 
 ## Hypotheses
 
