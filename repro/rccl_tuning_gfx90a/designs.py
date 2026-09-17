@@ -243,6 +243,33 @@ def channels_buffsize_block(replicate: int, seed: int = 0) -> dict:
     return _grid_block("3b", replicate, seed, body)
 
 
+def verify_blocks(replicate: int, seed: int = 0) -> list[dict]:
+    """Stage 1. One slot per knob, at the level that actually sets something.
+
+    This stage measures nothing. It exists so that `verify_effect.py` has an
+    NCCL_DEBUG=INFO capture per knob to assert against, and so a knob that is never
+    read gets dropped here -- for the price of one 2-node job -- rather than after
+    six allocations of screening have produced a null that means nothing.
+
+    Low levels are mostly "unset", which is what the sentinel already is, so only the
+    high level needs its own slot. `mr_monitor` is the exception: both of its levels
+    set something, and kdreg2 is the one that has never been exercised here.
+    """
+    body = []
+    for factor in FACTORS:
+        if not factor.high and factor.high_flags == factor.low_flags:
+            continue  # nothing to assert: the level changes no environment and no flag
+        body.append(_slot(f"chk_{factor.key}", factor.high, factor.high_flags, "design"))
+    # Not screened, but used by the Stage 3a grid, so they need the same proof.
+    body.append(_slot("chk_algo", {"NCCL_ALGO": "Ring"}, BIND_FLAG, "design"))
+    body.append(_slot("chk_proto", {"NCCL_PROTO": "LL128"}, BIND_FLAG, "design"))
+    # The known-sign control has to be shown to take effect before it can be trusted
+    # to prove that everything else does.
+    body.append(_cap4())
+    return [{"stage": "1", "replicate": replicate, "block": 1, "seed": seed,
+             "slots": _wrap(body, _rng("1", replicate, seed))}]
+
+
 def confirm_block(candidates: list[dict], replicate: int, seed: int = 0) -> dict:
     """Stage 4. Re-estimates the screen's winners on fresh allocations, because the
     top screened effect is biased upward by selection. env_tuned.sh quotes these
@@ -254,6 +281,7 @@ def confirm_block(candidates: list[dict], replicate: int, seed: int = 0) -> dict
 
 STAGES = {
     "0": lambda rep, seed: noise_blocks(1, 10, seed, first_replicate=rep),
+    "1": verify_blocks,
     "2": screen_blocks,
     "3a": lambda rep, seed: [algo_proto_block(rep, seed)],
     "3b": lambda rep, seed: [channels_buffsize_block(rep, seed)],

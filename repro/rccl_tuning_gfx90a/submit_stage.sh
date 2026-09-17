@@ -115,7 +115,10 @@ for tier in "${TIERS[@]}"; do
   read -r nodes reps partition walltime <<<"${tier}"
   for block in $(seq 1 "${BLOCKS}"); do
     extra=()
-    [ "${STAGE}" = "1" ] && extra+=(--export=ALL,SLOT_DEBUG=1)
+    # Stage 1 asserts, it does not time, so it runs a minimal grid with INFO logging
+    # on. INFO from every rank would contaminate a timing measurement, which is
+    # exactly why this is a separate stage.
+    [ "${STAGE}" = "1" ] && extra+=(--export=ALL,SLOT_DEBUG=1,PROFILE_ARGS=--max-bytes\ 262144\ --reps\ 2\ --warmup\ 1\ --bursts\ 1\ --burst-k\ 5)
     jobid=$(STAGE="${STAGE}" BLOCK="${block}" SEED="${SEED}" REPO_DIR="${REPO}" \
       sbatch --parsable \
         --account="${ACCOUNT}" --partition="${partition}" \
