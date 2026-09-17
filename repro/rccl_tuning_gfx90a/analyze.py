@@ -416,6 +416,8 @@ def main() -> int:
     parser.add_argument("--cv-pos-pct", type=float,
                         help="position CV from Stage 0; without it the sentinel gate has no bound")
     parser.add_argument("--band", default="B1 decode", help="band the verdict column uses")
+    parser.add_argument("--allow-incomplete", action="store_true",
+                        help="analyse blocks that ran fewer slots than their design")
     parser.add_argument("--decode-bytes", type=int, default=917504,
                         help="hidden x max_num_seqs x 2 = 7168 x 64 x 2")
     parser.add_argument("--a2a-bytes", type=int, default=458752,
@@ -429,6 +431,16 @@ def main() -> int:
         dirs.extend(sorted(glob.glob(os.path.join(args.results_root, "job_*"))))
     if not dirs:
         dirs = [os.environ.get("RESULTS_DIR", "results")]
+
+    # run_block.sh drops this marker when it ran fewer slots than its design. Such a
+    # job is not a block: its sentinels may be missing and its randomisation is
+    # truncated, so pooling it would quietly bias everything it touches.
+    incomplete = [d for d in dirs if os.path.exists(os.path.join(d, "INCOMPLETE_BLOCK"))]
+    if incomplete and not args.allow_incomplete:
+        print("refusing to analyse incomplete blocks (pass --allow-incomplete to override):")
+        for d in incomplete:
+            print(f"  {d}")
+        return 3
 
     slots = load_slots(dirs)
     if not slots:

@@ -163,9 +163,13 @@ def library_paths() -> dict:
                 if not path.startswith("/"):
                     continue
                 base = os.path.basename(path)
-                for name in wanted:
-                    if base.startswith(name) and name not in found:
-                        found[name] = os.path.realpath(path)
+                # Longest name first, then stop: `librccl-net.so` also starts with
+                # `librccl`, and matching in declaration order filed the net plugin
+                # under the RCCL key and lost the RCCL version entirely.
+                for name in sorted(wanted, key=len, reverse=True):
+                    if base.startswith(name):
+                        found.setdefault(name, os.path.realpath(path))
+                        break
     except OSError:
         pass
     return found

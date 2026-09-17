@@ -104,7 +104,7 @@ echo "permutation: ${BLOCK_PERMUTATION}"
 STATUS_FILE="${RESULTS_HOST}/slot_status.tsv"
 printf 'name\trole\tposition\texit_code\twall_s\n' > "${STATUS_FILE}"
 
-while IFS=$'\t' read -r name role position flags kv env_json; do
+while IFS=$'\t' read -r name role position flags kv env_json <&3; do
   [ -n "${name}" ] || continue
   echo
   echo "=== slot ${position}: ${name} (${role}) ==="
@@ -147,9 +147,22 @@ while IFS=$'\t' read -r name role position flags kv env_json; do
   # Ranks left blocked inside RCCL hold their GCDs and counterfeit an intermittent
   # bug in whatever runs next. Job 21790393 produced 11 invalid rows without this.
   srun --overlap --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
-    bash -c 'pkill -f collective_profile.py || true' >/dev/null 2>&1 || true
+    bash -c 'pkill -f "[c]ollective_profile\.py" || true' >/dev/null 2>&1 || true
   sleep "${REAP_SETTLE_S}"
-done < "${RESULTS_HOST}/slots.tsv"
+done 3< "${RESULTS_HOST}/slots.tsv"
+
+# Job 22114824 ran 1 of 10 slots and still exited 0, because srun ate the loop's
+# stdin. A block that silently measures a fraction of its design is worse than one
+# that fails, so the count is checked rather than assumed.
+expected=$(wc -l < "${RESULTS_HOST}/slots.tsv")
+completed=$(( $(wc -l < "${STATUS_FILE}") - 1 ))
+echo
+echo "=== slots: ${completed}/${expected} completed ==="
+if [ "${completed}" -ne "${expected}" ]; then
+  echo "ERROR: the block ran ${completed} of ${expected} slots. Its results are not a" >&2
+  echo "       block and must not be pooled with others. Discard this job id." >&2
+  touch "${RESULTS_HOST}/INCOMPLETE_BLOCK"
+fi
 
 echo
 echo "=== analysis ==="
