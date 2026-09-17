@@ -24,8 +24,11 @@ if [ "${SLOT_DEBUG:-0}" = "1" ]; then
   export NCCL_DEBUG_FILE="/tmp/nccl_${SLOT_NAME}_rank${SLURM_PROCID}.log"
 fi
 
-python3 "/work/${REL_DIR}/collective_profile.py" \
-  --variant "${SLOT_NAME}" --results-dir "${RESULTS_DIR}" ${PROFILE_ARGS:-}
+# Stage 4b drives the bug study's rccl_probe.py through this same driver rather than
+# duplicating the launch path. SLOT_SCRIPT is a path relative to /work, so the probe is
+# reused exactly as it was, without editing anything under rccl_startup_gfx90a.
+SCRIPT="${SLOT_SCRIPT:-/work/${REL_DIR}/collective_profile.py}"
+python3 "${SCRIPT}" --variant "${SLOT_NAME}" --results-dir "${RESULTS_DIR}" ${PROFILE_ARGS:-}
 rc=$?
 
 # One rank's INIT/TUNING trace is enough: every rank logs the same configuration, and
