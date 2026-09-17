@@ -140,7 +140,8 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
     # and assert nothing that verify_effect.py reads.
     export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,TUNING
     export FI_LOG_LEVEL=warn FI_LOG_PROV=cxi
-    export NCCL_DEBUG_FILE="/tmp/nccl_${name}_rank%d.log"
+    # NCCL_DEBUG_FILE is set per rank inside in_container_slot.sh: NCCL substitutes
+    # only %h and %p, so a %d here is written literally and nothing finds the file.
   else
     export NCCL_DEBUG=WARN
   fi
@@ -149,16 +150,11 @@ while IFS=$'\t' read -r name role position flags kv env_json <&3; do
   # --kill-on-bad-exit=0 so one rank dying does not tear down the block; the
   # reaping step below is what stops the survivors poisoning the next slot.
   set +e
+  # PROFILE_ARGS arrives via --export=ALL but is only a shell variable here until
+  # it is exported, and in_container_slot.sh reads it from the environment.
+  export SLOT_NAME="${name}" REL_DIR="${REL}" SLOT_DEBUG PROFILE_ARGS
   srun --kill-on-bad-exit=0 --time="${SLOT_TIMEOUT_MIN}" ${flags} \
-    "${IN_CONTAINER[@]}" \
-    bash -c "export RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID \
-      HIP_VISIBLE_DEVICES=\${ROCR_VISIBLE_DEVICES:-0} HOME=/runtime; \
-      python3 /work/${REL}/collective_profile.py --variant '${name}' \
-        --results-dir '${RESULTS_CONT}' ${PROFILE_ARGS}; \
-      rc=\$?; \
-      if [ \"\${SLURM_PROCID}\" = 0 ] && [ -f /tmp/nccl_${name}_rank0.log ]; then \
-        cp /tmp/nccl_${name}_rank0.log '${RESULTS_CONT}/debug_${name}_rank0.log' || true; fi; \
-      exit \$rc"
+    "${IN_CONTAINER[@]}" "/work/${REL}/in_container_slot.sh"
   rc=$?
   set -e
   slot_wall=$(( SECONDS - slot_start ))
