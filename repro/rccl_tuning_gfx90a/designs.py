@@ -224,6 +224,11 @@ def screen_blocks(replicate: int, seed: int = 0) -> list[dict]:
             body.append(_slot(f"pb{run_index:02d}", env, flags, "design",
                               levels=levels, run_index=run_index))
         body.append(_sham(f"b{block_id}"))
+        # Without this the screen has no way to notice that no environment reached
+        # the ranks at all: every factor would come back null and read as "the
+        # defaults are already good", which is both a plausible result and, in that
+        # scenario, completely wrong.
+        body.append(_cap4())
         blocks.append({"stage": "2", "replicate": replicate, "block": block_id,
                        "seed": seed, "block_column": block_col,
                        "slots": _wrap(body, rng)})

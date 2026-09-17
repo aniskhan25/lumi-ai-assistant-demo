@@ -68,6 +68,10 @@ def test_block_structure() -> bool:
                     slots[1]["role"] == "sentinel" and slots[-1]["role"] == "sentinel")
         ok &= check(f"block {b['block']} carries exactly one sham",
                     sum(1 for s in slots if s["role"] == "sham") == 1)
+        # The control that catches "no environment reached the ranks". It was missing
+        # from the screen until job 22119061 was already behind us.
+        ok &= check(f"block {b['block']} carries the cap4 known-sign control",
+                    any(s["name"] == "cap4" for s in slots))
         ok &= check(f"block {b['block']} positions are 1..n in order",
                     [s["position"] for s in slots] == list(range(1, len(slots) + 1)))
         ok &= check(f"block {b['block']} sham env is identical to the sentinel",
