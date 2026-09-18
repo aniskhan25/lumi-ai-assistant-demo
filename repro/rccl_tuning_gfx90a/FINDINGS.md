@@ -472,6 +472,53 @@ the probe now completes in under a minute.
 `rccl_probe.py` was reused unmodified. Nothing under `rccl_startup_gfx90a/` was edited --
 those files are evidence for claims already sent upstream.
 
+
+## Stage 5 ATTEMPT 1: contaminated, one usable sweep out of ten jobs (jobs 22139716-22140277)
+
+**No verdict. The stage has to be re-run.**
+
+Ten vLLM jobs produced exactly **one** complete benchmark sweep (`s5_ref/job_22140274`,
+5 summaries). Everything else died, hung, or completed without writing benchmark output.
+
+| arm | startups | READY | WORKER_DIED / DIED | hung |
+| --- | --- | --- | --- | --- |
+| cand (`NCCL_MIN_NCHANNELS=32`) | 6 | 3 | 2 | 1 |
+| ref | 4 | 1 | 3 | 0 |
+
+### Cause: six concurrent jobs against one HF cache on Lustre
+
+`RuntimeError: Cannot find any model weights with 'openai/gpt-oss-120b'` -- with the
+cache verifiably complete (15 safetensors, 0 `.incomplete` files) and other jobs reading
+it successfully at the same moment. Six 4-node jobs is 192 ranks enumerating one cache
+directory at once. This is a harness-operation failure, not a tuning result, and it hit
+**both arms**, the reference slightly harder.
+
+### `COMPLETED` does not mean the run produced data
+
+Job 22139717_1 shows `COMPLETED` after 45 minutes and wrote **zero** summary files. Job
+state is not evidence of output. The collective harness already learned this -- block
+completeness is derived from `slots.tsv` rather than trusted from a marker -- and the
+Stage 5 analyser counts summary files for the same reason.
+
+### One candidate hang, not attributable
+
+Job 22140275 went silent for 43 minutes after `Graph capturing finished`, while its
+contemporaneous reference served the full sweep. It was cancelled.
+
+It is **one event in six candidate startups**, in a configuration that carries the
+`userfaultfd` monitor fix. `laifs-container-recipes#44` remains open and the bug study
+saw intermittent stalls at baseline, so this cannot be pinned on `NCCL_MIN_NCHANNELS`
+with n=1. It is recorded because a startup hang in the candidate arm is exactly the
+thing that must not be waved through, and the re-run should count startups explicitly.
+
+Note Stage 4b's 0/5 was `rccl_probe.py`, not real vLLM startup: the probe does not do
+graph capture or pipeline setup, so it cannot rule this out.
+
+### Cost
+
+About 128 GPU-h for one usable sweep. The re-run must serialise: **one vLLM job at a
+time**, never two.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
