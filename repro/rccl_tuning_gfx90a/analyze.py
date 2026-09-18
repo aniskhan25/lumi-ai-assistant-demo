@@ -354,7 +354,8 @@ def noise_report(slots: list[dict], metric) -> list[str]:
     return lines
 
 
-def screen_report(slots: list[dict], block_files: list[str], metric) -> list[str]:
+def screen_report(slots: list[dict], block_files: list[str], metric,
+                  higher_is_better: bool = False) -> list[str]:
     """Stage 2. Main effects from the PB design, with Lenth's PSE for the error."""
     levels: dict[str, dict[str, int]] = {}
     factors: list[str] = []
@@ -371,7 +372,7 @@ def screen_report(slots: list[dict], block_files: list[str], metric) -> list[str
     if not levels:
         return []
 
-    gains = paired_gains(slots, metric, False)
+    gains = paired_gains(slots, metric, higher_is_better)
     effects, rows = {}, []
     for factor in factors:
         high = [g for name, gs in gains.items() if levels.get(name, {}).get(factor) == 1 for g in gs]
@@ -388,7 +389,8 @@ def screen_report(slots: list[dict], block_files: list[str], metric) -> list[str
     pvalues = [stats.normal_sf(abs(e) / pse) * 2 if pse else 1.0 for _, e, _, _ in rows]
     keep = stats.benjamini_hochberg(pvalues, q=0.10)
 
-    lines = ["## Stage 2 — screen (Plackett-Burman, main effects)\n",
+    scored = "the promotion scalar" if not higher_is_better else "the selected band"
+    lines = [f"## Stage 2 — screen (Plackett-Burman, main effects), scored on {scored}\n",
              "Each effect is the mean paired gain at the high level minus the low level, "
              "every run already divided by the sentinel of its own allocation. "
              f"Error from Lenth's pseudo standard error (PSE = {stats.as_percent(pse):.2f}%) "
@@ -418,6 +420,11 @@ def main() -> int:
     parser.add_argument("--band", default="B1 decode", help="band the verdict column uses")
     parser.add_argument("--allow-incomplete", action="store_true",
                         help="analyse blocks that ran fewer slots than their design")
+    parser.add_argument("--screen-on", choices=("ps", "band"), default="ps",
+                        help="score the screen's factor effects on the promotion scalar "
+                             "(decode-weighted, the default) or on --band. The scalar is "
+                             "right for inference; a training workload lives in B3 and "
+                             "needs the band, and the two can disagree.")
     parser.add_argument("--decode-bytes", type=int, default=917504,
                         help="hidden x max_num_seqs x 2 = 7168 x 64 x 2")
     parser.add_argument("--a2a-bytes", type=int, default=458752,
@@ -540,7 +547,11 @@ def main() -> int:
         lines.append("")
 
     block_files = [p for d in dirs for p in glob.glob(os.path.join(d, "block.json"))]
-    screen = screen_report(slots, block_files, ps_value)
+    # --band was silently ignored here, so every band produced the same factor effects
+    # and a "training band" re-analysis was really the decode scalar wearing a new label.
+    screen_metric = ps_value if args.screen_on == "ps" else band_value
+    screen_higher_better = args.screen_on == "band" and band[3] == "bandwidth"
+    screen = screen_report(slots, block_files, screen_metric, screen_higher_better)
     if screen:
         lines += screen
         lines.append("")
