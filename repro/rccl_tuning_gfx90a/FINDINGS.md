@@ -519,6 +519,63 @@ graph capture or pipeline setup, so it cannot rule this out.
 About 128 GPU-h for one usable sweep. The re-run must serialise: **one vLLM job at a
 time**, never two.
 
+
+## Stage 5 RESULT: the winner is UNSHIPPABLE. It breaks inference (jobs 22143214-22143219)
+
+**`NCCL_MIN_NCHANNELS=32` must not be set on this stack.** The verdict is DO NOT PROMOTE,
+and the knob moves to the DO NOT SET section.
+
+Six jobs, strictly serialised, one at a time. All six reached `READY`.
+
+| arm | runs | concurrency points completed | requests OK |
+| --- | --- | --- | --- |
+| ref | 3 | 5 of 5, every run | **120/120 at every point** |
+| **cand** | 3 | 1 of 5 | **0/120. Every request failed.** |
+
+Identical fatal error in all three candidate runs:
+
+```
+RuntimeError: Worker failed with error
+'[gloo/transport/tcp/unbound_buffer.cc:78] Timed out waiting 1800000ms
+ for recv operation to complete'
+```
+
+The single variable between the arms is `NCCL_MIN_NCHANNELS=32`. 3/3 fail, 3/3 succeed.
+
+### Why every earlier stage said yes
+
+The failure is a **gloo** timeout on vLLM's pipeline-parallel path at `TP=8 PP=4`, raised
+at the first inference step. Nothing before Stage 5 could see it:
+
+| stage | what it measured | why it missed this |
+| --- | --- | --- |
+| 2, 3c | `torch.distributed` collectives over a flat world | no pipeline parallelism, no vLLM engine |
+| 4b | `rccl_probe.py`, 8 communicators | builds communicators but never runs an inference step |
+| Stage 5 smoke (22123594, 22139545) | server reaches `READY` | **the server starts fine; it dies on the first request** |
+
+The two verification smoke jobs reported `READY` and "Smoke test passed", which I read as
+the serving path being healthy. It was not. `MODE=smoke` confirms the server answers a
+health check, not that it can generate -- and the single confirmation query it issues
+afterwards was never checked. A health check is not a workload.
+
+### What this costs the study
+
+The headline microbenchmark result stands and is well corroborated -- +7.87% (Stage 2),
++7.55% (Stage 3c, independent design), +15% at 2 nodes, nothing at 8. **And it is
+worthless.** A collective that is 7.6% faster in a tight loop is not a faster server if
+the server cannot answer a request.
+
+This is the entire justification for Stage 5 existing, and for the pre-registered rule
+that a microbenchmark win is not a recommendation until it survives dilution into tok/s.
+It did not survive; it did not even reach the table.
+
+### Open question, deliberately not answered here
+
+Whether the deadlock is specific to `PP>1`, or to this vLLM version, or to the
+interaction of 32 channels with gloo's PP coordination, is **not established**. The
+serving config is fixed at `TP=8 PP=4` throughout, so this study cannot separate those.
+It is recorded as a limitation rather than guessed at.
+
 ## Hypotheses
 
 Every row must resolve to confirmed, refuted, or underpowered. "Not tested" is not a
@@ -533,7 +590,7 @@ resolution; it moves the row to a stated limitation.
 | T-5 | HPE's rendezvous set costs small-message latency | `RDZV_THRESHOLD=0` forces every message through rendezvous; measured inert for hangs, never for latency | **refuted** — +2.15%, p=0.061, inert not costly | 22119697-22120183 |
 | T-6 | Raising `NCCL_MIN_NCHANNELS` helps where capping hurt | the bug study only ever capped | **confirmed** — +7.87% at 32 vs a default of 16 | 22119697-22120183 |
 | T-7 | No knob clears +3% on the promotion scalar — the defaults plus the monitor are already good | the likeliest outcome, and a shippable one | **refuted** — `min_nchannels` clears it at +7.87%; the other nine do not | 22119697-22120183 |
-| T-8 | A microbenchmark gain predicts the tok/s gain within [0.3×, 1.2×] | if it does not, the microbenchmark is measuring the wrong thing | pending | |
+| T-8 | A microbenchmark gain predicts the tok/s gain within [0.3×, 1.2×] | if it does not, the microbenchmark is measuring the wrong thing | **refuted, decisively** — the +7.6% collective gain corresponds to a server that answers 0 of 120 requests | 22143214-22143219 |
 
 ## Verdicts
 

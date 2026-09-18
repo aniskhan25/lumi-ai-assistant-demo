@@ -65,11 +65,9 @@ export MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
 #   refuted by: job 22119061
 # export RCCL_MSCCLPP_ENABLE=1
 
-# Channel count. Note the direction: the bug study only ever *capped* channels, and
-# capping costs 20% of bulk bandwidth at 8 and 56% at 4 (jobs 21791400, 21838863).
-# Raising the floor is the untested direction.
+# NCCL_MIN_NCHANNELS: see the DO NOT SET section. It is the fastest setting this study
+# measured and the only one that must never be used.
 #   justified by: <job id>    cost: <measured>
-# export NCCL_MIN_NCHANNELS=32
 # export NCCL_MAX_NCHANNELS=16
 # export NCCL_NCHANNELS_PER_NET_PEER=2
 
@@ -129,6 +127,22 @@ export MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
 # examples. Note ROCm >= 6.2 already defaults to this behaviour, so setting it
 # explicitly buys nothing even where it does not hang.
 # export NCCL_NET_GDR_LEVEL=PHB   # <-- deliberately left unset
+
+# NCCL_MIN_NCHANNELS=32 breaks vLLM inference at TP=8 PP=4 (jobs 22143215, 22143216,
+# 22143219). The server starts, reports READY, and then every request fails with
+#   gloo/transport/tcp/unbound_buffer.cc:78 Timed out waiting 1800000ms for recv
+# raised at the first inference step on the pipeline-parallel path. 3 of 3 candidate
+# runs failed 120/120 requests; 3 of 3 reference runs served 120/120 at all five
+# concurrencies. The only difference between the arms is this variable.
+#
+# It is worth stating plainly because the microbenchmark evidence for it was strong and
+# consistent: +7.87% on predicted collective time per decode step (job 22119697 et al.),
+# reproduced at +7.55% by an independent ladder (job 22121051), +15% at 2 nodes, and a
+# clean pass on the 8-communicator hang gate (job 22122188). None of that survived
+# contact with a real serving workload.
+#
+# Whether this is specific to PP>1 or to this vLLM version is NOT established here.
+# export NCCL_MIN_NCHANNELS=32   # <-- measured fastest, and unusable
 
 # --- diagnostics (off by default) --------------------------------------------------------
 # NCCL_DEBUG=INFO makes every rank write a log; at 32+ ranks that measurably changes
