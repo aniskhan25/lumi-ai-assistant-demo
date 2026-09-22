@@ -589,8 +589,47 @@ resolution; it moves the row to a stated limitation.
 | T-4 | MSCCL/MSCCL++ is not compiled into this container for gfx90a | would remove a factor before it costs allocations | **confirmed** — RCCL refuses it outright | 22119061 |
 | T-5 | HPE's rendezvous set costs small-message latency | `RDZV_THRESHOLD=0` forces every message through rendezvous; measured inert for hangs, never for latency | **refuted** — +2.15%, p=0.061, inert not costly | 22119697-22120183 |
 | T-6 | Raising `NCCL_MIN_NCHANNELS` helps where capping hurt | the bug study only ever capped | **confirmed** — +7.87% at 32 vs a default of 16 | 22119697-22120183 |
-| T-7 | No knob clears +3% on the promotion scalar — the defaults plus the monitor are already good | the likeliest outcome, and a shippable one | **refuted** — `min_nchannels` clears it at +7.87%; the other nine do not | 22119697-22120183 |
+| T-7 | No knob clears +3% on the promotion scalar — the defaults plus the monitor are already good | the likeliest outcome, and a shippable one | ~~refuted at Stage 2~~ → **CONFIRMED after Stage 5**. `min_nchannels` cleared the microbenchmark bar at +7.87% and is unusable, so no knob clears it in any sense that can be shipped. The defaults plus the monitor are the answer. | 22119697-22120183, 22143214-22143219 |
 | T-8 | A microbenchmark gain predicts the tok/s gain within [0.3×, 1.2×] | if it does not, the microbenchmark is measuring the wrong thing | **refuted, decisively** — the +7.6% collective gain corresponds to a server that answers 0 of 120 requests | 22143214-22143219 |
+
+## What ~400 GPU-h of tuning bought
+
+**No shippable comms improvement.** Ten knobs screened, nine measurably inert, one
+effective and unusable. The honest headline is that RCCL's defaults plus
+`FI_MR_CACHE_MONITOR=userfaultfd` are already the right configuration for LUMI at 2-8
+nodes, and that hypothesis T-7 -- which I briefly recorded as refuted -- is confirmed.
+
+That is worth something, but it is worth being precise about what: it converts "nobody has
+measured this" into "this has been measured and there is nothing there", with job ids. It
+does not make anyone's job faster.
+
+The two improvements this work does support are **not** RCCL tuning:
+
+| improvement | gain | source |
+| --- | --- | --- |
+| persistent MIOpen cache | ~167 s per cold multi-node launch | 21822747, 21822748 (bug study) |
+| `NCCL_NET=OFI` | no speed; converts a silent 3-4x fallback to sockets into a hard failure | not measured here; OFI already loads by default (22119061) |
+
+### Where a real gain might still be, and what it would cost
+
+`NCCL_MIN_NCHANNELS` is the only knob that moved anything (+7.9% decode, +4.3% bulk at 4
+nodes). It failed on vLLM at `TP=8 PP=4` with a gloo timeout on the pipeline path. Two
+cheap experiments could still convert it:
+
+1. **`NCCL_MIN_NCHANNELS=24` end to end on vLLM** (~20 GPU-h, 2 allocations). 24 measured
+   +2.68% at 4 nodes -- about a third of the gain -- and is below RCCL's maximum. If the
+   deadlock is specific to saturating the channel limit, 24 may survive where 32 did not.
+   If it also fails, the knob is finished for PP workloads and that is settled cheaply.
+2. **`NCCL_MIN_NCHANNELS=32` on flat-world DDP/FSDP** (~30 GPU-h). The failure was on
+   vLLM's pipeline path; a data-parallel job has no pipeline stage. This is the case where
+   the +4.3% bulk-band number would actually apply, and it is the majority of LUMI's
+   workload.
+
+**Mechanism, stated as hypothesis not fact.** The microbenchmark used a single flat-world
+communicator and looked good. vLLM runs an 8-rank intra-node TP group plus cross-node PP
+point-to-point. Forcing a floor of 32 channels on communicator shapes that small, or onto
+the PP send/recv path, is a plausible cause -- but Stage 4b built 8 communicators and
+passed, which argues against a simple "multiple communicators" explanation. Not resolved.
 
 ## Verdicts
 
