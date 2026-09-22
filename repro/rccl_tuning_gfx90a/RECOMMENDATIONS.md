@@ -47,11 +47,27 @@ export MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
 
 | variable | why | evidence |
 | --- | --- | --- |
-| `NCCL_NET_GDR_LEVEL=PHB` | Hangs the first cross-node collective on **every** rank, deterministically: 32/32 at 4 nodes, 64/64 at 8. Comes from HPE's `ccl_env.sh`. ROCm ≥ 6.2 already defaults to this behaviour, so it buys nothing even where it does not hang. | 21790392, 21790393, 21794114 |
+| `NCCL_NET_GDR_LEVEL=PHB` | **Unnecessary first, risky second.** ROCm ≥ 6.2 already defaults to this behaviour, and `laifs-container-recipes#30` records that "performance is still good without forcing the GDR level" — so there is nothing to gain. Separately it hung the first cross-node collective 32/32 at 4 nodes. Comes from HPE's `ccl_env.sh`. | 21790392 (4-node). **The 8-node figure previously quoted here came from job 21790393, whose table is retracted as a harness artefact — removed.** |
 | `NCCL_MIN_NCHANNELS=32` **for vLLM with PP>1** | Server starts, reports `READY`, then **every request fails**. 0 of 120 requests served, 3 of 3 runs, against 3 of 3 reference runs serving 120/120 at all five concurrencies. Dies with a gloo timeout on the pipeline-parallel path at the first inference step. | 22143215, 22143216, 22143219 |
 | `FI_MR_CACHE_MONITOR=kdreg2` | libfabric answers `kdreg2 monitor not available` and falls back to something that is neither kdreg2 nor userfaultfd. `/dev/kdreg2` exists on the nodes, so the device being present is not evidence the monitor works. | 22119061 |
-| `NCCL_PROTO=LL128` | No LL128 path for bf16 all-reduce on RCCL 2.26.6; the collective fails outright. Every collective in a bf16 serving or training path hits this. | 22118353 |
+| `NCCL_PROTO=LL128` | No LL128 path for bf16 all-reduce; the collective fails outright. **But this only bites if you force it** — see the note below. Not in HPE's guide, not recommended anywhere; it is a trap for people tuning, not a risk to normal users. | 22118353 |
 | `NCCL_MIN_NCHANNELS` > 32 | **Silently discarded, not clamped.** RCCL's max is 32; a larger request is ignored and you get the default 16. Anyone bisecting upward sees the gain appear then vanish and concludes there is an interior optimum. There is not. | 22121788 |
+
+### On `NCCL_PROTO`: the default already avoids this
+
+RCCL's own tuner cost table on this stack (job 22119061, reference slot, nothing forced):
+
+```
+Algorithm  |            Tree            |            Ring            |
+Protocol   |   LL  | LL128  | Simple    |   LL  | LL128  | Simple    |
+AllReduce  |  0.0  |  0.0   |  0.0      | 21.5  | 12.0/0 |  36.8     |
+```
+
+Tree is all zeros — unavailable here — so **AllReduce runs on Ring**, and the tuner picks
+`LL` or `Simple` by message size. The `LL128` column carries a zero on the inter-node
+path, meaning the tuner already knows it is unusable and **never selects it**. So the
+default (`NCCL_PROTO` unset) is correct and safe; the failure is reachable only by
+forcing the protocol by hand.
 
 ---
 
@@ -91,7 +107,12 @@ and this study cannot speak to layouts it did not run.
 | 4 nodes | **+7.87%** screened, **+7.55%** reproduced by an independent ladder | **+4.29%** |
 | 8 nodes | **+0.50% ± 0.87** — nothing | — |
 
-RCCL's default is 16 coll channels at 2, 4 and 8 nodes, so this is "twice the default".
+RCCL's default is 16 coll channels at 2, 4 and 8 nodes, and **32 is the maximum RCCL
+allows** — `NCCL_MIN_NCHANNELS set by environment is ignored due to greater than max
+allowed 32 channels` (job 22121788). So 32 is not a tuned value; it is the ceiling, and
+the ladder was really `auto(16) -> 24 -> 32(max)`, with 48/64/96 being the default in
+disguise. Note the channel knobs are **not in HPE's guide at all** — this candidate came
+from AMD's RCCL usage tips, not from LUMI or HPE guidance.
 It passed the 8-communicator hang gate cleanly (0 stalls, 160 ranks, 5 allocations,
 job 22122188).
 
