@@ -631,6 +631,52 @@ point-to-point. Forcing a floor of 32 channels on communicator shapes that small
 the PP send/recv path, is a plausible cause -- but Stage 4b built 8 communicators and
 passed, which argues against a simple "multiple communicators" explanation. Not resolved.
 
+
+## Stage 6 RESULT: `NCCL_MIN_NCHANNELS` is settled. 24 fails too (jobs 22236525-22236528)
+
+The last open lead is closed. `NCCL_MIN_NCHANNELS=24` -- below RCCL's maximum, worth
++2.68% at 4 nodes -- breaks vLLM exactly as 32 did.
+
+| arm | runs | concurrency points | requests OK |
+| --- | --- | --- | --- |
+| `min_nchannels=24` | 3 | 1 of 5 | **0/120, all three runs** |
+| ref (contemporaneous, same chain) | 1 | 5 of 5 | 120/120, up to 1416 ctok/s |
+
+So the failure is **not** about saturating the channel ceiling. It happens well below it.
+
+### The failure mode changed, and that is the informative part
+
+| setting | error |
+| --- | --- |
+| `=32` | gloo timeout on the pipeline-parallel path |
+| `=24` | `Failed to CUDA host alloc 4923392 bytes` -- **identical byte count in all three runs** |
+
+A deterministic host-side pinned allocation failure. RCCL allocates buffers per channel
+per peer, so raising the channel floor multiplies its pinned host-memory footprint. vLLM
+runs an 8-rank intra-node TP group *plus* cross-node PP, so many communicators each pay
+the inflated per-channel cost, against a host already holding model weights. A rank that
+fails to allocate leaves the others in a collective until gloo times out -- which is
+plausibly what the `=32` runs were showing downstream of the same cause.
+
+**Stated as hypothesis.** RCCL host memory was not measured directly. It is consistent
+with both failure modes, with Stage 4b passing (8 communicators, no model weights
+competing for host memory), and with every microbenchmark stage looking clean.
+
+### The generalisable lesson
+
+**The cost of this knob scales with communicator count; the benefit does not.**
+
+A single flat-world communicator -- which is what Stages 2, 3c and the bandwidth sweeps
+measured -- allocates a fraction of those buffers and sees pure upside. A real serving
+topology sees the bill. That is not a flaw in the microbenchmark; it is a structural
+blind spot in *any* single-communicator benchmark used to tune a channel-count knob, and
+it is the single most transferable thing this study produced.
+
+It also explains why the evidence looked so strong for so long: +7.87% screened, +7.55%
+on an independent ladder, +15% at 2 nodes, a clean 8-communicator hang gate. Every one of
+those measurements was real, and every one was measuring a topology that does not pay the
+knob's actual cost.
+
 ## Verdicts
 
 | job id | stage | nodes | purpose | result |

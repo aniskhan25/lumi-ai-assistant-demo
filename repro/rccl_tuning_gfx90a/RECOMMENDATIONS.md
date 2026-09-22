@@ -120,11 +120,22 @@ job 22122188).
 consistent and reproduced across independent designs, and it was worthless: a collective
 7.6% faster in a tight loop is not a faster server if the server cannot answer a request.
 
-For a **flat-world data-parallel** job — DDP or FSDP, no pipeline stage, no gloo PP
-coordination — the failure mode may simply not apply, and +4.3% on gradient-sized
-all-reduce at 4 nodes is real. **This study did not test that**, so it is not a
-recommendation. If you want it, measure your own workload end to end, not just its
-collectives; that is the entire lesson here.
+**24 fails the same way** (jobs 22236525-22236528, 0/120 requests in 3 of 3 runs), so
+this is not about hitting RCCL's ceiling. At 24 the error is a deterministic
+`Failed to CUDA host alloc 4923392 bytes`, which points at the mechanism: RCCL allocates
+buffers per channel per peer, so raising the channel floor multiplies its pinned
+host-memory footprint, and vLLM's 8-rank intra-node TP group plus cross-node PP pays that
+cost many times over against a host already holding model weights.
+
+**The cost of this knob scales with communicator count; the benefit does not.** That is
+why every microbenchmark said yes: a single flat-world communicator allocates a fraction
+of those buffers. Treat any channel-count result from a one-communicator benchmark with
+suspicion.
+
+For a **flat-world data-parallel** job — DDP or FSDP, one communicator, no pipeline stage
+— the mechanism above suggests the cost may genuinely be lower, and +4.3% on
+gradient-sized all-reduce at 4 nodes is real. **This study did not test that.** If you
+want it, measure your own workload end to end, not just its collectives.
 
 ---
 
