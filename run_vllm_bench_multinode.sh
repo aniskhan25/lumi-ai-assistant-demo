@@ -20,6 +20,7 @@
 #
 #   MODE=smoke sbatch run_vllm_bench_multinode.sh     # serve only, confirm health, exit
 #   MODE=bench sbatch run_vllm_bench_multinode.sh     # serve, then saturation sweep
+#   MODE=serving sbatch run_vllm_bench_multinode.sh   # serve, then streaming TTFT/TPOT sweep
 #
 # Kimi-K2 with expert parallelism, the configuration the benchmark table is missing:
 #   MODE=bench MODEL=moonshotai/Kimi-K2-Instruct-0905 TP_SIZE=8 PP_SIZE=4 \
@@ -134,6 +135,45 @@ if [ "${MODE}" = "smoke" ]; then
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"How do I request 1 GPU on LUMI?\"}],\"max_tokens\":48,\"temperature\":0}" \
     | head -c 600
   echo
+  exit 0
+fi
+
+if [ "${MODE}" = "serving" ]; then
+  # Streaming `vllm bench serve`, which records TTFT and TPOT -- what an interactive
+  # service like Aitta cares about. benchmark_openai.py cannot: it is non-streaming.
+  INPUT_LEN="${INPUT_LEN:-8192}"
+  OUTPUT_LEN="${OUTPUT_LEN:-512}"
+  # 4 waves per concurrency, at least 8 requests: enough for a p99, short enough that
+  # a slow configuration still finishes inside the walltime.
+  PROMPTS_PER_SLOT="${PROMPTS_PER_SLOT:-4}"
+  export HF_HOME="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache"
+  bench_serve() {
+    local c="$1" n="$2" name="$3"
+    srun --overlap --ntasks=1 --nodes=1 -w "${HEAD_NODE}" --export=ALL \
+      singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
+      vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
+        --base-url "http://127.0.0.1:${PORT}" --model "${MODEL}" --trust-remote-code \
+        --dataset-name random --random-input-len "${INPUT_LEN}" \
+        --random-output-len "${OUTPUT_LEN}" --ignore-eos \
+        --num-prompts "${n}" --max-concurrency "${c}" \
+        --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
+        --save-result --result-dir "/work/benchmarks/results/${BENCH_PROFILE:-mn}/job_${SLURM_JOB_ID}" \
+        --result-filename "${name}.json"
+  }
+  # The first requests of an allocation pay one-time costs (kernel compilation, graph
+  # capture); keep them out of the measured points.
+  echo "=== warm-up ==="
+  bench_serve 4 8 warmup || echo "  warm-up failed"
+  echo "=== serving sweep: concurrencies ${CONCURRENCIES}, in=${INPUT_LEN} out=${OUTPUT_LEN} ==="
+  for c in ${CONCURRENCIES}; do
+    n=$((c * PROMPTS_PER_SLOT)); [ "${n}" -lt 8 ] && n=8
+    echo "--- concurrency ${c}, ${n} prompts ---"
+    bench_serve "${c}" "${n}" "serve_c${c}_i${INPUT_LEN}_o${OUTPUT_LEN}" \
+      || echo "  concurrency ${c} failed"
+  done
+  echo "startup_seconds=${STARTUP_SECONDS}"
+  # The KV-cache capacity the report needs, straight from the startup log.
+  grep -h "Maximum concurrency" "${RUNTIME_DIR}"/vllm_server_rank0.log 2>/dev/null || true
   exit 0
 fi
 
