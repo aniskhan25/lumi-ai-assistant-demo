@@ -12,6 +12,7 @@ the colleague's sheet).
 | r1 | `deepseek-ai/DeepSeek-R1-0528` (FP8, 642 GiB) | 2 | TP=8 PP=2, EP | |
 | glm | `zai-org/GLM-4.7` (BF16, 667 GiB) | 2 | TP=8 PP=2, EP | substitute for GLM-5.x |
 | kimi | `moonshotai/Kimi-K2.7-Code` (INT4, 554 GiB) | 3 | TP=8 PP=3, EP | Kimi B with both workloads |
+| r1int4 | `RedHatAI/DeepSeek-R1-0528-quantized.w4a16` (INT4, 346 GiB) | 1 | TP=8, EP | r1 without FP8 |
 
 ```bash
 sbatch repro/download_model.sh <model-id>                    # if not cached

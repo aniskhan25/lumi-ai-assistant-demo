@@ -35,6 +35,9 @@ for x in ${@:-qwen r1 glm kimi}; do
     glm)  submit glm zai-org/GLM-4.7 2 8 2 "--enable-expert-parallel" ;;
     # Same layout as repro/kimi_k27_aitta/ combination B, now with both workloads.
     kimi) submit kimi moonshotai/Kimi-K2.7-Code 3 8 3 "--trust-remote-code --enable-expert-parallel" ;;
+    # Same model as r1 in INT4 (W4A16, 346 GiB): fits one node, so no cross-node collectives,
+    # and isolates the FP8 cost on gfx90a, which has no FP8 hardware.
+    r1int4) submit r1int4 RedHatAI/DeepSeek-R1-0528-quantized.w4a16 1 8 1 "--enable-expert-parallel" ;;
     *) echo "unknown run: ${x}" >&2; exit 2 ;;
   esac
 done
