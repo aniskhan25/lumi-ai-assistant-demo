@@ -26,13 +26,15 @@ submit() {
 
 # TP stays inside a node and PP crosses nodes: the one hang so far (Kimi A) had TP
 # spanning two nodes, while the PP-across-nodes runs were stable.
-for x in ${@:-qwen r1 glm}; do
+for x in ${@:-qwen r1 glm kimi}; do
   case "${x}" in
     qwen) submit qwen Qwen/Qwen3-Coder-480B-A35B-Instruct 4 8 4 "" ;;
     r1)   submit r1 deepseek-ai/DeepSeek-R1-0528 2 8 2 "--enable-expert-parallel" ;;
     # GLM-5.x and DeepSeek-V4 need aiter's sparse MLA, which gfx90a lacks
     # (laifs-container-recipes#8); GLM-4.7 is the newest GLM with dense attention.
     glm)  submit glm zai-org/GLM-4.7 2 8 2 "--enable-expert-parallel" ;;
+    # Same layout as repro/kimi_k27_aitta/ combination B, now with both workloads.
+    kimi) submit kimi moonshotai/Kimi-K2.7-Code 3 8 3 "--trust-remote-code --enable-expert-parallel" ;;
     *) echo "unknown run: ${x}" >&2; exit 2 ;;
   esac
 done

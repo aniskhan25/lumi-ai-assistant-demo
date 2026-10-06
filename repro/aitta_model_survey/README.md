@@ -11,6 +11,7 @@ the colleague's sheet).
 | qwen | `Qwen/Qwen3-Coder-480B-A35B-Instruct` (BF16, 894 GiB) | 4 | TP=8 PP=4 | |
 | r1 | `deepseek-ai/DeepSeek-R1-0528` (FP8, 642 GiB) | 2 | TP=8 PP=2, EP | |
 | glm | `zai-org/GLM-4.7` (BF16, 667 GiB) | 2 | TP=8 PP=2, EP | substitute for GLM-5.x |
+| kimi | `moonshotai/Kimi-K2.7-Code` (INT4, 554 GiB) | 3 | TP=8 PP=3, EP | Kimi B with both workloads |
 
 ```bash
 sbatch repro/download_model.sh <model-id>                    # if not cached
