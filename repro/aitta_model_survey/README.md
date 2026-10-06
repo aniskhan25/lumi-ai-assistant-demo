@@ -44,8 +44,13 @@ comparison; it ran 8192:512 only.
 | | | | 1024:1024 | 40/40, 1.5 s | 65/66, 1.2 s | 89/91, 4.2 s | 116/116, 1.1 s |
 | Kimi-K2.7-Code B | 3 | 19 min | 8192:512 | 51/51, 0.38 s | 86/109, 16.9 s | 267/283, 63 s | 286/485, 123 s |
 | DeepSeek-R1-0528 (job 22550269) | 2 | 17 min | 8192:512 | 312/312, 0.92 s | 358/438, 57 s | *hung* | — |
+| Kimi-K2.7-Code (job 22572310) | 3 | 17 min | 8192:512 | 51/51, 0.40 s | 86/107, 14.7 s | 267/283, 64 s | 280/488, 126 s |
+| | | | 1024:1024 | 49/49, 0.19 s | 81/82, 0.30 s | 150/152, 2.0 s | 226/226, 1.5 s |
+| DeepSeek-R1-0528 INT4 w4a16 (job 22572325) | **1** | 7 min | 8192:512 | 54/54, 0.36 s | 89/113, 19.9 s | 294/308, 75 s | 452/542, 277 s |
+| | | | 1024:1024 | 52/52, 0.57 s | 83/84, 2.1 s | 151/156, 8.2 s | 237/247, 16 s |
 
-KV room for 65,536-token requests: Qwen 60x, GLM-4.7 11.5x.
+KV room for 65,536-token requests: Qwen 60x, Kimi 23x, GLM-4.7 11.5x, R1 INT4 3.3x
+(one node, so 32 users with 8k prompts queue for KV: TTFT p99 277 s).
 
 - **Qwen3-Coder-480B reproduces the colleague's single-request 23 ms** at 1024:1024, so
   the harnesses agree. Their 1-user TPOT and ours match; the per-user gap seen with Kimi
@@ -68,3 +73,9 @@ KV room for 65,536-token requests: Qwen 60x, GLM-4.7 11.5x.
   16-user phase; Qwen (4 nodes), GLM-4.7, Kimi B and D ran 16 and 32 users cleanly.
   Cancelled by hand: vLLM's engine timeout did not fire, so the client would have waited
   out the walltime.
+- **Kimi reproduces across allocations:** job 22572310 matches Kimi B (job 22344021) to
+  within 2% at every 8192:512 point, a day apart.
+- **INT4 removes the FP8 penalty for DeepSeek-R1-0528:** 52–54 ms TPOT at 1 user against
+  312 ms for the FP8 checkpoint, about 6x faster, on one node instead of two. Per user it
+  now tracks Kimi-K2.7-Code (same architecture) within ~5%. One node also means no
+  cross-node collectives, so no exposure to the multi-node stall.
