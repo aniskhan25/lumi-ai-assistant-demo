@@ -2,7 +2,7 @@
 # MiMo-V2.6-Flash on one LUMI-G node: does it produce correct output, and in which
 # container? One variant per allocation.
 #
-#   bash repro/lexivo_mimo_gfx90a/submit.sh new-tu-dp # LAIF 20260929, vLLM 0.26.0, recipe
+#   bash repro/lexivo_mimo_gfx90a/submit.sh new-tu-tp8 # LAIF 20260929, vLLM 0.26.0, recipe
 #   bash repro/lexivo_mimo_gfx90a/submit.sh old       # LAIF 20260807, vLLM 0.22.1, as reported
 #
 # Run from the repository root. Results land in benchmarks/results/mimo-<name>/job_<id>/.
@@ -33,7 +33,7 @@ PATCH="$(pwd)/repro/lexivo_mimo_gfx90a/mimo_v2.py:/opt/venv/lib/python3.12/site-
 # imports the CUDA-only vllm_flash_attn and kills the profiling run (job 23018151).
 NEW_ARGS="--trust-remote-code --language-model-only --max-model-len 65536 --max-num-seqs 32 --max-num-batched-tokens 4096 --gpu-memory-utilization 0.95"
 
-for x in ${@:-new-tu-dp old}; do
+for x in ${@:-new-tu-tp8 old}; do
   case "${x}" in
     # The experts are stored as MXFP4 (store_dtype). On ROCm vLLM's auto choice for
     # them is aiter only, so without --moe-backend startup fails (job 23017831).
@@ -42,7 +42,7 @@ for x in ${@:-new-tu-dp old}; do
     new-tu-dp)  EXTRA_BINDS="${PATCH}" submit new-tu-dp "${NEW}" serving 03:00:00 4 1 "${NEW_ARGS} --moe-backend triton_unfused --data-parallel-size 2" ;;
     new-tu-tp8) EXTRA_BINDS="${PATCH}" submit new-tu-tp8 "${NEW}" serving 03:00:00 8 1 "${NEW_ARGS} --moe-backend triton_unfused" ;;
     # 'triton' is the gpt-oss kernel and rejects SiLU (job 23017920).
-    # Emulation dequantises the experts at run time: slow, but the correctness reference.
+    # Emulation is not implemented for Mxfp4MoEMethod (job 23018152); kept for the record.
     new-emu)    EXTRA_BINDS="${PATCH}" submit new-emu "${NEW}" smoke 02:00:00 8 1 "${NEW_ARGS} --moe-backend emulation" ;;
     # Lexivo's reported setup: vLLM 0.22.1, bf16, ROCM_ATTN, TP=8 on one node.
     old) submit old "${OLD}" smoke 01:30:00 8 1 \
