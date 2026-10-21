@@ -2,8 +2,8 @@
 # MiMo-V2.6-Flash on one LUMI-G node: does it produce correct output, and in which
 # container? One variant per allocation.
 #
-#   bash repro/lexivo_mimo_gfx90a/submit.sh new   # LAIF 20260929, vLLM 0.26.0, recipe
-#   bash repro/lexivo_mimo_gfx90a/submit.sh old   # LAIF 20260807, vLLM 0.22.1, as reported
+#   bash repro/lexivo_mimo_gfx90a/submit.sh new-tu    # LAIF 20260929, vLLM 0.26.0, recipe
+#   bash repro/lexivo_mimo_gfx90a/submit.sh old       # LAIF 20260807, vLLM 0.22.1, as reported
 #
 # Run from the repository root. Results land in benchmarks/results/mimo-<name>/job_<id>/.
 set -euo pipefail
@@ -24,12 +24,18 @@ submit() {
     run_vllm_bench_multinode.sh
 }
 
-for x in ${@:-new old}; do
+# No --attention-backend: every MiMo layer has head_dim 192 / v_head_dim 128, and
+# vLLM 0.26 routes those to TRITON_ATTN_DIFFKV, which supports the SWA sinks.
+NEW_ARGS="--trust-remote-code --max-model-len 65536 --max-num-seqs 32 --max-num-batched-tokens 4096 --gpu-memory-utilization 0.95"
+
+for x in ${@:-new-tu old}; do
   case "${x}" in
-    # No --attention-backend: every MiMo layer has head_dim 192 / v_head_dim 128, and
-    # vLLM 0.26 routes those to TRITON_ATTN_DIFFKV, which supports the SWA sinks.
-    new) submit new "${NEW}" serving 03:00:00 \
-           "--trust-remote-code --max-model-len 65536 --max-num-seqs 32 --max-num-batched-tokens 4096 --gpu-memory-utilization 0.95" ;;
+    # The experts are stored as MXFP4 (store_dtype). On ROCm vLLM's auto choice for
+    # them is aiter only, so without --moe-backend startup fails (job 23017831).
+    new-tu)     submit new-tu "${NEW}" serving 03:00:00 "${NEW_ARGS} --moe-backend triton_unfused" ;;
+    new-triton) submit new-triton "${NEW}" serving 03:00:00 "${NEW_ARGS} --moe-backend triton" ;;
+    # Dequantises the experts to bf16: slow, but the correctness reference.
+    new-emu)    submit new-emu "${NEW}" smoke 02:00:00 "${NEW_ARGS} --moe-backend emulation" ;;
     # Lexivo's reported setup: vLLM 0.22.1, bf16, ROCM_ATTN, TP=8 on one node.
     old) submit old "${OLD}" smoke 01:30:00 \
            "--trust-remote-code --dtype bfloat16 --attention-backend ROCM_ATTN --max-model-len 65536 --max-num-seqs 32 --gpu-memory-utilization 0.95" ;;
