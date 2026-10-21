@@ -128,6 +128,19 @@ if [ "${VERDICT}" != "READY" ]; then
   exit 1
 fi
 
+# Optional output-correctness check before any speed numbers: a server producing
+# garbage benchmarks fine. See repro/lexivo_mimo_gfx90a/probe.py.
+if [ -n "${PROBE_GSM8K_PARQUET:-}" ]; then
+  echo "=== correctness probe ==="
+  srun --overlap --ntasks=1 --nodes=1 -w "${HEAD_NODE}" --export=ALL \
+    singularity run "${BIND_ARGS[@]}" "${CONTAINER}" \
+    python3 /work/repro/lexivo_mimo_gfx90a/probe.py \
+      --base-url "http://127.0.0.1:${PORT}" --model "${MODEL}" \
+      --gsm8k-parquet "${PROBE_GSM8K_PARQUET}" --gsm8k-n "${PROBE_GSM8K_N:-200}" \
+      --out "/work/benchmarks/results/${BENCH_PROFILE:-mn}/job_${SLURM_JOB_ID}/probe.json" \
+    || echo "  probe failed"
+fi
+
 if [ "${MODE}" = "smoke" ]; then
   echo "Smoke test passed: served in ${STARTUP_SECONDS}s. Querying once to confirm generation."
   curl -fsS --max-time 120 "http://127.0.0.1:${PORT}/v1/chat/completions" \
