@@ -75,6 +75,8 @@ mkdir -p "${RUNTIME_DIR}" "${RESULTS_DIR}"
 echo "Results: ${RESULTS_DIR}"
 
 BIND_ARGS=(--bind "${WORKDIR}:/work" --bind "${RUNTIME_DIR}:/runtime")
+# Space-separated host:container binds, e.g. a patched vLLM source file.
+for b in ${EXTRA_BINDS:-}; do BIND_ARGS+=(--bind "${b}"); done
 
 HEAD_NODE="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
 export MASTER_ADDR="${MASTER_ADDR:-${HEAD_NODE}}"
