@@ -29,7 +29,9 @@ submit() {
 # vLLM 0.26's fused-FP8 qkv loader cannot shard the MiMo-V2.6 checkpoint at any TP
 # (jobs 23017919/76/79); the backport from upstream main fixes it, see README.
 PATCH="$(pwd)/repro/lexivo_mimo_gfx90a/mimo_v2.py:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/models/mimo_v2.py"
-NEW_ARGS="--trust-remote-code --max-model-len 65536 --max-num-seqs 32 --max-num-batched-tokens 4096 --gpu-memory-utilization 0.95"
+# --language-model-only skips the vision/audio encoders: MiMo's ViT window attention
+# imports the CUDA-only vllm_flash_attn and kills the profiling run (job 23018151).
+NEW_ARGS="--trust-remote-code --language-model-only --max-model-len 65536 --max-num-seqs 32 --max-num-batched-tokens 4096 --gpu-memory-utilization 0.95"
 
 for x in ${@:-new-tu-dp old}; do
   case "${x}" in
