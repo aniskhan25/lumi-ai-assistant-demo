@@ -5,6 +5,8 @@ Each switch is an environment variable, so one variant runs per allocation:
 DSV4_INDEXER_GATE=1  Lift 0.26's aiter-only gate on the sparse attention indexer and call
                      the op's Python implementation (Triton cache insert/gather, compiled
                      top-k, torch FP8 logits), as in ../deepseek_v41_gfx90a/indexer_gate.
+                     Also bounds the memory of the torch MQA-logits fallback that path
+                     uses for prefill (see _chunked_mqa_logits).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but
@@ -32,6 +34,38 @@ def _torch_mhc() -> None:
     if model is not None:
         model.HAS_TILELANG_MHC = False
     _log("DSV4_TORCH_MHC: TileLang mHC off; torch/triton fallbacks as on gfx942")
+
+
+def _chunked_mqa_logits() -> None:
+    """0.26's fp8_mqa_logits_torch materialises a dense fp32 [heads, rows, kv] score in
+    one go: 4 GiB for an 8192-token prefill chunk at 18k context, which OOMs next to the
+    KV cache (job 23494525). Rows are independent, so compute them in chunks capped at
+    ~512 MiB of scores: the same arithmetic in the same order per row."""
+    import torch
+
+    import vllm.v1.attention.ops.rocm_aiter_mla_sparse as ops
+
+    stock = ops.fp8_mqa_logits_torch
+    if getattr(stock, "_lumi_chunked", False):
+        return
+
+    def fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke):
+        m, h = q.shape[0], q.shape[1]
+        n = kv[0].shape[0]
+        rows = max(1, (512 << 20) // max(1, h * n * 4))
+        if rows >= m:
+            return stock(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+        out = torch.empty(m, n, dtype=torch.float32, device=q.device)
+        for start in range(0, m, rows):
+            end = min(m, start + rows)
+            out[start:end] = stock(
+                q[start:end], kv, weights[start:end],
+                cu_seqlen_ks[start:end], cu_seqlen_ke[start:end],
+            )
+        return out
+
+    fp8_mqa_logits_torch._lumi_chunked = True
+    ops.fp8_mqa_logits_torch = fp8_mqa_logits_torch
 
 
 def _indexer_gate() -> None:
@@ -75,7 +109,8 @@ def _indexer_gate() -> None:
 
     forward_hip._lumi_gate = True
     cls.forward_hip = forward_hip
-    _log("DSV4_INDEXER_GATE: sparse indexer runs its non-aiter fallbacks")
+    _chunked_mqa_logits()
+    _log("DSV4_INDEXER_GATE: sparse indexer runs its non-aiter fallbacks (chunked MQA logits)")
 
 
 def register() -> None:
