@@ -53,10 +53,12 @@ def _to_e2m1_codes(v: torch.Tensor) -> torch.Tensor:
     a = v.abs()
     grid = torch.tensor(_E2M1, device=v.device)
     mids = (grid[1:] + grid[:-1]) / 2
-    code = torch.bucketize(a, mids)  # round half up
+    # bucketize(right=False) puts a value equal to a midpoint in the lower bucket.
+    code = torch.bucketize(a, mids)
     # Exact ties go to the even code (code & 1 == 0), as IEEE round-to-nearest-even.
-    tie = (code > 0) & (a == mids[(code - 1).clamp_min(0)]) & (code % 2 == 1)
-    code = code - tie.to(code.dtype)
+    at_mid = a == mids[code.clamp(max=len(mids) - 1)]
+    tie = at_mid & (code < len(mids)) & (code % 2 == 1)
+    code = code + tie.to(code.dtype)
     return code.to(torch.uint8) | sign
 
 
