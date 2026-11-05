@@ -31,7 +31,14 @@ def register() -> None:
             return stock(self, hidden_states, q_quant, k, weights)
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), "expects a single FP8 q_quant tensor"
-        return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+        # 0.26 registers the torch.ops wrapper only when aiter is enabled
+        # (_aiter_ops.py), so call the Python implementation directly. Fine in eager
+        # mode; torch.compile would need the op registered.
+        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+            rocm_aiter_sparse_attn_indexer,
+        )
+
+        return rocm_aiter_sparse_attn_indexer(
             hidden_states,
             module._encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
