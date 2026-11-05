@@ -38,11 +38,14 @@ SHM="/tmp/shm-${SLURM_JOB_ID}"; mkdir -p "${SHM}"
 RUN=(singularity exec -B "${SHM}:/dev/shm" "${CONTAINER}")
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
-# so ask for the Triton dequantising one. Eager first: fewer moving parts.
+# so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
+# (job 23491881: "fp8_ds_mla layout only supports fp8 kv-cache, got auto").
+# Eager first: fewer moving parts.
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
-       --no-enable-prefix-caching ${EXTRA_VLLM_ARGS:---moe-backend triton_unfused --enforce-eager})
+       --no-enable-prefix-caching --kv-cache-dtype fp8
+       ${EXTRA_VLLM_ARGS:---moe-backend triton_unfused --enforce-eager})
 echo "Serving: ${SERVE[*]}"
 "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
 SERVER=$!
