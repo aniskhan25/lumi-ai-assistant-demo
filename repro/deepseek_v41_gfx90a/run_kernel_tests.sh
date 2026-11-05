@@ -35,10 +35,11 @@ export PYTHONFAULTHANDLER=1
 for t in "${HERE}"/vendor/tests_v026/test_*.py; do
   name="$(basename "${t}" .py)"
   echo "=== ${name}"
+  rc=0
   singularity exec "${CONTAINER}" bash -c "
     cd '${HERE}/vendor' && timeout 1200 python -m pytest -p no:cacheprovider -v -rfEs \
       --junitxml='${RESULTS}/${name}.xml' ${PYTEST_ARGS:-} tests_v026/${name}.py
-  " > "${RESULTS}/${name}.log" 2>&1
-  echo "exit=$? $(grep -aE '^(=+ .*(passed|failed|error|skipped).* =+)$' "${RESULTS}/${name}.log" | tail -1)"
-  grep -aE 'FAILED|ERROR|Fatal Python error|fault|Segmentation|Aborted' "${RESULTS}/${name}.log" | head -5
+  " > "${RESULTS}/${name}.log" 2>&1 || rc=$?
+  echo "exit=${rc} $(grep -aE '^(=+ .*(passed|failed|error|skipped).* =+)$' "${RESULTS}/${name}.log" | tail -1)"
+  grep -aE 'FAILED|ERROR|Fatal Python error|fault|Segmentation|Aborted' "${RESULTS}/${name}.log" | head -5 || true
 done
