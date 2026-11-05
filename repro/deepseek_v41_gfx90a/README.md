@@ -66,11 +66,71 @@ their newer versions would have to replace 0.26's:
 That is roughly 10k changed lines in core attention code, against Qwen3.8's ~735 lines of
 bridging and no core replacements.
 
-## Runtime checks
+## Runtime checks (2026-11-05, LAIF 20261028, vLLM 0.26.0+lumi_aif_gfx90a_568afb3)
 
-See below. They test the parts V4.1 shares with DeepSeek-V4, which 0.26 supports natively:
+### DeepSeek-V4-Flash end to end: four blockers, and then garbage output
 
-1. 0.26's own ROCm kernel tests for the DSV4 sparse-MLA ops on one GCD
-   (`run_kernel_tests.sh`, tests under `vendor/tests_v026`, unmodified).
-2. DeepSeek-V4-Flash (149 GiB, fits one node) served by the stock container with the
-   correctness probe (`run_v4_serve.sh`).
+DeepSeek-V4 is natively supported by 0.26, and V4.1 builds on its sparse-MLA attention,
+indexer and compressor. V4-Flash is 149 GiB and fits one node, so it ran at TP=8 on one dev-g
+node with `--moe-backend triton_unfused --enforce-eager` (`run_v4_serve.sh`). Each attempt got
+one step further:
+
+| job | setup | outcome |
+|---|---|---|
+| 23491881 | stock | `fp8_ds_mla layout only supports fp8 kv-cache, got auto`. A config requirement → `--kv-cache-dtype fp8` |
+| 23491948 | + fp8 KV | Weights load; the first forward pass fails because **Triton 3.6 cannot compile V4's `_fused_q_kv_rmsnorm_kernel`**: an assertion in the AMD pass `TritonAMDGPUCanonicalizePointers` (`ConvertSCFIfOp`), triggered by a pointer chosen inside an `if`. The pass is AMD-generic, not gfx90a-specific, so V4 cannot run on ROCm with this container's Triton at all |
+| 23492281 | + `AMDGCN_USE_BUFFER_OPS=0` (skips that pass) | `Sparse attention indexer ROCm path is only supported on AITER`. **0.26's indexer is gated aiter-only, and upstream main still is**, except gfx950. Inside the op every step has a non-aiter path: Triton cache insert and gather, compiled top-k, torch FP8 logits |
+| 23492563, 23492716 | + `INDEXER_GATE=1` (`indexer_gate/`, calls the op's Python implementation directly) | **Serves (ready in 281 s, weights 104 s), but the output is garbage**: `'AskTreeLabel240uspaplenty成立 anthropž हज़ार हज़ार…'`, with finite logprobs. This matches Lexivo's report of broken V4-Flash output on 0.22.1 |
+
+### vLLM 0.26's own DSV4 ROCm kernel tests on one GCD
+
+Unmodified tests against the matching container (`run_kernel_tests.sh`; buffer ops on
+23492901, off 23492965, same results):
+
+| test file | result |
+|---|---|
+| `test_rocm_triton_attn_dsv4`: sparse prefill/decode, gfx90a fallback kernels | **19 passed**, 21 skipped (split-K decode is gfx942/950 only) |
+| `test_fused_deepseek_v4_qnorm_rope_kv_insert` | **155 passed** |
+| `test_compressor_kv_cache` | FP8 roundtrips and inserts pass; **the process dies at the first FP4 (`use_fp4=True`) case** |
+| `test_fused_indexer_q_rope_quant` | FP8 cases pass; **the process dies at the first FP4 case** |
+| `test_fused_inv_rope_fp8_quant` | 50/50 "fail" on a harness error (`missing ... 'launch_pdl'`): the test calls the Triton kernel without the PDL argument the ROCm build expects. **Inconclusive**, not a numerical failure |
+
+The FP4 crashes are silent (exit 1, no traceback). They are not on the served path, which uses
+the FP8 indexer cache (`use_fp4_indexer_cache=False`). Every tested component on the served
+path passes. **So the garbage comes from something these tests do not cover.** Candidates:
+- the torch fallback for indexer logits and top-k, reached only through the lifted gate;
+- inverse rope with the FP8 `wo_a` path (its test could not run);
+- MXFP4 expert dequantisation for V4's weight layout;
+- the mHC ops;
+- the FP8 KV encoding on gfx90a (the tests note OCP e4m3fn on gfx90a vs FNUZ on gfx942).
+
+## Verdict
+
+**Do not start a V4.1 port now.**
+
+1. **V4.1 sits on top of DeepSeek-V4's attention stack, and that stack does not produce
+   correct output on gfx90a today**, even for V4, which 0.26 supports natively. It took a
+   compiler workaround and a gate bypass just to start, and then the output was garbage. A
+   V4.1 port would inherit all of that.
+2. **The port itself is about an order of magnitude bigger than Qwen3.8's.** It means carrying
+   newer copies of ~10k lines of core sparse-MLA attention code that 0.26's own V4 also uses,
+   plus 17 missing modules.
+3. **V4.1-Flash does not fit one node** (475 GiB), and our plugin approach has not ported
+   pipeline parallelism.
+
+**If the DeepSeek-V4 family matters on LUMI-G, the prerequisite is a correct V4-Flash on
+gfx90a.** That is a debugging project in its own right: bisect the garbage by comparing
+layer outputs, swapping the MoE backend, and checking the indexer fallback and FP8
+encodings. Worth reporting meanwhile, to laifs-container-recipes and upstream:
+- the Triton 3.6 `CanonicalizePointers` assertion;
+- the aiter-only indexer gate, which blocks every non-gfx950 GPU without aiter;
+- the FP4 indexer-cache crashes;
+- the `launch_pdl` test break.
+
+## Reproduce
+
+```bash
+# from the repository root on LUMI
+sbatch --partition=dev-g repro/deepseek_v41_gfx90a/run_kernel_tests.sh
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh   # garbage
+```
