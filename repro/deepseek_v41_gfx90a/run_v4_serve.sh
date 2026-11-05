@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH --job-name=dsv4-serve
+#SBATCH --account=project_462000131
+#SBATCH --partition=dev-g
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=56
+#SBATCH --mem-per-gpu=60G
+#SBATCH --time=02:00:00
+#SBATCH --output=dsv4-serve-%j.out
+
+# Phase 0 for DeepSeek-V4.1-Flash, end to end: serve DeepSeek-V4-Flash, which LAIF's
+# vLLM 0.26 supports natively and which shares V4.1's sparse-MLA attention, indexer and
+# compressor design, on one LUMI-G node with the stock container, no plugin. Then the
+# smoke and output-correctness probes. A Lexivo report (Oct 2026) had V4-Flash starting
+# on vLLM 0.22.1 and then producing NaN logits.
+#
+#   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh              # from the repo root
+#   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
+set -euo pipefail
+
+CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif}"
+REPO="${SLURM_SUBMIT_DIR:-$(pwd)}"
+SNAPSHOT="$(ls -d /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots/* | head -n1)"
+GSM8K="$(ls /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/datasets--openai--gsm8k/snapshots/*/main/test-00000-of-00001.parquet | head -n1)"
+PORT="$((20000 + ${SLURM_JOB_ID} % 20000))"   # shared nodes share ports
+LOG="${REPO}/benchmarks/results/dsv4-flash/job_${SLURM_JOB_ID}"
+mkdir -p "${LOG}"
+
+module load Local-LAIF lumi-aif-singularity-bindings
+export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
+export HF_HOME="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache" HF_HUB_OFFLINE=1
+export VLLM_CACHE_ROOT="/scratch/${SLURM_JOB_ACCOUNT}/${USER}/vllm-cache"
+export MIOPEN_CUSTOM_CACHE_DIR="/tmp/miopen-cache-${USER}" MIOPEN_USER_DB_PATH="/tmp/miopen-config-${USER}"
+# Shared node: a co-tenant's job end wipes /dev/shm (laifs-container-recipes#46).
+SHM="/tmp/shm-${SLURM_JOB_ID}"; mkdir -p "${SHM}"
+RUN=(singularity exec -B "${SHM}:/dev/shm" "${CONTAINER}")
+
+# MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
+# so ask for the Triton dequantising one. Eager first: fewer moving parts.
+SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
+       --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
+       --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
+       --no-enable-prefix-caching ${EXTRA_VLLM_ARGS:---moe-backend triton_unfused --enforce-eager})
+echo "Serving: ${SERVE[*]}"
+"${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
+SERVER=$!
+trap 'kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT
+
+SECONDS=0
+until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; do
+  if ! kill -0 "${SERVER}" 2>/dev/null || [ "${SECONDS}" -gt 3600 ]; then
+    echo "SERVER_FAILED after ${SECONDS}s"; grep -v amdsmi "${LOG}/server.log" | tail -80; exit 1
+  fi
+  sleep 5
+done
+echo "SERVER_READY after ${SECONDS}s"
+grep -hE "Loading weights took|Model loading took|backend|KV cache|Maximum concurrency" "${LOG}/server.log" \
+  | grep -vE "amdsmi|Worker_TP[1-9]" | head -12
+
+STATUS=0
+# The Qwen3.8 branch's smoke_requests.py is not on this branch; the probe covers the
+# same ground for correctness (non-finite logprobs, garbage, 2.3k/18.2k needle, GSM8K).
+"${RUN[@]}" python "${REPO}/repro/lexivo_mimo_gfx90a/probe.py" \
+  --base-url "http://127.0.0.1:${PORT}" --model dsv4 \
+  --gsm8k-parquet "${GSM8K}" --gsm8k-n "${PROBE_GSM8K_N:-200}" --out "${LOG}/probe.json" \
+  || STATUS=1
+[ "${STATUS}" != 0 ] && { echo "--- server log tail ---"; grep -v amdsmi "${LOG}/server.log" | tail -60; }
+exit "${STATUS}"

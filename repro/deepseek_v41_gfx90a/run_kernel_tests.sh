@@ -29,8 +29,16 @@ export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 # A per-job Triton cache, so a compile failure is not hidden by an earlier success.
 export TRITON_CACHE_DIR="/tmp/triton-${SLURM_JOB_ID}"
 
-singularity exec "${CONTAINER}" bash -c "
-  python -c 'import torch, triton, vllm; print(\"torch\", torch.__version__, \"triton\", triton.__version__, \"vllm\", vllm.__version__, torch.cuda.get_device_properties(0).gcnArchName)'
-  cd '${HERE}/vendor' && timeout 2400 python -m pytest -p no:cacheprovider -rA -q \
-    --junitxml='${RESULTS}/junit.xml' ${PYTEST_ARGS:-} tests_v026
-" 2>&1 | grep -v amdsmi | tee "${RESULTS}/pytest.log"
+# One process per test file: a hard GPU fault (which kills the process without a pytest
+# summary) then names its file and does not take the other files down with it.
+export PYTHONFAULTHANDLER=1
+for t in "${HERE}"/vendor/tests_v026/test_*.py; do
+  name="$(basename "${t}" .py)"
+  echo "=== ${name}"
+  singularity exec "${CONTAINER}" bash -c "
+    cd '${HERE}/vendor' && timeout 1200 python -m pytest -p no:cacheprovider -v -rfEs \
+      --junitxml='${RESULTS}/${name}.xml' ${PYTEST_ARGS:-} tests_v026/${name}.py
+  " > "${RESULTS}/${name}.log" 2>&1
+  echo "exit=$? $(grep -aE '^(=+ .*(passed|failed|error|skipped).* =+)$' "${RESULTS}/${name}.log" | tail -1)"
+  grep -aE 'FAILED|ERROR|Fatal Python error|fault|Segmentation|Aborted' "${RESULTS}/${name}.log" | head -5
+done
