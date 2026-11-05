@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: lumi-dsv4-indexer-gate
+Version: 0.1
+Summary: Phase-0 experiment: run the DeepSeek-V4 sparse indexer on gfx90a without aiter
