@@ -25,6 +25,10 @@
 #                            this env var skips that pass (job 23491948)
 #   INDEXER_GATE=1           lift 0.26's aiter-only gate on the sparse indexer
 #                            (indexer_gate/, job 23492281)
+#   TORCH_MHC=1              (branch bug/dsv4-flash-gfx90a-garbage) turn off the TileLang
+#                            hyper-connection kernels on gfx90a, as 0.26 does on gfx942.
+#                            Uses repro/dsv4_flash_debug/plugin, which also carries the
+#                            indexer gate (DSV4_INDEXER_GATE).
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif}"
@@ -43,12 +47,15 @@ export MIOPEN_CUSTOM_CACHE_DIR="/tmp/miopen-cache-${USER}" MIOPEN_USER_DB_PATH="
 # Shared node: a co-tenant's job end wipes /dev/shm (laifs-container-recipes#46).
 SHM="/tmp/shm-${SLURM_JOB_ID}"; mkdir -p "${SHM}"
 RUN=(singularity exec -B "${SHM}:/dev/shm")
-if [ "${INDEXER_GATE:-0}" = 1 ]; then
-  # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
+# The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
+if [ "${TORCH_MHC:-0}" = 1 ]; then
+  export DSV4_TORCH_MHC=1 DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
+  RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
+elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
