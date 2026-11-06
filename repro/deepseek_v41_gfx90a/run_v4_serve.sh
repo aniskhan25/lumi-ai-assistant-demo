@@ -19,7 +19,8 @@
 #   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh              # from the repo root
 #   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
 #   PROBE=0 BENCH=1                                                # speed sweep instead of probe
-#   COMPILE=1                                                      # torch.compile + graphs, not eager
+#   COMPILE=1                                                      # CUDA graphs, not eager
+#   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #
 # Phase-0 workarounds, both off by default (see README):
 #   AMDGCN_USE_BUFFER_OPS=0  Triton 3.6's AMD CanonicalizePointers pass asserts on V4's
@@ -52,12 +53,13 @@ RUN=(singularity exec -B "${SHM}:/dev/shm")
 # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
 if [ "${TORCH_MHC:-0}" = 1 ]; then
   export DSV4_TORCH_MHC=1 DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
+  export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
 elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} COMPILE=${COMPILE:-0}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} COMPILE=${COMPILE:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
@@ -67,8 +69,10 @@ echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEX
 # torch.compiled; it uses "breakable" graphs. PIECEWISE, because FULL graphs capture the
 # indexer, whose torch paged-MQA-logits fallback calls .item() per sequence and cannot be
 # captured (job 23512857); in PIECEWISE the indexer and attention run as eager breaks.
+# TRITON_LOGITS=1 replaces that fallback with a capturable kernel, so FULL_AND_PIECEWISE
+# (vLLM's default: whole decode steps as one graph) can be tried.
 if [ "${COMPILE:-0}" = 1 ]; then
-  DEFAULT_EXTRA='--moe-backend triton_unfused --compilation-config {"cudagraph_mode":"PIECEWISE"}'
+  DEFAULT_EXTRA="--moe-backend triton_unfused --compilation-config {\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\"}"
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
