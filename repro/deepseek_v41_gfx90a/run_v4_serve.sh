@@ -21,6 +21,9 @@
 #   PROBE=0 BENCH=1                                                # speed sweep instead of probe
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
+#   NO_ASYNC=1                                                     # --no-async-scheduling
+#     (needed with TRITON_LOGITS=1: with async scheduling the server hangs after a few
+#      decode steps, jobs 23518755, 23519175; the torch fallback's per-sequence syncs hid it)
 #
 # Phase-0 workarounds, both off by default (see README):
 #   AMDGCN_USE_BUFFER_OPS=0  Triton 3.6's AMD CanonicalizePointers pass asserts on V4's
@@ -59,7 +62,7 @@ elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} COMPILE=${COMPILE:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} COMPILE=${COMPILE:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
@@ -74,6 +77,7 @@ echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEX
 if [ "${COMPILE:-0}" = 1 ]; then
   DEFAULT_EXTRA="--moe-backend triton_unfused --compilation-config {\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\"}"
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
+[ "${NO_ASYNC:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --no-async-scheduling"
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
