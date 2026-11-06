@@ -22,6 +22,9 @@
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #   NO_ASYNC=1                                                     # --no-async-scheduling
+#   PROFILE=1 PROBE=0                                              # torch-profile decode at
+#     c=1 and c=32 (eager: kernels in graphs can't be attributed); rank-0 component split
+#     by repro/dsv4_flash_debug/analyze_trace.py
 #     (needed with TRITON_LOGITS=1: with async scheduling the server hangs after a few
 #      decode steps, jobs 23518755, 23519175; the torch fallback's per-sequence syncs hid it)
 #
@@ -78,6 +81,8 @@ if [ "${COMPILE:-0}" = 1 ]; then
   DEFAULT_EXTRA="--moe-backend triton_unfused --compilation-config {\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\"}"
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 [ "${NO_ASYNC:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --no-async-scheduling"
+PROF_DIR="${LOG}/profile"
+[ "${PROFILE:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROF_DIR}\",\"ignore_frontend\":true}"
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
@@ -146,6 +151,19 @@ if [ "${BENCH:-0}" = 1 ]; then
       echo "=== bench c=${c} n=${n} in:out=${w} ==="
       bench "${c}" "${n}" "${w%%:*}" "${w##*:}" "serve_c${c}_i${w%%:*}_o${w##*:}"
     done
+  done
+fi
+if [ "${PROFILE:-0}" = 1 ]; then
+  for c in ${PROFILE_CONCURRENCIES:-1 32}; do
+    echo "=== profile c=${c} ==="
+    "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_decode.py" \
+      "http://127.0.0.1:${PORT}" dsv4 "${c}" "${PROFILE_SECONDS:-5}" || STATUS=1
+    sleep 20   # traces are written after /stop_profile returns
+    mkdir -p "${PROF_DIR}/c${c}"
+    find "${PROF_DIR}" -maxdepth 1 -type f -exec mv {} "${PROF_DIR}/c${c}/" \;
+    ls -la "${PROF_DIR}/c${c}" | head
+    rank0="$(ls "${PROF_DIR}/c${c}"/*rank0* "${PROF_DIR}/c${c}"/*.json.gz 2>/dev/null | head -1)"
+    [ -n "${rank0}" ] && "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/analyze_trace.py" "${rank0}"
   done
 fi
 [ "${STATUS}" != 0 ] && { echo "--- server log tail ---"; grep -v amdsmi "${LOG}/server.log" | tail -60; }
