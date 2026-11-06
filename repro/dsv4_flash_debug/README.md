@@ -71,7 +71,8 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh     # from the repo root; TP=8, eager
 ```
 
-Add `COMPILE=1` for piecewise CUDA graphs (1.3–1.7× faster, same accuracy; see Speed).
+Add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1` for piecewise CUDA graphs and the batched indexer
+kernel (1.8–2.0× faster than eager, same accuracy; see Speed).
 That is five changes against the stock container:
 
 | | why |
@@ -136,12 +137,47 @@ eagerly in every layer: the sparse attention and the indexer, whose decode fallb
 (`fp8_paged_mqa_logits_torch`) loops over sequences in Python with a host sync per sequence.
 Prefill (TTFT) is unchanged, as expected, since prefill was never graphed.
 
+### Batched Triton indexer logits (job 23527632)
+
+The indexer's decode fallback, `fp8_paged_mqa_logits_torch`, loops over the batch in Python
+with an `.item()` per sequence. `plugin/lumi_dsv4_debug/paged_logits.py` replaces it with one
+Triton kernel: grid fixed by batch size and `max_model_len`, sequence lengths read on the
+device, so no host sync and capturable. `test_paged_logits.py` (job 23518750, one GCD):
+
+- matches the torch fallback in 13 cases (block sizes 64/256, lengths 1 to 32k, batch up
+  to 32): same -inf mask, rel err ~1e-7, identical top-512;
+- captures in a CUDA graph and replays correctly with new lengths;
+- per call at 32 sequences: torch 7.0 ms, Triton 0.05–0.2 ms. V4-Flash calls it in ~20
+  layers per decode step, so the torch loop cost ~140 ms per step at 32 users.
+
+**It needs `--no-async-scheduling`.** With async scheduling the server hangs after a few
+decode steps of the first request (jobs 23518755, 23519175, 23527189): workers stop
+answering, with no fault or exception. In job 23519175 the first 40 calls were checked
+against the torch fallback (each check syncs) and were correct, and the hang came right
+after the checks ran out. So it is a race that the fallback's per-sequence syncs hid, not
+wrong logits. Not yet located (faulthandler stack dumps did not reach the log).
+
+`TRITON_LOGITS=1 NO_ASYNC=1 COMPILE=1`, piecewise graphs. Accuracy: sanity 5/5, needles
+2.1k/16.8k ok, **GSM8K 97.5 %** (vs 98.0 %: one question, within noise), 384 s vs 558 s.
+
+| concurrency | out tok/s | median TTFT | median TPOT | p99 TPOT | vs piecewise above | vs eager |
+|---|---|---|---|---|---|---|
+| 1 | 5.3 | 0.7 s | 186 ms | 186 ms | 1.06× | 1.8× |
+| 4 | 20.3 | 2.4 s | 192 ms | 195 ms | 1.13× | 1.8× |
+| 16 | 71.0 | 7.6 s | 210 ms | 224 ms | 1.39× | 1.9× |
+| 32 | 123.2 | 10.0 s | 240 ms | 257 ms | 1.62× | 2.0× |
+
+TPOT now grows only 186 → 240 ms from 1 to 32 users, and the gain grows with load, as the
+per-call timings predicted. With `--no-async-scheduling` vLLM also reports twice the KV
+capacity from the same 17.45 GiB (190k tokens, 5.8× at 32k, vs 97k with async; jobs
+23527079 and 23527632): observed, cause not investigated.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
   1. ~~Graphs~~: done, piecewise, 1.3–1.7× (above).
-  2. A capturable, batched paged-MQA-logits kernel for the indexer's decode (no per-sequence
-     `.item()`). That removes the host syncs and would allow FULL decode graphs.
+  2. ~~Batched indexer logits~~: done, 2.0× eager at 32 users (above). Open: the race with
+     async scheduling, and FULL decode graphs (job 23528021).
   3. A correct TileLang (or Triton) mHC pre kernel, which brings back the fused path.
   4. Tuned W8A8 block-FP8 and MXFP4 MoE configs for MI250X.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
@@ -165,6 +201,8 @@ Prefill (TTFT) is unchanged, as expected, since prefill was never graphed.
 | `reference_torch/` | plain-PyTorch `kernel.py` and `fast_hadamard_transform` stand-ins |
 | `selfcheck_kernels.py` | CPU checks of `reference_torch/` |
 | `run_reference.sh` | convert to MP=8 (once, ~24 min) and run the reference greedily |
-| `plugin/` | vLLM 0.26 general plugin: `DSV4_INDEXER_GATE`, `DSV4_TORCH_MHC` |
+| `plugin/` | vLLM 0.26 general plugin: `DSV4_INDEXER_GATE`, `DSV4_TORCH_MHC`, `DSV4_TRITON_PAGED_LOGITS` |
 | `test_mhc_tilelang.py`, `run_mhc_test.sh` | per-kernel TileLang mHC check on one GCD |
+| `plugin/lumi_dsv4_debug/paged_logits.py` | batched Triton indexer decode logits (`DSV4_TRITON_PAGED_LOGITS`) |
+| `test_paged_logits.py`, `run_paged_logits_test.sh` | that kernel vs the torch fallback, graph replay, timing |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
