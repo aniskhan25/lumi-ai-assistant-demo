@@ -62,9 +62,13 @@ echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEX
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
 # (job 23491881: "fp8_ds_mla layout only supports fp8 kv-cache, got auto").
-# Eager by default: fewer moving parts. COMPILE=1 drops --enforce-eager (torch.compile and
-# piecewise graphs; branch perf/dsv4-flash-gfx90a-compile, needs TORCH_MHC=1 INDEXER_GATE=1).
-if [ "${COMPILE:-0}" = 1 ]; then DEFAULT_EXTRA="--moe-backend triton_unfused"
+# Eager by default: fewer moving parts. COMPILE=1 drops --enforce-eager (branch
+# perf/dsv4-flash-gfx90a-compile, needs TORCH_MHC=1 INDEXER_GATE=1). V4 on 0.26 is not
+# torch.compiled; it uses "breakable" graphs. PIECEWISE, because FULL graphs capture the
+# indexer, whose torch paged-MQA-logits fallback calls .item() per sequence and cannot be
+# captured (job 23512857); in PIECEWISE the indexer and attention run as eager breaks.
+if [ "${COMPILE:-0}" = 1 ]; then
+  DEFAULT_EXTRA='--moe-backend triton_unfused --compilation-config {"cudagraph_mode":"PIECEWISE"}'
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
