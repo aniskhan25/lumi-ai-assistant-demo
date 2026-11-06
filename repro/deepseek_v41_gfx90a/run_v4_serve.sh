@@ -19,6 +19,7 @@
 #   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh              # from the repo root
 #   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
 #   PROBE=0 BENCH=1                                                # speed sweep instead of probe
+#   COMPILE=1                                                      # torch.compile + graphs, not eager
 #
 # Phase-0 workarounds, both off by default (see README):
 #   AMDGCN_USE_BUFFER_OPS=0  Triton 3.6's AMD CanonicalizePointers pass asserts on V4's
@@ -56,17 +57,20 @@ elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} COMPILE=${COMPILE:-0}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
 # (job 23491881: "fp8_ds_mla layout only supports fp8 kv-cache, got auto").
-# Eager first: fewer moving parts.
+# Eager by default: fewer moving parts. COMPILE=1 drops --enforce-eager (torch.compile and
+# piecewise graphs; branch perf/dsv4-flash-gfx90a-compile, needs TORCH_MHC=1 INDEXER_GATE=1).
+if [ "${COMPILE:-0}" = 1 ]; then DEFAULT_EXTRA="--moe-backend triton_unfused"
+else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
        --no-enable-prefix-caching --kv-cache-dtype fp8
-       ${EXTRA_VLLM_ARGS:---moe-backend triton_unfused --enforce-eager})
+       ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}})
 echo "Serving: ${SERVE[*]}"
 "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
 SERVER=$!
@@ -80,8 +84,8 @@ until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&
   sleep 5
 done
 echo "SERVER_READY after ${SECONDS}s"
-grep -hE "Loading weights took|Model loading took|backend|KV cache|Maximum concurrency" "${LOG}/server.log" \
-  | grep -vE "amdsmi|Worker_TP[1-9]" | head -12
+grep -hE "Loading weights took|Model loading took|backend|KV cache|Maximum concurrency|compil|[Gg]raph|cudagraph_mode" "${LOG}/server.log" \
+  | grep -vE "amdsmi|Worker_TP[1-9]" | head -24
 
 STATUS=0
 # The Qwen3.8 branch's smoke_requests.py is not on this branch; the probe covers the

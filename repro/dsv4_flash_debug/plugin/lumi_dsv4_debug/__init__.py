@@ -2,9 +2,11 @@
 
 Each switch is an environment variable, so one variant runs per allocation:
 
-DSV4_INDEXER_GATE=1  Lift 0.26's aiter-only gate on the sparse attention indexer and call
-                     the op's Python implementation (Triton cache insert/gather, compiled
+DSV4_INDEXER_GATE=1  Lift 0.26's aiter-only gate on the sparse attention indexer and run
+                     the op's non-aiter fallbacks (Triton cache insert/gather, compiled
                      top-k, torch FP8 logits), as in ../deepseek_v41_gfx90a/indexer_gate.
+                     Registers the op's torch.ops entry, which 0.26 does only with aiter,
+                     so it also works under torch.compile.
                      Also bounds the memory of the torch MQA-logits fallback that path
                      uses for prefill (see _chunked_mqa_logits).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
@@ -68,6 +70,33 @@ def _chunked_mqa_logits() -> None:
     ops.fp8_mqa_logits_torch = fp8_mqa_logits_torch
 
 
+def _register_indexer_op() -> None:
+    """0.26 registers torch.ops.vllm.rocm_aiter_sparse_attn_indexer only when aiter is on
+    (vllm/_aiter_ops.py), although the op itself has non-aiter fallbacks and is already a
+    graph-splitting op (CompilationConfig._attention_ops). Register it the same way, so
+    the indexer runs as one opaque op under torch.compile instead of being traced."""
+    import torch
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if rocm_aiter_ops.is_enabled() or hasattr(torch.ops.vllm, "rocm_aiter_sparse_attn_indexer"):
+        return
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import direct_register_custom_op
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_aiter_sparse_attn_indexer,
+        rocm_aiter_sparse_attn_indexer_fake,
+    )
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_sparse_attn_indexer",
+        op_func=rocm_aiter_sparse_attn_indexer,
+        mutates_args=["topk_indices_buffer"],
+        fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+
 def _indexer_gate() -> None:
     import torch
 
@@ -85,12 +114,9 @@ def _indexer_gate() -> None:
             return stock(self, hidden_states, q_quant, k, weights)
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), "expects a single FP8 q_quant tensor"
-        # The torch.ops entry is registered only with aiter; call the Python op (eager).
-        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-            rocm_aiter_sparse_attn_indexer,
-        )
-
-        return rocm_aiter_sparse_attn_indexer(
+        # Through torch.ops (registered by _register_indexer_op): torch.compile splits the
+        # graph at it, as at vllm::rocm_aiter_sparse_attn_indexer with aiter.
+        return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
             hidden_states,
             module._encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
@@ -109,6 +135,7 @@ def _indexer_gate() -> None:
 
     forward_hip._lumi_gate = True
     cls.forward_hip = forward_hip
+    _register_indexer_op()
     _chunked_mqa_logits()
     _log("DSV4_INDEXER_GATE: sparse indexer runs its non-aiter fallbacks (chunked MQA logits)")
 
