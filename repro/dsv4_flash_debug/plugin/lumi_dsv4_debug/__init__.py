@@ -9,6 +9,10 @@ DSV4_INDEXER_GATE=1  Lift 0.26's aiter-only gate on the sparse attention indexer
                      so it also works under torch.compile.
                      Also bounds the memory of the torch MQA-logits fallback that path
                      uses for prefill (see _chunked_mqa_logits).
+DSV4_TRITON_PAGED_LOGITS=1
+                     With the gate: compute the indexer's decode logits with one batched
+                     Triton kernel (paged_logits.py) instead of the per-sequence torch loop,
+                     which syncs with the host per sequence and cannot be graph-captured.
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but
@@ -149,3 +153,8 @@ def register() -> None:
         _torch_mhc()
     if os.environ.get("DSV4_INDEXER_GATE") == "1":
         _indexer_gate()
+        if os.environ.get("DSV4_TRITON_PAGED_LOGITS") == "1":
+            from . import paged_logits
+
+            paged_logits.install()
+            _log("DSV4_TRITON_PAGED_LOGITS: indexer decode logits via one batched Triton kernel")
