@@ -18,6 +18,7 @@
 #
 #   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh              # from the repo root
 #   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
+#   PROBE=0 BENCH=1                                                # speed sweep instead of probe
 #
 # Phase-0 workarounds, both off by default (see README):
 #   AMDGCN_USE_BUFFER_OPS=0  Triton 3.6's AMD CanonicalizePointers pass asserts on V4's
@@ -85,9 +86,36 @@ grep -hE "Loading weights took|Model loading took|backend|KV cache|Maximum concu
 STATUS=0
 # The Qwen3.8 branch's smoke_requests.py is not on this branch; the probe covers the
 # same ground for correctness (non-finite logprobs, garbage, 2.3k/18.2k needle, GSM8K).
-"${RUN[@]}" python "${REPO}/repro/lexivo_mimo_gfx90a/probe.py" \
-  --base-url "http://127.0.0.1:${PORT}" --model dsv4 \
-  --gsm8k-parquet "${GSM8K}" --gsm8k-n "${PROBE_GSM8K_N:-200}" --out "${LOG}/probe.json" \
-  || STATUS=1
+if [ "${PROBE:-1}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/lexivo_mimo_gfx90a/probe.py" \
+    --base-url "http://127.0.0.1:${PORT}" --model dsv4 \
+    --gsm8k-parquet "${GSM8K}" --gsm8k-n "${PROBE_GSM8K_N:-200}" --out "${LOG}/probe.json" \
+    || STATUS=1
+fi
+
+# BENCH=1: streaming `vllm bench serve` sweep, as for Qwen3.8-Flash (repro/qwen38_flash_gfx90a)
+# so the numbers compare. Warm-up first: the first requests of an allocation pay one-time
+# kernel compilation. PROMPTS_PER_SLOT is small because eager V4 is slow (~37 tok/s at c=16).
+if [ "${BENCH:-0}" = 1 ]; then
+  bench() {  # concurrency, prompts, input len, output len, result name
+    "${RUN[@]}" vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
+      --base-url "http://127.0.0.1:${PORT}" --model dsv4 --tokenizer "${SNAPSHOT}" \
+      --tokenizer-mode deepseek_v4 --dataset-name random --random-input-len "$3" \
+      --random-output-len "$4" --ignore-eos --num-prompts "$2" --max-concurrency "$1" \
+      --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
+      --save-result --result-dir "${LOG}" --result-filename "$5.json" \
+      | grep -E "Output token throughput|Mean TTFT|Median TPOT|P99 TPOT|Successful|Error" || true
+  }
+  WORKLOADS="${WORKLOADS:-1024:512}"
+  first="${WORKLOADS%% *}"
+  echo "=== warm-up ==="; bench 4 4 "${first%%:*}" "${first##*:}" warmup
+  for w in ${WORKLOADS}; do
+    for c in ${CONCURRENCIES:-1 4 16 32}; do
+      n=$((c * ${PROMPTS_PER_SLOT:-2})); [ "${n}" -lt 4 ] && n=4
+      echo "=== bench c=${c} n=${n} in:out=${w} ==="
+      bench "${c}" "${n}" "${w%%:*}" "${w##*:}" "serve_c${c}_i${w%%:*}_o${w##*:}"
+    done
+  done
+fi
 [ "${STATUS}" != 0 ] && { echo "--- server log tail ---"; grep -v amdsmi "${LOG}/server.log" | tail -60; }
 exit "${STATUS}"
