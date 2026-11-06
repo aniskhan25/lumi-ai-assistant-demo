@@ -87,10 +87,13 @@ trap 'kill ${WATCH:-} 2>/dev/null; kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>
 # Hang watch: when vLLM says the workers stopped answering, dump their Python stacks
 # (the plugin registers faulthandler on SIGUSR1).
 if [ "${TORCH_MHC:-0}" = 1 ]; then
-  ( while sleep 30; do
-      if grep -q "No available shared memory broadcast block" "${LOG}/server.log" 2>/dev/null \
-         && grep -q "Application startup complete" "${LOG}/server.log"; then
-        pkill -USR1 -u "${USER}" -f "VLLM::Worker" || true; echo "HANG: dumped worker stacks"; break
+  # vLLM also prints the stall message during startup warm-up: count only later ones.
+  ( until grep -q "Application startup complete" "${LOG}/server.log" 2>/dev/null; do sleep 10; done
+    base=$(grep -c "No available shared memory broadcast block" "${LOG}/server.log")
+    while sleep 20; do
+      if [ "$(grep -c "No available shared memory broadcast block" "${LOG}/server.log")" -gt "${base}" ]; then
+        echo "HANG: signalling $(pgrep -u "${USER}" -f "VLLM::Worker" | wc -l) workers"
+        pkill -USR1 -u "${USER}" -f "VLLM::Worker" || true; break
       fi
     done ) &
   WATCH=$!
