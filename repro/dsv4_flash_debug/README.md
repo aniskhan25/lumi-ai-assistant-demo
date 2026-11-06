@@ -71,6 +71,7 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh     # from the repo root; TP=8, eager
 ```
 
+Add `COMPILE=1` for piecewise CUDA graphs (1.3–1.7× faster, same accuracy; see Speed).
 That is five changes against the stock container:
 
 | | why |
@@ -107,14 +108,42 @@ likely sources, all on fallbacks that only gfx90a takes:
 TTFT is long at load (8–14 s) because prefill goes through the torch MQA-logits fallback. The
 KV cache holds 106k tokens (19 GiB per GCD), which is 3.25 concurrent requests at 32k context.
 
+### With graphs (branch `perf/dsv4-flash-gfx90a-compile`, job 23513552)
+
+V4 on vLLM 0.26 is not torch.compiled (compilation mode NONE). Without `--enforce-eager` it
+captures "breakable" CUDA graphs: ops marked `eager_break_during_capture` (the V4 attention
+and the sparse indexer) run eagerly between graph segments. Two changes were needed:
+
+- the plugin registers `torch.ops.vllm.rocm_aiter_sparse_attn_indexer`, which 0.26 does only
+  with aiter, and calls the indexer through it;
+- `cudagraph_mode=PIECEWISE`. The default FULL_AND_PIECEWISE captures decode whole, indexer
+  included, and the indexer's torch paged-MQA-logits fallback calls `.item()` per sequence,
+  which cannot be captured (job 23512857: `hipErrorStreamCaptureUnsupported`).
+
+`COMPILE=1` in `run_v4_serve.sh` does both. Accuracy is unchanged: sanity 5/5, needles
+2.1k/16.8k ok, **GSM8K 98.0 %**, no garbage or non-finite logprobs.
+
+| concurrency | out tok/s | median TTFT | median TPOT | p99 TPOT | vs eager (tok/s) |
+|---|---|---|---|---|---|
+| 1 | 5.0 | 0.7 s | 197 ms | 197 ms | 1.67× |
+| 4 | 17.9 | 2.6 s | 218 ms | 221 ms | 1.61× |
+| 16 | 51.2 | 7.9 s | 298 ms | 311 ms | 1.38× |
+| 32 | 76.0 | 14.3 s | 392 ms | 418 ms | 1.26× |
+
+Graphs take 1.6 GiB, so the KV cache drops to 97k tokens (2.97× at 32k). The gain is largest
+at low load, where launch overhead dominated, and shrinks at 32 users. What remains runs
+eagerly in every layer: the sparse attention and the indexer, whose decode fallback
+(`fp8_paged_mqa_logits_torch`) loops over sequences in Python with a host sync per sequence.
+Prefill (TTFT) is unchanged, as expected, since prefill was never graphed.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
-  1. torch.compile and graphs. The plugin calls the indexer op's Python implementation,
-     because 0.26 registers the `torch.ops` wrapper only with aiter, so the plugin would have
-     to register it.
-  2. A correct TileLang (or Triton) mHC pre kernel, which brings back the fused path.
-  3. Tuned W8A8 block-FP8 and MXFP4 MoE configs for MI250X.
+  1. ~~Graphs~~: done, piecewise, 1.3–1.7× (above).
+  2. A capturable, batched paged-MQA-logits kernel for the indexer's decode (no per-sequence
+     `.item()`). That removes the host syncs and would allow FULL decode graphs.
+  3. A correct TileLang (or Triton) mHC pre kernel, which brings back the fused path.
+  4. Tuned W8A8 block-FP8 and MXFP4 MoE configs for MI250X.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
