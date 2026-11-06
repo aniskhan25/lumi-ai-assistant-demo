@@ -82,16 +82,17 @@ SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
 echo "Serving: ${SERVE[*]}"
 "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
 SERVER=$!
-trap 'kill ${WATCH:-} 2>/dev/null; kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT
+trap 'kill ${WATCH:-} 2>/dev/null || true; kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT
 
 # Hang watch: when vLLM says the workers stopped answering, dump their Python stacks
 # (the plugin registers faulthandler on SIGUSR1).
 if [ "${TORCH_MHC:-0}" = 1 ]; then
   # vLLM also prints the stall message during startup warm-up: count only later ones.
   ( until grep -q "Application startup complete" "${LOG}/server.log" 2>/dev/null; do sleep 10; done
-    base=$(grep -c "No available shared memory broadcast block" "${LOG}/server.log")
+    stalls() { grep -c "No available shared memory broadcast block" "${LOG}/server.log" || true; }
+    base=$(stalls)
     while sleep 20; do
-      if [ "$(grep -c "No available shared memory broadcast block" "${LOG}/server.log")" -gt "${base}" ]; then
+      if [ "$(stalls)" -gt "${base}" ]; then
         echo "HANG: signalling $(pgrep -u "${USER}" -f "VLLM::Worker" | wc -l) workers"
         pkill -USR1 -u "${USER}" -f "VLLM::Worker" || true; break
       fi
