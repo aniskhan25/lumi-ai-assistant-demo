@@ -93,7 +93,7 @@ until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&
 done
 echo "SERVER_READY after ${SECONDS}s"
 grep -hE "Loading weights took|Model loading took|backend|KV cache|Maximum concurrency|compil|[Gg]raph|cudagraph_mode" "${LOG}/server.log" \
-  | grep -vE "amdsmi|Worker_TP[1-9]" | head -24
+  | grep -vE "amdsmi|Worker_TP[1-9]" | head -24 || true   # head closes early: SIGPIPE
 
 STATUS=0
 # The Qwen3.8 branch's smoke_requests.py is not on this branch; the probe covers the
