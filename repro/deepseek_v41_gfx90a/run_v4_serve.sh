@@ -53,7 +53,7 @@ RUN=(singularity exec -B "${SHM}:/dev/shm")
 # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
 if [ "${TORCH_MHC:-0}" = 1 ]; then
   export DSV4_TORCH_MHC=1 DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
-  export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}"
+  export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
 elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
@@ -82,8 +82,19 @@ SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
 echo "Serving: ${SERVE[*]}"
 "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
 SERVER=$!
-trap 'kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT
+trap 'kill ${WATCH:-} 2>/dev/null; kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT
 
+# Hang watch: when vLLM says the workers stopped answering, dump their Python stacks
+# (the plugin registers faulthandler on SIGUSR1).
+if [ "${TORCH_MHC:-0}" = 1 ]; then
+  ( while sleep 30; do
+      if grep -q "No available shared memory broadcast block" "${LOG}/server.log" 2>/dev/null \
+         && grep -q "Application startup complete" "${LOG}/server.log"; then
+        pkill -USR1 -u "${USER}" -f "VLLM::Worker" || true; echo "HANG: dumped worker stacks"; break
+      fi
+    done ) &
+  WATCH=$!
+fi
 SECONDS=0
 until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; do
   if ! kill -0 "${SERVER}" 2>/dev/null || [ "${SECONDS}" -gt 3600 ]; then

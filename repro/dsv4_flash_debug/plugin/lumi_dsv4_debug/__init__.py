@@ -145,6 +145,11 @@ def _indexer_gate() -> None:
 
 
 def register() -> None:
+    import faulthandler
+    import signal
+
+    # `pkill -USR1 -f VLLM::Worker` dumps every worker's Python stacks into the server log.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():

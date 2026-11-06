@@ -106,9 +106,21 @@ def install() -> None:
     """Route rocm_fp8_paged_mqa_logits to the kernel above when aiter is off and next_n == 1."""
     import vllm.v1.attention.ops.rocm_aiter_mla_sparse as ops
 
+    import os
+
+    from vllm.logger import init_logger
+
+    log = init_logger("vllm.lumi_dsv4_debug")
     stock = ops.rocm_fp8_paged_mqa_logits
     if getattr(stock, "_lumi_triton", False):
         return
+    # DSV4_PAGED_LOGITS_CHECK=N: compare the first N calls with the torch fallback (syncs).
+    checks = {"left": int(os.environ.get("DSV4_PAGED_LOGITS_CHECK", "0")), "described": False}
+
+    def describe(q, kv, w, lens, bt, max_model_len):
+        t = lambda x: f"{tuple(x.shape)} {x.dtype} stride {x.stride()}"  # noqa: E731
+        log.info("paged logits call: q %s | kv %s | w %s | lens %s | bt %s | max_model_len %d",
+                 t(q), t(kv), t(w), t(lens), t(bt), max_model_len)
 
     def rocm_fp8_paged_mqa_logits(q_fp8, kv_cache_fp8, weights, context_lens, block_tables,
                                   schedule_metadata, max_model_len):
@@ -117,8 +129,21 @@ def install() -> None:
         if rocm_aiter_ops.is_enabled() or q_fp8.shape[1] != 1:
             return stock(q_fp8, kv_cache_fp8, weights, context_lens, block_tables,
                          schedule_metadata, max_model_len)
-        return fp8_paged_mqa_logits_triton(q_fp8, kv_cache_fp8, weights, context_lens,
-                                           block_tables, max_model_len)
+        if not checks["described"]:
+            checks["described"] = True
+            describe(q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len)
+        out = fp8_paged_mqa_logits_triton(q_fp8, kv_cache_fp8, weights, context_lens,
+                                          block_tables, max_model_len)
+        if checks["left"] > 0:
+            checks["left"] -= 1
+            want = ops.fp8_paged_mqa_logits_torch(q_fp8, kv_cache_fp8, weights, context_lens,
+                                                  block_tables, max_model_len)
+            same_mask = torch.equal(torch.isinf(out), torch.isinf(want))
+            fin = torch.isfinite(want)
+            err = ((out[fin] - want[fin]).abs().max().item() if fin.any() else 0.0)
+            log.info("paged logits check: lens %s, -inf mask %s, max abs err %.3g",
+                     context_lens.reshape(-1).tolist()[:8], "same" if same_mask else "DIFF", err)
+        return out
 
     rocm_fp8_paged_mqa_logits._lumi_triton = True
     ops.rocm_fp8_paged_mqa_logits = rocm_fp8_paged_mqa_logits
