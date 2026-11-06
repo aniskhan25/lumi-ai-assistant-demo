@@ -172,12 +172,19 @@ per-call timings predicted. With `--no-async-scheduling` vLLM also reports twice
 capacity from the same 17.45 GiB (190k tokens, 5.8× at 32k, vs 97k with async; jobs
 23527079 and 23527632): observed, cause not investigated.
 
+**FULL decode graphs** (`CUDAGRAPH_MODE=FULL_AND_PIECEWISE`, job 23529517) now capture, since
+the indexer no longer syncs, and are correct (sanity 5/5, needles ok, GSM8K 97.0 %), but
+give nothing over piecewise: 5.4 / 20.3 / 71.5 / 123.6 tok/s at 1/4/16/32 users (TPOT
+185/193/209/239 ms), within 0.5 % of the table above, for 0.1 GiB more graph memory. So
+with the indexer loop gone, the eager breaks around attention and the indexer are no longer
+the cost; the GPU kernels are. Piecewise stays the recommendation.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
   1. ~~Graphs~~: done, piecewise, 1.3–1.7× (above).
-  2. ~~Batched indexer logits~~: done, 2.0× eager at 32 users (above). Open: the race with
-     async scheduling, and FULL decode graphs (job 23528021).
+  2. ~~Batched indexer logits~~: done, 2.0× eager at 32 users (above). FULL decode graphs
+     add nothing. Open: the race with async scheduling.
   3. A correct TileLang (or Triton) mHC pre kernel, which brings back the fused path.
   4. Tuned W8A8 block-FP8 and MXFP4 MoE configs for MI250X.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
