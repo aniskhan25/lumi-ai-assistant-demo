@@ -84,12 +84,37 @@ That is five changes against the stock container:
 The plugin goes on `PYTHONPATH` through `singularity exec --env`, because the container
 overrides the host `PYTHONPATH`. `run_v4_serve.sh` handles that.
 
+## Speed (job 23510042, eager, TP=8, one dev-g node)
+
+Streaming `vllm bench serve`, 1024 in / 512 out, same method as the Qwen3.8-Flash table
+(`PROBE=0 BENCH=1`; fewer prompts per point because it is slow):
+
+| concurrency | out tok/s | median TTFT | median TPOT | p99 TPOT | Qwen3.8-Flash eager / compiled TPOT |
+|---|---|---|---|---|---|
+| 1 | 3.0 | 0.7 s | 337 ms | 339 ms | 130 / 22 ms |
+| 4 | 11.1 | 2.8 s | 358 ms | 361 ms | 132 / 32 ms |
+| 16 | 37.2 | 8.1 s | 414 ms | 428 ms | 165 / 42 ms |
+| 32 | 60.4 | 14.3 s | 503 ms | 526 ms | 168 / 47 ms |
+
+**Correct but slow.** TPOT barely grows from 1 to 32 users (337 → 503 ms) while throughput
+scales 20×. So each decode step is dominated by fixed per-step overhead, not compute. The
+likely sources, all on fallbacks that only gfx90a takes:
+- the torch mHC fallback: 43 layers × 2 Sinkhorn normalisations × 20 iterations of small ops
+  per step;
+- the indexer run as a Python op;
+- eager launches throughout.
+
+TTFT is long at load (8–14 s) because prefill goes through the torch MQA-logits fallback. The
+KV cache holds 106k tokens (19 GiB per GCD), which is 3.25 concurrent requests at 32k context.
+
 ## Open
 
-- **Speed:** only eager has been tried. The indexer-gate plugin calls the op's Python
-  implementation, because 0.26 registers the `torch.ops` wrapper only with aiter.
-  torch.compile would need it registered. GSM8K took 742 s, against 233 s for compiled
-  Qwen3.8-Flash.
+- **Speed**, in likely order of payoff:
+  1. torch.compile and graphs. The plugin calls the indexer op's Python implementation,
+     because 0.26 registers the `torch.ops` wrapper only with aiter, so the plugin would have
+     to register it.
+  2. A correct TileLang (or Triton) mHC pre kernel, which brings back the fused path.
+  3. Tuned W8A8 block-FP8 and MXFP4 MoE configs for MI250X.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
