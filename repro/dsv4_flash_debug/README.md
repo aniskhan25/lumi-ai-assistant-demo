@@ -179,14 +179,42 @@ give nothing over piecewise: 5.4 / 20.3 / 71.5 / 123.6 tok/s at 1/4/16/32 users 
 with the indexer loop gone, the eager breaks around attention and the indexer are no longer
 the cost; the GPU kernels are. Piecewise stays the recommendation.
 
+### Where decode time goes (job 23530527)
+
+`PROFILE=1` (eager, recipe switches, torch profiler on decode at 1 and 32 users; rank 0 split
+by `analyze_trace.py`, which maps each GPU kernel to its Python call site):
+
+| component | ms/step, 1 user | ms/step, 32 users | main kernel |
+|---|---|---|---|
+| **FP8 linear (W8A8 block)** | **89.0** | **94.0** | `_w8a8_triton_block_scaled_mm` (default config) |
+| hyper-connections (torch fallback) | 54.0 | 60.0 | many small reduce/elementwise kernels |
+| MoE experts (MXFP4, `triton_unfused`) | 17.7 | 18.8 | `_matmul_ogs_..._bf16xbf16xmxfp4` |
+| sparse attention + other attention | 18.3 | 15.5 | `_sparse_attn_decode_ragged_kernel`, hipBLASLt |
+| compressor, indexer, norms, head, other | 2.9 | 6.8 | |
+| *sum (compute)* | *~182* | *~195* | |
+
+All-reduce shows ~390 ms/step in this eager trace, but that is RCCL kernels spinning while
+ranks wait for each other under the profiler's host overhead; the compute sum matches the
+graph-mode TPOT (186 ms at 1 user), so communication is small there.
+
+**The dense FP8 linears are half of every decode step** and do not grow with batch (89 →
+94 ms), so they are latency-bound, not bandwidth-bound. Their weights are about 22 M FP8
+parameters per layer per rank (shapes N×K 1536×4096, 4096×1024, 4096×256, 512×4096,
+8192×1024): ~0.95 GB per step, which MI250X's HBM reads in about 1 ms. The block-scaled
+Triton kernel runs on vLLM's default config (the startup log warns), with few programs at
+small M, and MI250X has no FP8 units. The hyper-connection fallback is the second item (~30 %).
+
 ## Open
 
 - **Speed**, in likely order of payoff:
   1. ~~Graphs~~: done, piecewise, 1.3–1.7× (above).
   2. ~~Batched indexer logits~~: done, 2.0× eager at 32 users (above). FULL decode graphs
      add nothing. Open: the race with async scheduling.
-  3. A correct TileLang (or Triton) mHC pre kernel, which brings back the fused path.
-  4. Tuned W8A8 block-FP8 and MXFP4 MoE configs for MI250X.
+  3. **Dense FP8 linears (~50 % of decode, job 23530527)**: tuned W8A8 block configs for
+     the five shapes, or dequantise to bf16 at load (exact: e4m3 values times power-of-two
+     ue8m0 scales fit bf16) and use hipBLASLt / skinny GEMMs, for ~1 GB more per GCD.
+  4. A correct hyper-connection pre kernel (~30 %).
+  5. MXFP4 MoE (~10 %): `triton_kernels` picks its own tiles; no vLLM config to tune.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
