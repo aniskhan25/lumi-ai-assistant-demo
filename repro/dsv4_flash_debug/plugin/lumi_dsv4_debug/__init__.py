@@ -13,6 +13,9 @@ DSV4_TRITON_PAGED_LOGITS=1
                      With the gate: compute the indexer's decode logits with one batched
                      Triton kernel (paged_logits.py) instead of the per-sequence torch loop,
                      which syncs with the host per sequence and cannot be graph-captured.
+DSV4_BF16_LINEAR=1   Dequantise block-FP8 dense linears to bf16 once after loading and run
+                     them with vLLM's ROCm bf16 GEMM (bf16_linear.py): on gfx90a 20-90x
+                     faster than the W8A8 Triton kernel and more accurate.
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but
@@ -156,6 +159,11 @@ def register() -> None:
         return
     if os.environ.get("DSV4_TORCH_MHC") == "1":
         _torch_mhc()
+    if os.environ.get("DSV4_BF16_LINEAR") == "1":
+        from . import bf16_linear
+
+        bf16_linear.install()
+        _log("DSV4_BF16_LINEAR: block-FP8 dense linears will run in bf16")
     if os.environ.get("DSV4_INDEXER_GATE") == "1":
         _indexer_gate()
         if os.environ.get("DSV4_TRITON_PAGED_LOGITS") == "1":
