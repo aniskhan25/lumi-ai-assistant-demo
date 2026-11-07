@@ -28,7 +28,10 @@ def _dequant(weight: torch.Tensor, scale: torch.Tensor, block: list[int]) -> tor
 
 
 def install() -> None:
+    import os
+
     from vllm.logger import init_logger
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
     from vllm.model_executor.layers.quantization import fp8 as fp8_module
     from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 
@@ -38,7 +41,22 @@ def install() -> None:
         return
     stock_process, stock_apply = cls.process_weights_after_loading, cls.apply
     gemm = dispatch_unquantized_gemm()
-    state = {"layers": 0, "bytes": 0, "checks": 3}
+    # DSV4_BF16_LINEAR_ACT=fp8: round the activations to FP8 per 128-group (fp32 scales) as
+    # the stock W8A8 path does, then dequantise and run the bf16 GEMM. Same numerics as stock
+    # up to bf16 rounding of q*s; isolates "the model wants FP8-rounded activations".
+    act_fp8 = os.environ.get("DSV4_BF16_LINEAR_ACT") == "fp8"
+    state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
+
+    def fake_quant(x2d, group):
+        q, s = per_token_group_quant_fp8(x2d, group, use_ue8m0=False)
+        m, k = x2d.shape
+        return (q.float().view(m, k // group, group) * s.unsqueeze(-1)).view(m, k).to(x2d.dtype)
+
+    def run(self, layer, x, bias):
+        if not act_fp8:
+            return gemm(layer, x, layer.weight, bias)
+        x2d = fake_quant(x.reshape(-1, x.shape[-1]), self.weight_block_size[1])
+        return gemm(layer, x2d, layer.weight, bias).view(*x.shape[:-1], layer.weight.shape[0])
 
     def process_weights_after_loading(self, layer):
         stock_process(self, layer)
@@ -53,7 +71,7 @@ def install() -> None:
             return
         bf16 = _dequant(weight, scale, self.weight_block_size)
         x = None
-        if state["checks"] > 0 and not getattr(layer, "is_bmm", False):
+        if not getattr(layer, "is_bmm", False):  # every layer: one small GEMM each at load
             x = torch.randn(4, weight.shape[1], dtype=torch.bfloat16, device=weight.device)
             want = stock_apply(self, layer, x).float()
         layer.weight = torch.nn.Parameter(bf16, requires_grad=False)
@@ -64,19 +82,21 @@ def install() -> None:
         state["layers"] += 1
         state["bytes"] += bf16.numel()
         if x is not None:
-            state["checks"] -= 1
-            got = gemm(layer, x, layer.weight).float()
+            got = run(self, layer, x, None).float()
             rel = ((got - want).norm() / want.norm()).item()
-            log.info("DSV4_BF16_LINEAR check %s: bf16 vs W8A8 rel diff %.2e (W8A8 rounds "
-                     "activations to FP8: ~2.6e-2 expected)", tuple(bf16.shape), rel)
+            state["max_diff"] = max(state["max_diff"], rel)
+            if rel > 4e-2:  # W8A8's own activation rounding is ~2.6e-2 (bf16 activations)
+                log.warning("DSV4_BF16_LINEAR outlier %s %s: rel diff vs W8A8 %.2e",
+                            getattr(layer, "prefix", "?"), tuple(bf16.shape), rel)
         n = state["layers"]
-        if n & (n - 1) == 0:
-            log.info("DSV4_BF16_LINEAR: %d block-FP8 linears now bf16 (+%.2f GiB vs FP8)",
-                     n, state["bytes"] / 2**30)
+        if n & (n - 1) == 0 or n % 100 == 0:
+            log.info("DSV4_BF16_LINEAR: %d block-FP8 linears now bf16 (+%.2f GiB vs FP8), "
+                     "max rel diff vs W8A8 so far %.2e%s", n, state["bytes"] / 2**30,
+                     state["max_diff"], ", FP8-rounded activations" if act_fp8 else "")
 
     def apply(self, layer, x, bias=None):
         if getattr(layer, "_lumi_bf16", False):
-            return gemm(layer, x, layer.weight, bias)
+            return run(self, layer, x, bias)
         return stock_apply(self, layer, x, bias)
 
     cls.process_weights_after_loading = process_weights_after_loading
