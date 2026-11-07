@@ -204,15 +204,41 @@ parameters per layer per rank (shapes N×K 1536×4096, 4096×1024, 4096×256, 51
 Triton kernel runs on vLLM's default config (the startup log warns), with few programs at
 small M, and MI250X has no FP8 units. The hyper-connection fallback is the second item (~30 %).
 
+### Dense FP8 linears: stock vs tuned vs bf16 (job 23535213)
+
+`bench_fp8_linear.py`, one GCD, the five shapes vLLM warned about, CUDA-graph timings;
+error is relative to fp32 activations times dequantised weights:
+
+| N×K | M | stock µs | tuned µs | **bf16 µs** | error W8A8 | **error bf16** |
+|---|---|---|---|---|---|---|
+| 1536×4096 | 1 / 32 | 511 / 544 | 160 / 165 | **8.8 / 35.7** | 2.6e-2 | **1.7e-3** |
+| 4096×1024 | 1 / 32 | 162 / 168 | 51 / 74 | **6.7 / 14.9** | 2.6e-2 | **1.7e-3** |
+| 4096×256 | 1 / 32 | 75 / 80 | 20 / 26 | **5.9 / 7.0** | 2.6e-2 | **1.7e-3** |
+| 512×4096 | 1 / 32 | 479 / 494 | 153 / 156 | **5.2 / 22.2** | 2.6e-2 | **1.7e-3** |
+| 8192×1024 | 1 / 32 | 236 / 257 | 78 / 114 | **11.9 / 26.6** | 2.6e-2 | **1.7e-3** |
+| one call per shape, M=1 | | 1463 | 463 | **39** | | |
+
+- **Tuning helps ~3×** (best configs use BLOCK_M=16 and narrow N tiles, i.e. more programs;
+  saved in `fp8_configs/` as vLLM config files), but the FP8 kernel stays 5–20× slower than
+  bf16: gfx90a has no FP8 units, so every tile is converted in software.
+- **bf16 is 20–90× faster than stock** through vLLM's own ROCm GEMM dispatch (`wvSplitK`
+  skinny kernels at M ≤ 5, hipBLASLt above), **and 15× more accurate**: dequantising the
+  weights is exact (e4m3 × power-of-two scale fits bf16), and the error of the W8A8 path
+  comes from rounding the activations to FP8, which bf16 does not do.
+- Cost: the dense weights double, about +1 GB per GCD out of ~17 GiB of KV cache.
+
+At M=1, 1463 µs per set of shapes × 43 layers ≈ 63 ms of the profiled 89 ms (some shapes run
+more than once per layer); bf16 would take ~2 ms.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
   1. ~~Graphs~~: done, piecewise, 1.3–1.7× (above).
   2. ~~Batched indexer logits~~: done, 2.0× eager at 32 users (above). FULL decode graphs
      add nothing. Open: the race with async scheduling.
-  3. **Dense FP8 linears (~50 % of decode, job 23530527)**: tuned W8A8 block configs for
-     the five shapes, or dequantise to bf16 at load (exact: e4m3 values times power-of-two
-     ue8m0 scales fit bf16) and use hipBLASLt / skinny GEMMs, for ~1 GB more per GCD.
+  3. **Dense FP8 linears (~50 % of decode)**: dequantise to bf16 at load (job 23535213:
+     20–90× faster than stock, 15× more accurate; tuned FP8 only 3×). To implement as a
+     plugin switch and serve.
   4. A correct hyper-connection pre kernel (~30 %).
   5. MXFP4 MoE (~10 %): `triton_kernels` picks its own tiles; no vLLM config to tune.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
@@ -240,4 +266,6 @@ small M, and MI250X has no FP8 units. The hyper-connection fallback is the secon
 | `test_mhc_tilelang.py`, `run_mhc_test.sh` | per-kernel TileLang mHC check on one GCD |
 | `plugin/lumi_dsv4_debug/paged_logits.py` | batched Triton indexer decode logits (`DSV4_TRITON_PAGED_LOGITS`) |
 | `test_paged_logits.py`, `run_paged_logits_test.sh` | that kernel vs the torch fallback, graph replay, timing |
+| `profile_decode.py`, `analyze_trace.py` | decode profile driver (`PROFILE=1`) and per-component GPU-time split |
+| `bench_fp8_linear.py`, `run_fp8_linear_bench.sh`, `fp8_configs/` | dense FP8 linears: stock vs tuned vs bf16; tuned MI250X configs |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
