@@ -22,6 +22,8 @@ DSV4_MHC_FIX=triton|wave64
                      kernel (mhc_fix.py): a Triton kernel, or the TileLang one at 128 threads
                      split at 64 (it splits a 96-thread block at 32, i.e. inside a wavefront).
                      Exclusive with DSV4_TORCH_MHC.
+DSV4_MHC_CHECK=1     Debug, eager only: log mHC calls whose outputs are non-finite or differ from
+                     the torch/Triton reference (mhc_fix.install_check).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but
@@ -173,6 +175,11 @@ def register() -> None:
 
         mhc_fix.install(mhc_mode)
         _log(f"DSV4_MHC_FIX={mhc_mode}: fused TileLang mHC with a corrected pre big-fuse kernel")
+    if os.environ.get("DSV4_MHC_CHECK") == "1":
+        from . import mhc_fix
+
+        mhc_fix.install_check()
+        _log("DSV4_MHC_CHECK: every mHC call recomputed with the reference and compared (eager only)")
     if os.environ.get("DSV4_BF16_LINEAR") == "1":
         from . import bf16_linear
 

@@ -42,6 +42,7 @@
 #                            indexer gate (DSV4_INDEXER_GATE).
 #   MHC_FIX=triton|wave64    instead of TORCH_MHC: keep the fused TileLang mHC path and
 #                            replace only its wrong pre "big fuse" kernel (plugin mhc_fix.py)
+#   MHC_CHECK=1              (eager) log mHC calls that are non-finite or differ from the reference
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif}"
@@ -63,7 +64,7 @@ RUN=(singularity exec -B "${SHM}:/dev/shm")
 # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
 PLUGIN=0; { [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ]; } && PLUGIN=1
 if [ "${PLUGIN}" = 1 ]; then
-  export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
+  export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
   export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")

@@ -126,3 +126,70 @@ def install(mode: str) -> None:
             setattr(tk, name, getattr(mod, name))
     else:
         raise ValueError(f"DSV4_MHC_FIX={mode!r}: expected triton or wave64")
+
+
+def install_check() -> None:
+    """DSV4_MHC_CHECK=1 (eager only: it syncs): recompute every mHC op call with the reference
+    that served V4 correctly (torch for pre/post/fused, Triton for hc_head) and log calls whose
+    inputs, outputs or reference hold NaN/inf, or whose outputs differ from the reference.
+    The served outputs are returned unchanged."""
+    import vllm.model_executor.layers.mhc as m
+    from vllm.logger import init_logger
+
+    log = init_logger("vllm.lumi_dsv4_debug")
+    limit = int(os.environ.get("DSV4_MHC_CHECK_LIMIT", "40"))
+    state = {"calls": 0, "events": 0}
+
+    def rows(t: torch.Tensor, n: int) -> torch.Tensor:
+        return t.detach().float().reshape(n, -1)
+
+    def check(op, inputs, outs, refs):
+        state["calls"] += 1
+        if state["events"] >= limit:
+            return
+        # first input: residual (T, hc, H) for pre/head, layer output x (T, H) for post/fused
+        lead = inputs[0]
+        n = lead.numel() // (lead.shape[-1] * (lead.shape[-2] if op in ("pre", "head") else 1))
+        if n == 0:
+            return
+        bad_in = [i for i, t in enumerate(inputs)
+                  if isinstance(t, torch.Tensor) and t.is_floating_point() and not torch.isfinite(t).all()]
+        msgs = []
+        for k, (o, r) in enumerate(zip(outs, refs)):
+            o2, r2 = rows(o, n), rows(r, n)
+            o_bad = (~torch.isfinite(o2)).any(-1)
+            r_bad = (~torch.isfinite(r2)).any(-1)
+            ok = ~(o_bad | r_bad)
+            rel = 0.0
+            if ok.any():
+                d = (o2[ok] - r2[ok]).norm() / r2[ok].norm().clamp_min(1e-12)
+                rel = d.item()
+            if o_bad.any() or r_bad.any() or rel > 2e-2:
+                first = int(torch.nonzero(o_bad | r_bad)[0]) if (o_bad | r_bad).any() else -1
+                msgs.append(f"out{k}: nonfinite rows served {int(o_bad.sum())} ref {int(r_bad.sum())} "
+                            f"(first {first}), rel err {rel:.2e}")
+        if msgs or bad_in:
+            state["events"] += 1
+            amax = max((t.detach().abs().float().nan_to_num(0).max().item() for t in inputs
+                        if isinstance(t, torch.Tensor) and t.is_floating_point()), default=0.0)
+            log.warning("DSV4_MHC_CHECK call %d %s T=%d nonfinite inputs %s, max|input| %.3g: %s",
+                        state["calls"], op, n, bad_in, amax, "; ".join(msgs) or "outputs ok")
+
+    def wrap(cls, op, ref):
+        orig = cls.forward_hip
+
+        def forward_hip(self, *a, **k):
+            out = orig(self, *a, **k)
+            ref_out = ref(self, *a, **k)
+            outs = out if isinstance(out, tuple) else (out,)
+            refs = ref_out if isinstance(ref_out, tuple) else (ref_out,)
+            inputs = list(a) + list(k.values())
+            check(op, inputs, outs, refs)
+            return out
+
+        cls.forward_hip = forward_hip
+
+    wrap(m.MHCPreOp, "pre", lambda self, *a, **k: self.forward_native(*a, **k))
+    wrap(m.MHCPostOp, "post", lambda self, *a, **k: self.forward_native(*a, **k))
+    wrap(m.MHCFusedPostPreOp, "fused", lambda self, *a, **k: self.forward_native(*a, **k))
+    wrap(m.HCHeadOp, "head", lambda self, *a, **k: self.forward_xpu(*a, **k))
