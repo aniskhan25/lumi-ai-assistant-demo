@@ -17,6 +17,11 @@ DSV4_BF16_LINEAR=1   Dequantise block-FP8 dense linears to bf16 once after loadi
                      them with vLLM's ROCm bf16 GEMM (bf16_linear.py): on gfx90a 20-90x
                      faster than the W8A8 Triton kernel. Activations are still rounded to
                      FP8 first, which the model needs (DSV4_BF16_LINEAR_ACT=bf16 skips it).
+DSV4_MHC_FIX=triton|wave64
+                     Keep the fused TileLang mHC path but replace its wrong pre "big fuse"
+                     kernel (mhc_fix.py): a Triton kernel, or the TileLang one at 128 threads
+                     split at 64 (it splits a 96-thread block at 32, i.e. inside a wavefront).
+                     Exclusive with DSV4_TORCH_MHC.
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but
@@ -158,8 +163,16 @@ def register() -> None:
 
     if not current_platform.is_rocm():
         return
+    mhc_mode = os.environ.get("DSV4_MHC_FIX", "")
     if os.environ.get("DSV4_TORCH_MHC") == "1":
+        if mhc_mode:
+            raise ValueError("DSV4_TORCH_MHC=1 and DSV4_MHC_FIX are exclusive")
         _torch_mhc()
+    elif mhc_mode:
+        from . import mhc_fix
+
+        mhc_fix.install(mhc_mode)
+        _log(f"DSV4_MHC_FIX={mhc_mode}: fused TileLang mHC with a corrected pre big-fuse kernel")
     if os.environ.get("DSV4_BF16_LINEAR") == "1":
         from . import bf16_linear
 
