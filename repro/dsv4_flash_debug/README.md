@@ -314,7 +314,9 @@ The torch fallback's ~30–48 ms per step (graph mode; ~54 ms eager in the profi
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
   1. TileLang mHC pre stage is wrong on gfx90a. Exclude all non-gfx950 ROCm, or at least
-     gfx90a as gfx942 is, and attach `test_mhc_tilelang.py`.
+     gfx90a as gfx942 is, and attach `test_mhc_tilelang.py`. Better: offer the Triton
+     big-fuse kernel (`mhc_fix.py`) as the ROCm path, which keeps the fused mHC layer; the
+     96-thread/32 split is a likely wave64 cause, but re-splitting alone does not fix it.
   2. The Triton 3.6 `CanonicalizePointers` assertion.
   3. The aiter-only sparse-indexer gate (upstream main still opens it only for gfx950).
   4. The dense fp32 score in `fp8_mqa_logits_torch`.
