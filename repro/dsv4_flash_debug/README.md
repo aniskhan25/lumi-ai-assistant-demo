@@ -405,7 +405,13 @@ speed, so 64 suits an interactive service and 128 batch work.
      `MHC_FIX=triton MHC_NATIVE=fusedpost`: 262 tok/s at 32 users. Open: the NaN with
      TileLang's fused post+GEMM under graphs (would add ~7 %); or a Triton post+GEMM kernel
      to drop TileLang from the hyper-connections entirely.
-  5. MXFP4 MoE (~10 %): `triton_kernels` picks its own tiles; no vLLM config to tune.
+  5. MXFP4 MoE (~17 ms): mostly routing glue at low batch (`pack_bitmatrix` etc.), not the
+     matmul; tile tuning would barely help.
+  6. **Async scheduling** (Nov 9 profile): ~12 ms per token at 1 user and ~40 ms at 32 are
+     outside GPU compute, largely host work that `--no-async-scheduling` serialises. Fixing
+     the race behind `NO_ASYNC=1` is now the largest single lever.
+  7. Fuse the FP8 activation rounding into one kernel (~6 ms per step now, quant + dequant).
+  8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
