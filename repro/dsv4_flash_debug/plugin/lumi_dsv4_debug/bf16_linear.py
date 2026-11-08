@@ -91,8 +91,8 @@ def install() -> None:
     # Round the activations to FP8 per 128-group (fp32 scales) as the stock W8A8 path does,
     # then dequantise and run the bf16 GEMM: stock numerics up to bf16 rounding of q*s.
     act_fp8 = os.environ.get("DSV4_BF16_LINEAR_ACT", "fp8") != "bf16"
-    # DSV4_FP8_ROUND=triton: that rounding in one fused kernel (fp8_round_triton)
-    fake_quant = fp8_round_triton if os.environ.get("DSV4_FP8_ROUND") == "triton" else fp8_round_torch
+    # Fused kernel by default (bit-identical, 3-5x faster, job 23548678); DSV4_FP8_ROUND=torch: vLLM
+    fake_quant = fp8_round_torch if os.environ.get("DSV4_FP8_ROUND") == "torch" else fp8_round_triton
     state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
 
     def run(self, layer, x, bias):
