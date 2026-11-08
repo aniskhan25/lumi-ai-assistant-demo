@@ -71,9 +71,17 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh     # from the repo root; TP=8, eager
 ```
 
-Add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1` for piecewise CUDA graphs, the
-batched indexer kernel and bf16 dense linears (3.1× faster than eager at every load, same
-accuracy; see Speed).
+For speed, add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1` and replace
+`TORCH_MHC=1` with `MHC_FIX=triton MHC_NATIVE=fusedpost`: piecewise CUDA graphs, the batched
+indexer kernel, bf16 dense linears and the corrected hyper-connection pre kernel. That is
+4.3–4.7× faster than eager at every load, same accuracy (job 23546991; see Speed):
+
+```bash
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton MHC_NATIVE=fusedpost \
+  TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
+  sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
+```
+
 That is five changes against the stock container:
 
 | | why |
@@ -305,6 +313,45 @@ One decoder layer's hyper-connections (2 × pre + post), CUDA-graph replay, µs:
 The torch fallback's ~30–48 ms per step (graph mode; ~54 ms eager in the profile) becomes
 ~2–4 ms, 10–20× less, and the Triton kernel is faster than the wrong TileLang one.
 
+### Hyper-connections in serving: a NaN on the fused post path, and the variant that works
+
+All three: recipe switches + `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1`, piecewise
+graphs, probe with 500 GSM8K questions (greedy, thinking off).
+
+| hyper-connections | job | GSM8K (500) | runaway | translation probe | tok/s at 1 / 4 / 16 / 32 users | TPOT at 1 / 32 |
+|---|---|---|---|---|---|---|
+| torch fallback (`TORCH_MHC=1`) | 23541195, 23535685 | 98.0 % | 0 | ok | 9.3 / 34.2 / 116.0 / 190.0 | 107 / 153 ms |
+| fully fused (`MHC_FIX=triton`) | 23541194, 23540919 | **96.2 %** | **5** | **NaN** | 14.3 / 52.4 / 176.2 / 282.4 | 69 / 103 ms |
+| **torch post, TileLang + Triton pre** (`MHC_FIX=triton MHC_NATIVE=fusedpost`) | **23546991** | **97.6 %** | **0** | **ok** | **14.0 / 50.5 / 166.6 / 261.9** | **71 / 108 ms** |
+
+97.6 vs 98.0 % is 2 of 500 questions (standard error ~0.6 points); the first 200 score
+99.0 %. Sanity 5/5 and both needles pass. The last row is the recommended setup: **4.3–4.7×
+eager, 1.4–1.5× the torch fallback**, and within 7 % of the fully fused path.
+
+**The fully fused path is not usable**: with CUDA graphs, one probe prompt (a Finnish to
+English translation, sanity item 5) gets a NaN logprob every time ("Out of range float values
+are not JSON compliant: nan"), and GSM8K loses ~2 points with 5 runaway answers. Isolation:
+
+| experiment | job | result |
+|---|---|---|
+| eager, every mHC call checked against torch | 23542348 | no mismatch, no NaN |
+| eager, no checks | 23542631 | no NaN: graph mode only |
+| `hc_head` on Triton instead of TileLang | 23542635 | NaN |
+| GPU memory share 0.85 (KV cache 146k tokens, not 194k) | 23543941 | NaN |
+| **post step in torch** (`MHC_NATIVE=fusedpost`) | 23542632 | **no NaN** |
+| fused ops captured/replayed in graphs, whole 43-layer chain (`test_mhc_graph.py`) | 23543924 | bit-exact, no NaN |
+| NaN/inf in graph padding rows | 23544718 | all ops row-local |
+| argument layouts during capture (`MHC_META=1`) | 23544771 | all contiguous, offset 0 |
+| per-site NaN tracer inside graphs (`MHC_NANTRACE=1`) | 23544961 | **NaN gone** |
+| NaN-filled fresh allocations + tracer, fused and torch | 23545423, 23545424 | **NaN gone**, nothing flagged |
+
+So it is tied to TileLang's fused post+GEMM step (`mhc_fused_tilelang` at ≤ 16 tokens,
+`mhc_post_tilelang` + prenorm GEMM above), appears only under CUDA graphs, and disappears as
+soon as any extra kernel runs between the mHC ops, which makes it untraceable this way. The
+generated HIP sources of both kernels look correct (barriers where needed, launch shared-memory
+sizes 96/128/10240 bytes matching their use, TileLang's warp reduction is 32 lanes wide by
+design). Root cause not found; the `fusedpost` variant avoids it.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
@@ -313,8 +360,10 @@ The torch fallback's ~30–48 ms per step (graph mode; ~54 ms eager in the profi
      add nothing. Open: the race with async scheduling.
   3. ~~Dense FP8 linears~~: done, bf16 GEMM with FP8-rounded activations, 1.5–1.75× on top
      (above). The rounding could be fused into a kernel to win back its ~6 ms per step.
-  4. ~~A correct hyper-connection pre kernel~~: Triton big-fuse kernel, fused path back
-     (above): ~30–48 → 2–4 ms per step.
+  4. ~~A correct hyper-connection pre kernel~~: Triton big-fuse kernel (above). Served as
+     `MHC_FIX=triton MHC_NATIVE=fusedpost`: 262 tok/s at 32 users. Open: the NaN with
+     TileLang's fused post+GEMM under graphs (would add ~7 %); or a Triton post+GEMM kernel
+     to drop TileLang from the hyper-connections entirely.
   5. MXFP4 MoE (~10 %): `triton_kernels` picks its own tiles; no vLLM config to tune.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -342,8 +391,9 @@ The torch fallback's ~30–48 ms per step (graph mode; ~54 ms eager in the profi
 | `plugin/` | vLLM 0.26 general plugin: `DSV4_INDEXER_GATE`, `DSV4_TORCH_MHC`, `DSV4_TRITON_PAGED_LOGITS`, `DSV4_BF16_LINEAR` |
 | `plugin/lumi_dsv4_debug/bf16_linear.py` | block-FP8 dense linears as bf16 GEMMs, FP8-rounded activations (`DSV4_BF16_LINEAR`) |
 | `test_mhc_tilelang.py`, `run_mhc_test.sh` | per-kernel TileLang mHC check on one GCD |
-| `plugin/lumi_dsv4_debug/mhc_fix.py` | Triton (and wave64 TileLang) mHC pre big-fuse kernel (`DSV4_MHC_FIX`) |
+| `plugin/lumi_dsv4_debug/mhc_fix.py` | Triton (and wave64 TileLang) mHC pre big-fuse kernel (`DSV4_MHC_FIX`); bisection and NaN-hunting switches `DSV4_MHC_NATIVE`, `_CHECK`, `_META`, `_NANTRACE`, `DSV4_NANFILL` |
 | `test_mhc_fix.py`, `run_mhc_fix_test.sh` | those kernels vs the torch fallback, per-layer timing |
+| `test_mhc_graph.py`, `run_mhc_graph_test.sh` | fused mHC path under CUDA graph capture/replay, padding poison |
 | `plugin/lumi_dsv4_debug/paged_logits.py` | batched Triton indexer decode logits (`DSV4_TRITON_PAGED_LOGITS`) |
 | `test_paged_logits.py`, `run_paged_logits_test.sh` | that kernel vs the torch fallback, graph replay, timing |
 | `profile_decode.py`, `analyze_trace.py` | decode profile driver (`PROFILE=1`) and per-component GPU-time split |
