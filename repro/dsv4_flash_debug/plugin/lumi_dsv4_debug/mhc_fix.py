@@ -193,3 +193,39 @@ def install_check() -> None:
     wrap(m.MHCPostOp, "post", lambda self, *a, **k: self.forward_native(*a, **k))
     wrap(m.MHCFusedPostPreOp, "fused", lambda self, *a, **k: self.forward_native(*a, **k))
     wrap(m.HCHeadOp, "head", lambda self, *a, **k: self.forward_xpu(*a, **k))
+
+
+def install_native(ops: str) -> None:
+    """DSV4_MHC_NATIVE=head,fusedpost,fused,pre: route the listed mHC ops back to reference
+    implementations while the rest stays on the fused TileLang path (graph-safe bisection).
+
+      head       hc_head via vLLM's Triton kernel instead of TileLang
+      fusedpost  fused post+pre as torch post, then vLLM's mhc_pre_tilelang (TileLang prenorm
+                 GEMM + the big-fuse kernel); drops TileLang's fused post+GEMM kernels
+      fused      fused post+pre entirely in torch
+      pre        standalone pre (first layer) in torch
+    """
+    import vllm.model_executor.layers.mhc as m
+    from vllm.model_executor.kernels.mhc.torch import mhc_post_torch
+
+    for op in filter(None, ops.split(",")):
+        if op == "head":
+            m.HCHeadOp.forward_hip = m.HCHeadOp.forward_xpu
+        elif op == "fused":
+            m.MHCFusedPostPreOp.forward_hip = m.MHCFusedPostPreOp.forward_native
+        elif op == "pre":
+            m.MHCPreOp.forward_hip = m.MHCPreOp.forward_native
+        elif op == "fusedpost":
+            def forward_hip(self, x, residual, post_layer_mix, comb_res_mix, fn, hc_scale,
+                            hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
+                            sinkhorn_repeat, n_splits=1, tile_n=1, norm_weight=None,
+                            norm_eps=0.0):
+                residual_cur = mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
+                post, comb, layer_input = torch.ops.vllm.mhc_pre_tilelang(
+                    residual_cur, fn, hc_scale, hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps,
+                    hc_post_mult_value, sinkhorn_repeat, 1, norm_weight, norm_eps or 1e-6)
+                return residual_cur, post, comb, layer_input
+
+            m.MHCFusedPostPreOp.forward_hip = forward_hip
+        else:
+            raise ValueError(f"DSV4_MHC_NATIVE: unknown op {op!r}")

@@ -175,6 +175,11 @@ def register() -> None:
 
         mhc_fix.install(mhc_mode)
         _log(f"DSV4_MHC_FIX={mhc_mode}: fused TileLang mHC with a corrected pre big-fuse kernel")
+    if os.environ.get("DSV4_MHC_NATIVE"):
+        from . import mhc_fix
+
+        mhc_fix.install_native(os.environ["DSV4_MHC_NATIVE"])
+        _log(f"DSV4_MHC_NATIVE={os.environ['DSV4_MHC_NATIVE']}: these mHC ops use reference kernels")
     if os.environ.get("DSV4_MHC_CHECK") == "1":
         from . import mhc_fix
 
