@@ -263,6 +263,42 @@ Without the activation rounding: 9.9 / 35.9 / 121.7 / 197.6 tok/s (TPOT 101/109/
 put on the FP8 kernel. What is left per step is mostly the hyper-connection fallback
 (~54 ms), MoE (~18 ms) and attention (~18 ms).
 
+### Hyper-connections: a correct pre kernel (job 23540893)
+
+`TORCH_MHC=1` was a blunt fix: it turned off vLLM's whole fused TileLang mHC path, though only
+one stage of one kernel is wrong. `plugin/lumi_dsv4_debug/mhc_fix.py` (`MHC_FIX=`, plugin
+`DSV4_MHC_FIX`) keeps the fused path and replaces only `mhc_pre_big_fuse_tilelang`, the
+kernel that turns the GEMM output into post/comb mixing weights (Sinkhorn) and the layer
+input. vLLM's wrappers import it at call time, so patching the module attribute is enough.
+
+That kernel is written for 32-wide warps: 96 threads per token, threads 0–31 run Sinkhorn
+while threads 32–95 apply the pre weights. On a 64-wide wavefront that split falls inside
+wave 0. Re-splitting it at 128 threads / 64 (`wave64`) is **not** enough: still wrong. So
+the defect is deeper in TileLang's lowering of that branch on ROCm (probably its barriers),
+not just the split. A Triton replacement (`triton`) is right.
+
+`test_mhc_fix.py` (one GCD, real layer-5 parameters, vs the torch fallback that served V4
+correctly), through vLLM's own `mhc_pre_tilelang` and `mhc_fused_post_pre_tilelang` wrappers:
+
+| big-fuse kernel | layer_input rel err, T = 1 … 2048 | post/comb mixes, residual |
+|---|---|---|
+| stock TileLang | **0.7 – 1.8, inf** (wrong) | ok |
+| TileLang at 128 threads split at 64 | **0.8 – 1.5, inf** (wrong) | ok |
+| **Triton** | **1.5e-4 – 1.5e-3** | ok |
+
+One decoder layer's hyper-connections (2 × pre + post), CUDA-graph replay, µs:
+
+| tokens | torch fallback | fused, stock (wrong) | **fused, Triton** | per decode step (×43): torch → Triton |
+|---|---|---|---|---|
+| 1 | 710 | 54 | **37** | 30.5 → **1.6 ms** |
+| 4 | 754 | 59 | **43** | 32.4 → **1.8 ms** |
+| 16 | 841 | 86 | **71** | 36.1 → **3.0 ms** |
+| 32 | 1029 | 96 | **84** | 44.3 → **3.6 ms** |
+| 64 | 1120 | 135 | **134** | 48.2 → **5.8 ms** |
+
+The torch fallback's ~30–48 ms per step (graph mode; ~54 ms eager in the profile) becomes
+~2–4 ms, 10–20× less, and the Triton kernel is faster than the wrong TileLang one.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
@@ -271,8 +307,8 @@ put on the FP8 kernel. What is left per step is mostly the hyper-connection fall
      add nothing. Open: the race with async scheduling.
   3. ~~Dense FP8 linears~~: done, bf16 GEMM with FP8-rounded activations, 1.5–1.75× on top
      (above). The rounding could be fused into a kernel to win back its ~6 ms per step.
-  4. **A correct hyper-connection pre kernel**: the torch fallback is now about half of
-     decode (~54 of ~107 ms per step).
+  4. ~~A correct hyper-connection pre kernel~~: Triton big-fuse kernel, fused path back
+     (above): ~30–48 → 2–4 ms per step.
   5. MXFP4 MoE (~10 %): `triton_kernels` picks its own tiles; no vLLM config to tune.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -298,6 +334,8 @@ put on the FP8 kernel. What is left per step is mostly the hyper-connection fall
 | `plugin/` | vLLM 0.26 general plugin: `DSV4_INDEXER_GATE`, `DSV4_TORCH_MHC`, `DSV4_TRITON_PAGED_LOGITS`, `DSV4_BF16_LINEAR` |
 | `plugin/lumi_dsv4_debug/bf16_linear.py` | block-FP8 dense linears as bf16 GEMMs, FP8-rounded activations (`DSV4_BF16_LINEAR`) |
 | `test_mhc_tilelang.py`, `run_mhc_test.sh` | per-kernel TileLang mHC check on one GCD |
+| `plugin/lumi_dsv4_debug/mhc_fix.py` | Triton (and wave64 TileLang) mHC pre big-fuse kernel (`DSV4_MHC_FIX`) |
+| `test_mhc_fix.py`, `run_mhc_fix_test.sh` | those kernels vs the torch fallback, per-layer timing |
 | `plugin/lumi_dsv4_debug/paged_logits.py` | batched Triton indexer decode logits (`DSV4_TRITON_PAGED_LOGITS`) |
 | `test_paged_logits.py`, `run_paged_logits_test.sh` | that kernel vs the torch fallback, graph replay, timing |
 | `profile_decode.py`, `analyze_trace.py` | decode profile driver (`PROFILE=1`) and per-component GPU-time split |
