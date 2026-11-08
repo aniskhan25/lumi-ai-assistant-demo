@@ -17,6 +17,7 @@ import sys
 RULES = [
     ("hyper-connections (mHC)", "kernels/mhc/"),
     ("hyper-connections (mHC)", "layers/mhc.py"),
+    ("hyper-connections (mHC)", "mhc_fix.py"),
     ("sparse indexer", "sparse_attn_indexer"),
     ("sparse indexer", "paged_logits.py"),
     ("compressor", "deepseek_v4/compressor.py"),
@@ -26,8 +27,10 @@ RULES = [
     ("MoE experts", "fused_moe/"),
     ("all-reduce", "communicator"),
     ("all-reduce", "parallel_state.py"),
-    ("FP8 linear (W8A8 block)", "fp8_utils.py"),
-    ("FP8 linear (W8A8 block)", "w8a8"),
+    # With DSV4_BF16_LINEAR, fp8_utils.py is only the FP8 activation rounding (W8A8 if off)
+    ("dense linear: FP8 act rounding / W8A8", "fp8_utils.py"),
+    ("dense linear: FP8 act rounding / W8A8", "w8a8"),
+    ("dense linear: bf16 GEMM", "bf16_linear.py"),
     ("linear (other)", "layers/linear.py"),
     ("norms / rope / quant", "layernorm.py"),
     ("norms / rope / quant", "rotary_embedding"),
