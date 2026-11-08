@@ -189,4 +189,39 @@ for trial in range(24):
           f"{outliers!s:<5}  graph/eager {e_eager:.1e}  graph/ref {e_ref:.1e}  (eager/ref {e_eref:.1e})"
           f"  nonfinite rows {int((~torch.isfinite(got.float())).any(-1).sum())}")
 
+# --- poison: are the kernels row-local? --------------------------------------------------
+# A padded graph batch runs T rows of which only n are real; the padding rows hold whatever
+# the buffers held before, which in serving can be NaN/inf. A row-local kernel keeps that
+# out of the real rows.
+print("\npoison: rows n..T of every input NaN/inf; real rows vs the op on n rows only "
+      "(FAIL: non-finite real rows or rel err > 1e-2)")
+for t, n in ((2, 1), (4, 3), (8, 5), (16, 9), (17, 16), (24, 17), (32, 25), (64, 33)):
+    residual = torch.randn(t, HC, H, device=dev).to(torch.bfloat16)
+    x = torch.randn(t, H, device=dev).to(torch.bfloat16)
+    post, res, _ = mhc_pre_torch(residual, *p_attn, *ARGS)
+    clean = {
+        "pre": lambda r, x, p, c: torch.ops.vllm.mhc_pre_tilelang(r, *p_attn, *ARGS, 1, None, 1e-6),
+        "fused": lambda r, x, p, c: torch.ops.vllm.mhc_fused_post_pre_tilelang(
+            x, r, p, c, *p_ffn, *ARGS, 1, 1, None, 1e-6),
+        "post": lambda r, x, p, c: torch.ops.vllm.mhc_post_tilelang(x, r, p, c),
+        "head": lambda r, x, p, c: torch.ops.vllm.hc_head_fused_kernel_tilelang(r, *head, RMS_EPS, HC_EPS),
+    }
+    for poison in (float("nan"), float("inf")):
+        args = [a.clone() for a in (residual, x, post, res)]
+        for a in args:
+            a[n:] = poison
+        for name, op in clean.items():
+            want = op(*(a[:n].contiguous() for a in (residual, x, post, res)))
+            got = op(*args)
+            want = want if isinstance(want, tuple) else (want,)
+            got = got if isinstance(got, tuple) else (got,)
+            nonfinite = sum(int((~torch.isfinite(g[:n].float().reshape(n, -1))).any(-1).sum())
+                            for g in got)
+            err = max(rel(g[:n], w) for g, w in zip(got, want))  # inf if non-finite
+            bad = nonfinite > 0 or err > 1e-2
+            if bad:
+                failures.append(f"poison {name} T={t} n={n} {poison}")
+            print(f"  {'FAIL' if bad else 'ok  '} {name:<6} T={t:<3} real {n:<3} padding {poison!s:<4} "
+                  f"non-finite real rows {nonfinite}  worst rel err {err:.1e}")
+
 print("\nFAILED:", failures or "none")
