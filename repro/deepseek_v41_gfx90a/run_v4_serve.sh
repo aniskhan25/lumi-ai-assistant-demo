@@ -18,6 +18,7 @@
 #
 #   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh              # from the repo root
 #   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
+#   MORE_VLLM_ARGS="..."                                           # append flags, keep defaults
 #   PROBE=0 BENCH=1                                                # speed sweep instead of probe
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
@@ -95,7 +96,7 @@ SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
        --no-enable-prefix-caching --kv-cache-dtype fp8
-       ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}})
+       ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}} ${MORE_VLLM_ARGS:-})
 echo "Serving: ${SERVE[*]}"
 "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
 SERVER=$!
