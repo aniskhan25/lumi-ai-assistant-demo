@@ -185,6 +185,11 @@ def register() -> None:
 
         mhc_fix.install_meta()
         _log("DSV4_MHC_META: logging mHC argument layouts")
+    if os.environ.get("DSV4_MHC_NANTRACE") == "1":
+        from . import mhc_fix
+
+        mhc_fix.install_nantrace()
+        _log("DSV4_MHC_NANTRACE: per-row non-finite flags at every mHC site, read per step")
     if os.environ.get("DSV4_MHC_CHECK") == "1":
         from . import mhc_fix
 

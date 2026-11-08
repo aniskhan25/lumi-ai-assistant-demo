@@ -267,3 +267,85 @@ def install_meta() -> None:
     wrap(m.MHCPostOp, "post")
     wrap(m.MHCFusedPostPreOp, "fused")
     wrap(m.HCHeadOp, "head")
+
+
+def install_nantrace() -> None:
+    """DSV4_MHC_NANTRACE=1: find where a NaN first appears, with CUDA graphs on.
+
+    Every mHC op call ORs per-row "non-finite" flags of its tensors into a fixed device
+    buffer (captured by the graphs like any kernel): its input x (the attention or MoE
+    output that arrives there), its input residual and its outputs. Sites are numbered in
+    order of first appearance, i.e. layer order: pre/fused of layer l attn = 2l, ffn = 2l+1.
+    compute_logits, which runs eagerly after the graphs, reads and resets the buffer each
+    step and logs the earliest flagged site with the rows hit (padding rows sit at the end
+    of a padded batch, so a flag on row 0 is a real token). Also flags non-finite logits.
+    """
+    import vllm.model_executor.layers.mhc as m
+    from vllm.logger import init_logger
+
+    log = init_logger("vllm.lumi_dsv4_debug")
+    max_sites, max_rows = 1024, 8192
+    st = {"rows": None, "sites": {}, "names": [], "steps": 0, "events": 0}
+
+    def site(key, name):
+        if key not in st["sites"]:
+            st["sites"][key] = len(st["names"])
+            st["names"].append(name)
+        return st["sites"][key]
+
+    def flag(idx, t, n):
+        if st["rows"] is None:
+            st["rows"] = torch.zeros(max_sites, max_rows, dtype=torch.bool, device=t.device)
+        if idx < max_sites and 0 < n <= max_rows and t.numel():
+            st["rows"][idx, :n] |= ~torch.isfinite(t.reshape(n, -1)).all(-1)
+
+    def wrap(cls, op, roles):
+        orig = cls.forward_hip
+
+        def forward_hip(self, *a, **k):
+            out = orig(self, *a, **k)
+            args = list(a) + list(k.values())
+            lead = args[0]
+            n = lead.numel() // (lead.shape[-1] * (lead.shape[-2] if op in ("pre", "head") else 1))
+            fn = args[4] if op == "fused" else (args[1] if op in ("pre", "head") else None)
+            key0 = (op, id(self), fn.data_ptr() if isinstance(fn, torch.Tensor) else 0)
+            outs = out if isinstance(out, tuple) else (out,)
+            for role, t in roles(args, outs):
+                flag(site(key0 + (role,), f"{op}:{role}"), t, n)
+            return out
+
+        cls.forward_hip = forward_hip
+
+    # (role, tensor) per op: inputs first, so an input flag means "arrived non-finite"
+    wrap(m.MHCPreOp, "pre", lambda a, o: [("in_residual", a[0]), ("out_input", o[2])])
+    wrap(m.MHCFusedPostPreOp, "fused", lambda a, o: [
+        ("in_x", a[0]), ("in_residual", a[1]), ("out_residual", o[0]), ("out_mix", o[2]),
+        ("out_input", o[3])])
+    wrap(m.MHCPostOp, "post", lambda a, o: [("in_x", a[0]), ("out", o[0])])
+    wrap(m.HCHeadOp, "head", lambda a, o: [("in", a[0]), ("out", o[0])])
+
+    from vllm.models.deepseek_v4.amd.model import DeepseekV4ForCausalLM
+
+    orig_logits = DeepseekV4ForCausalLM.compute_logits
+
+    def compute_logits(self, hidden_states):
+        logits = orig_logits(self, hidden_states)
+        st["steps"] += 1
+        rows = st["rows"]
+        bad_logits = logits is not None and not torch.isfinite(logits).all().item()
+        hit = rows is not None and bool(rows.any().item())
+        if (hit or bad_logits) and st["events"] < 30:
+            st["events"] += 1
+            sites = torch.nonzero(rows.any(-1)).flatten().tolist() if hit else []
+            desc = []
+            for s in sites[:6]:
+                r = torch.nonzero(rows[s]).flatten()
+                desc.append(f"site {s} {st['names'][s]} rows {r.numel()} first {int(r[0])} "
+                            f"last {int(r[-1])}")
+            log.warning("DSV4_MHC_NANTRACE step %d: logits non-finite %s; %d sites flagged, "
+                        "earliest: %s", st["steps"], bad_logits, len(sites), "; ".join(desc))
+        if rows is not None and hit:
+            rows.zero_()
+        return logits
+
+    DeepseekV4ForCausalLM.compute_logits = compute_logits
