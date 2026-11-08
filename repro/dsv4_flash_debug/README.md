@@ -272,10 +272,16 @@ kernel that turns the GEMM output into post/comb mixing weights (Sinkhorn) and t
 input. vLLM's wrappers import it at call time, so patching the module attribute is enough.
 
 That kernel is written for 32-wide warps: 96 threads per token, threads 0–31 run Sinkhorn
-while threads 32–95 apply the pre weights. On a 64-wide wavefront that split falls inside
-wave 0. Re-splitting it at 128 threads / 64 (`wave64`) is **not** enough: still wrong. So
-the defect is deeper in TileLang's lowering of that branch on ROCm (probably its barriers),
-not just the split. A Triton replacement (`triton`) is right.
+while threads 32–95 apply the pre weights. **The generated HIP source (TileLang's kernel
+cache, `~/.tilelang/cache/0.1.10-x86_64/kernels/`) has no barrier at all inside that
+branch.** Threads 32–35 write the pre weights to shared memory and threads 32–95 read them
+with no `__syncthreads()`; each thread also reads residual values from shared memory that
+other threads wrote, again without a barrier. Threads 32–63 and 64–95 are in different
+wavefronts, so this is a cross-wave race. (On NVIDIA TileLang syncs such a thread subset with
+a named barrier; HIP has none and the barrier is dropped.) Re-splitting it at 128 threads /
+64 (`wave64`) puts the branch in one wavefront but emits a workgroup `__syncthreads()` that
+only that wavefront reaches (undefined in HIP), and is still wrong in the test. A Triton
+replacement (`triton`) is right.
 
 `test_mhc_fix.py` (one GCD, real layer-5 parameters, vs the torch fallback that served V4
 correctly), through vLLM's own `mhc_pre_tilelang` and `mhc_fused_post_pre_tilelang` wrappers:
