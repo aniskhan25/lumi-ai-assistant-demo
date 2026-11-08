@@ -229,3 +229,41 @@ def install_native(ops: str) -> None:
             m.MHCFusedPostPreOp.forward_hip = forward_hip
         else:
             raise ValueError(f"DSV4_MHC_NATIVE: unknown op {op!r}")
+
+
+def install_meta() -> None:
+    """DSV4_MHC_META=1: log each distinct (shape, stride, offset, contiguity, capturing)
+    signature of the tensor arguments of every mHC op call. Host metadata only, so it also
+    runs while CUDA graphs are captured. TileLang kernels take raw pointers and assume
+    contiguous rows; torch does not."""
+    import vllm.model_executor.layers.mhc as m
+    from vllm.logger import init_logger
+
+    log = init_logger("vllm.lumi_dsv4_debug")
+    seen = set()
+
+    def sig(t):
+        if not isinstance(t, torch.Tensor):
+            return None
+        return (tuple(t.shape), t.stride(), t.storage_offset(), t.is_contiguous(), str(t.dtype)[6:])
+
+    def wrap(cls, op):
+        orig = cls.forward_hip
+
+        def forward_hip(self, *a, **k):
+            args = [sig(t) for t in list(a) + list(k.values())]
+            key = (op, torch.cuda.is_current_stream_capturing(),
+                   tuple(s for s in args if s is not None))
+            if key not in seen and len(seen) < 200:
+                seen.add(key)
+                odd = [i for i, s in enumerate(args) if s is not None and (not s[3] or s[2])]
+                log.warning("DSV4_MHC_META %s capturing=%s non-contiguous/offset args %s: %s",
+                            op, key[1], odd, [s for s in args if s is not None][:4])
+            return orig(self, *a, **k)
+
+        cls.forward_hip = forward_hip
+
+    wrap(m.MHCPreOp, "pre")
+    wrap(m.MHCPostOp, "post")
+    wrap(m.MHCFusedPostPreOp, "fused")
+    wrap(m.HCHeadOp, "head")

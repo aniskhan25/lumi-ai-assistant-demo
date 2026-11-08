@@ -180,6 +180,11 @@ def register() -> None:
 
         mhc_fix.install_native(os.environ["DSV4_MHC_NATIVE"])
         _log(f"DSV4_MHC_NATIVE={os.environ['DSV4_MHC_NATIVE']}: these mHC ops use reference kernels")
+    if os.environ.get("DSV4_MHC_META") == "1":
+        from . import mhc_fix
+
+        mhc_fix.install_meta()
+        _log("DSV4_MHC_META: logging mHC argument layouts")
     if os.environ.get("DSV4_MHC_CHECK") == "1":
         from . import mhc_fix
 
