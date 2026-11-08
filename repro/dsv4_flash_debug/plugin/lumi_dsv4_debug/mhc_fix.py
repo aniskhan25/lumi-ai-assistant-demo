@@ -349,3 +349,21 @@ def install_nantrace() -> None:
         return logits
 
     DeepseekV4ForCausalLM.compute_logits = compute_logits
+
+
+def install_nanfill() -> None:
+    """DSV4_NANFILL=1: fill every fresh floating-point CUDA allocation made through
+    torch.empty / empty_like / Tensor.new_empty with NaN. A kernel that reads memory nobody
+    wrote then yields NaN whatever the memory layout (also inside CUDA graphs, where the
+    fill is captured and re-runs on every replay). Combine with DSV4_MHC_NANTRACE=1."""
+    floats = (torch.float32, torch.float16, torch.bfloat16)
+
+    def poison(t):
+        if isinstance(t, torch.Tensor) and t.is_cuda and t.dtype in floats and t.numel():
+            t.fill_(float("nan"))
+        return t
+
+    empty, empty_like, new_empty = torch.empty, torch.empty_like, torch.Tensor.new_empty
+    torch.empty = lambda *a, **k: poison(empty(*a, **k))
+    torch.empty_like = lambda *a, **k: poison(empty_like(*a, **k))
+    torch.Tensor.new_empty = lambda self, *a, **k: poison(new_empty(self, *a, **k))
