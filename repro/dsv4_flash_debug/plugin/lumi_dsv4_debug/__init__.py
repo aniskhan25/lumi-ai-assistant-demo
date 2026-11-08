@@ -15,7 +15,8 @@ DSV4_TRITON_PAGED_LOGITS=1
                      which syncs with the host per sequence and cannot be graph-captured.
 DSV4_BF16_LINEAR=1   Dequantise block-FP8 dense linears to bf16 once after loading and run
                      them with vLLM's ROCm bf16 GEMM (bf16_linear.py): on gfx90a 20-90x
-                     faster than the W8A8 Triton kernel and more accurate.
+                     faster than the W8A8 Triton kernel. Activations are still rounded to
+                     FP8 first, which the model needs (DSV4_BF16_LINEAR_ACT=bf16 skips it).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but

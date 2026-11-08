@@ -2,13 +2,18 @@
 
 The decode profile put DeepSeek-V4-Flash's W8A8 block-FP8 linears at about half of every
 step (job 23530527). On gfx90a, which has no FP8 units, `_w8a8_triton_block_scaled_mm` is
-20-90x slower than a bf16 GEMM of the same shape, and less accurate, because it also rounds
-the activations to FP8 (bench_fp8_linear.py, job 23535213).
+20-90x slower than a bf16 GEMM of the same shape (bench_fp8_linear.py, job 23535213).
 
 After vLLM's own weight processing, each block-quantised Fp8LinearMethod layer gets its weight
 dequantised once to bf16 (exact: an e4m3 value times a power-of-two block scale fits bf16),
 its scales dropped, and is then served by vLLM's ROCm bf16 GEMM dispatch (wvSplitK / LLMM1 for
 small M, hipBLASLt otherwise). The dense weights take twice the memory.
+
+The activations are still rounded to FP8 per 128-group first, as the stock W8A8 path does
+(DSV4_BF16_LINEAR_ACT=fp8, the default). The model needs that: with bf16 activations, which
+are closer to the exact product, GSM8K fell from 98 % to 90.5 % with 10/200 garbage answers
+(job 23535577); with the rounding it is back to 98 %, 0 garbage (job 23535685).
+DSV4_BF16_LINEAR_ACT=bf16 skips the rounding.
 
 DeepSeek-V4's wo_a never calls apply(): its ROCm einsum path dequantises it itself, and uses
 the weight as is when the layer has no `weight_scale_inv`, which is what this leaves behind.
@@ -41,10 +46,9 @@ def install() -> None:
         return
     stock_process, stock_apply = cls.process_weights_after_loading, cls.apply
     gemm = dispatch_unquantized_gemm()
-    # DSV4_BF16_LINEAR_ACT=fp8: round the activations to FP8 per 128-group (fp32 scales) as
-    # the stock W8A8 path does, then dequantise and run the bf16 GEMM. Same numerics as stock
-    # up to bf16 rounding of q*s; isolates "the model wants FP8-rounded activations".
-    act_fp8 = os.environ.get("DSV4_BF16_LINEAR_ACT") == "fp8"
+    # Round the activations to FP8 per 128-group (fp32 scales) as the stock W8A8 path does,
+    # then dequantise and run the bf16 GEMM: stock numerics up to bf16 rounding of q*s.
+    act_fp8 = os.environ.get("DSV4_BF16_LINEAR_ACT", "fp8") != "bf16"
     state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
 
     def fake_quant(x2d, group):
@@ -85,7 +89,7 @@ def install() -> None:
             got = run(self, layer, x, None).float()
             rel = ((got - want).norm() / want.norm()).item()
             state["max_diff"] = max(state["max_diff"], rel)
-            if rel > 4e-2:  # W8A8's own activation rounding is ~2.6e-2 (bf16 activations)
+            if rel > (1e-2 if act_fp8 else 4e-2):  # fp8: ~2.7e-3; bf16 act: ~2.6e-2
                 log.warning("DSV4_BF16_LINEAR outlier %s %s: rel diff vs W8A8 %.2e",
                             getattr(layer, "prefix", "?"), tuple(bf16.shape), rel)
         n = state["layers"]

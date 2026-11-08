@@ -71,8 +71,9 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh     # from the repo root; TP=8, eager
 ```
 
-Add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1` for piecewise CUDA graphs and the batched indexer
-kernel (1.8–2.0× faster than eager, same accuracy; see Speed).
+Add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1` for piecewise CUDA graphs, the
+batched indexer kernel and bf16 dense linears (3.1× faster than eager at every load, same
+accuracy; see Speed).
 That is five changes against the stock container:
 
 | | why |
@@ -222,13 +223,45 @@ error is relative to fp32 activations times dequantised weights:
   saved in `fp8_configs/` as vLLM config files), but the FP8 kernel stays 5–20× slower than
   bf16: gfx90a has no FP8 units, so every tile is converted in software.
 - **bf16 is 20–90× faster than stock** through vLLM's own ROCm GEMM dispatch (`wvSplitK`
-  skinny kernels at M ≤ 5, hipBLASLt above), **and 15× more accurate**: dequantising the
-  weights is exact (e4m3 × power-of-two scale fits bf16), and the error of the W8A8 path
-  comes from rounding the activations to FP8, which bf16 does not do.
+  skinny kernels at M ≤ 5, hipBLASLt above). Dequantising the weights is exact (e4m3 ×
+  power-of-two scale fits bf16). Against an fp32 product it is also 15× more accurate,
+  because W8A8 rounds the activations to FP8 and bf16 does not; but the model turns out to
+  need that rounding (next section).
 - Cost: the dense weights double, about +1 GB per GCD out of ~17 GiB of KV cache.
 
 At M=1, 1463 µs per set of shapes × 43 layers ≈ 63 ms of the profiled 89 ms (some shapes run
 more than once per layer); bf16 would take ~2 ms.
+
+### bf16 dense linears (jobs 23535577, 23535685)
+
+`BF16_LINEAR=1` (plugin `DSV4_BF16_LINEAR`, `bf16_linear.py`): after loading, every
+block-FP8 dense linear is dequantised once to bf16 and served by vLLM's ROCm bf16 GEMM; at
+load each layer is checked against the stock W8A8 apply on a random input. 256 layers per
+rank, +0.96 GiB per GCD; the KV cache still holds 185k tokens (5.6× at 32k).
+
+**Accuracy needs the activations rounded to FP8.** Feeding bf16 activations straight in
+(job 23535577) matched W8A8 to its expected 2.6e-2 at load, but GSM8K fell to **90.5 %**
+with 10/200 garbage answers, sanity 3/5. Not a GEMM bug: vLLM's skinny bf16 kernels give
+the same 1.7e-3 error on strided and contiguous inputs (`test_skinny_gemm_strides.py`,
+job 23535652). Rounding the activations to FP8 per 128-group with
+fp32 scales first, as the stock path does, and then dequantising them (job 23535685: max
+rel diff vs W8A8 2.7e-3 across all layers) restores **GSM8K 98.0 %, 0 garbage, sanity 5/5,
+needles ok**. The model was trained with FP8 activations and depends on that rounding,
+so it is now the default (`BF16_ACT=bf16` turns it off). It costs ~6 ms per step.
+
+Recipe switches + `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1`, piecewise graphs:
+
+| concurrency | out tok/s | median TTFT | median TPOT | p99 TPOT | vs Triton logits | vs eager |
+|---|---|---|---|---|---|---|
+| 1 | 9.3 | 0.5 s | 107 ms | 107 ms | 1.75× | 3.1× |
+| 4 | 34.2 | 1.7 s | 114 ms | 116 ms | 1.68× | 3.1× |
+| 16 | 116.0 | 5.8 s | 126 ms | 137 ms | 1.63× | 3.1× |
+| 32 | 190.0 | 7.8 s | 153 ms | 167 ms | 1.54× | 3.1× |
+
+Without the activation rounding: 9.9 / 35.9 / 121.7 / 197.6 tok/s (TPOT 101/109/120/147 ms),
+4–6 % faster but wrong. TPOT at 1 user fell 186 → 107 ms, close to the ~85 ms the profile
+put on the FP8 kernel. What is left per step is mostly the hyper-connection fallback
+(~54 ms), MoE (~18 ms) and attention (~18 ms).
 
 ## Open
 
@@ -236,10 +269,10 @@ more than once per layer); bf16 would take ~2 ms.
   1. ~~Graphs~~: done, piecewise, 1.3–1.7× (above).
   2. ~~Batched indexer logits~~: done, 2.0× eager at 32 users (above). FULL decode graphs
      add nothing. Open: the race with async scheduling.
-  3. **Dense FP8 linears (~50 % of decode)**: dequantise to bf16 at load (job 23535213:
-     20–90× faster than stock, 15× more accurate; tuned FP8 only 3×). To implement as a
-     plugin switch and serve.
-  4. A correct hyper-connection pre kernel (~30 %).
+  3. ~~Dense FP8 linears~~: done, bf16 GEMM with FP8-rounded activations, 1.5–1.75× on top
+     (above). The rounding could be fused into a kernel to win back its ~6 ms per step.
+  4. **A correct hyper-connection pre kernel**: the torch fallback is now about half of
+     decode (~54 of ~107 ms per step).
   5. MXFP4 MoE (~10 %): `triton_kernels` picks its own tiles; no vLLM config to tune.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -262,10 +295,12 @@ more than once per layer); bf16 would take ~2 ms.
 | `reference_torch/` | plain-PyTorch `kernel.py` and `fast_hadamard_transform` stand-ins |
 | `selfcheck_kernels.py` | CPU checks of `reference_torch/` |
 | `run_reference.sh` | convert to MP=8 (once, ~24 min) and run the reference greedily |
-| `plugin/` | vLLM 0.26 general plugin: `DSV4_INDEXER_GATE`, `DSV4_TORCH_MHC`, `DSV4_TRITON_PAGED_LOGITS` |
+| `plugin/` | vLLM 0.26 general plugin: `DSV4_INDEXER_GATE`, `DSV4_TORCH_MHC`, `DSV4_TRITON_PAGED_LOGITS`, `DSV4_BF16_LINEAR` |
+| `plugin/lumi_dsv4_debug/bf16_linear.py` | block-FP8 dense linears as bf16 GEMMs, FP8-rounded activations (`DSV4_BF16_LINEAR`) |
 | `test_mhc_tilelang.py`, `run_mhc_test.sh` | per-kernel TileLang mHC check on one GCD |
 | `plugin/lumi_dsv4_debug/paged_logits.py` | batched Triton indexer decode logits (`DSV4_TRITON_PAGED_LOGITS`) |
 | `test_paged_logits.py`, `run_paged_logits_test.sh` | that kernel vs the torch fallback, graph replay, timing |
 | `profile_decode.py`, `analyze_trace.py` | decode profile driver (`PROFILE=1`) and per-component GPU-time split |
+| `test_skinny_gemm_strides.py`, `run_skinny_test.sh` | ROCm skinny bf16 GEMMs with strided inputs (they are fine) |
 | `bench_fp8_linear.py`, `run_fp8_linear_bench.sh`, `fp8_configs/` | dense FP8 linears: stock vs tuned vs bf16; tuned MI250X configs |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |

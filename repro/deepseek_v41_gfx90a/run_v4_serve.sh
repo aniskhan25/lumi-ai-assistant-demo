@@ -23,6 +23,7 @@
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #   NO_ASYNC=1                                                     # --no-async-scheduling
 #   BF16_LINEAR=1                                                  # block-FP8 dense linears in bf16
+#     (activations still FP8-rounded; BF16_ACT=bf16 skips that and costs accuracy)
 #   PROFILE=1 PROBE=0                                              # torch-profile decode at
 #     c=1 and c=32 (eager: kernels in graphs can't be attributed); rank-0 component split
 #     by repro/dsv4_flash_debug/analyze_trace.py
@@ -61,13 +62,13 @@ RUN=(singularity exec -B "${SHM}:/dev/shm")
 if [ "${TORCH_MHC:-0}" = 1 ]; then
   export DSV4_TORCH_MHC=1 DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
-  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-}"
+  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
 elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-} COMPILE=${COMPILE:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
