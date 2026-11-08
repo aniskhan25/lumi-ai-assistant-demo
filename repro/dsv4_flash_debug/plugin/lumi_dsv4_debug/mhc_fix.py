@@ -363,6 +363,11 @@ def install_nanfill() -> None:
             t.fill_(float("nan"))
         return t
 
+    # `with torch.device(...)` recognises constructors from a set cached on first use: build
+    # it now, with the original functions, or patched calls would land on the CPU.
+    import torch.utils._device
+
+    torch.utils._device._device_constructors()
     empty, empty_like, new_empty = torch.empty, torch.empty_like, torch.Tensor.new_empty
     torch.empty = lambda *a, **k: poison(empty(*a, **k))
     torch.empty_like = lambda *a, **k: poison(empty_like(*a, **k))
