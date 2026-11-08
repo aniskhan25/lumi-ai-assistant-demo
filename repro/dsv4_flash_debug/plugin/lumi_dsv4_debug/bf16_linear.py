@@ -21,6 +21,49 @@ the weight as is when the layer has no `weight_scale_inv`, which is what this le
 
 import torch
 
+from vllm.triton_utils import tl, triton
+
+FP8_MAX = 448.0  # float8_e4m3fn
+
+
+@triton.jit
+def _fp8_round_kernel(x_ptr, out_ptr, stride_xm, stride_om, eps, GROUP: tl.constexpr):
+    """One (row, group): scale to the e4m3 range as vLLM's per-token-group quantiser does
+    (scale = max(amax, eps) / 448, fp32), round to e4m3 precision in registers, scale back,
+    write bf16. Rounding: 3 mantissa bits, round-to-nearest-even; below 2^-6 (e4m3's smallest
+    normal) the grid is the subnormal spacing 2^-9."""
+    m = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * GROUP + tl.arange(0, GROUP)
+    x = tl.load(x_ptr + m * stride_xm + offs).to(tl.float32)
+    s = tl.maximum(tl.max(tl.abs(x)), eps) / 448.0
+    v = tl.minimum(tl.maximum(x / s, -448.0), 448.0)
+    bits = v.to(tl.int32, bitcast=True)
+    bits = (bits + 0x7FFFF + ((bits >> 20) & 1)) & -1048576  # keep 3 of 23 mantissa bits, RNE
+    normal = bits.to(tl.float32, bitcast=True)
+    sub = ((v * 512.0 + 12582912.0) - 12582912.0) / 512.0  # RNE to multiples of 2^-9
+    q = tl.where(tl.abs(v) < 0.015625, sub, normal)
+    tl.store(out_ptr + m * stride_om + offs, (q * s).to(tl.bfloat16))
+
+
+def fp8_round_triton(x2d: torch.Tensor, group: int, eps: float = 1e-10) -> torch.Tensor:
+    """x2d (M, K) bf16 -> bf16 rounded through FP8 e4m3 per `group` columns, in one kernel."""
+    m, k = x2d.shape
+    assert k % group == 0 and x2d.stride(-1) == 1
+    out = torch.empty(m, k, dtype=torch.bfloat16, device=x2d.device)
+    if m:
+        _fp8_round_kernel[(m, k // group)](x2d, out, x2d.stride(0), out.stride(0), eps,
+                                           GROUP=group, num_warps=1)
+    return out
+
+
+def fp8_round_torch(x2d: torch.Tensor, group: int) -> torch.Tensor:
+    """The same through vLLM's quantiser and a separate dequantise (two kernels + temporaries)."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
+
+    q, s = per_token_group_quant_fp8(x2d, group, use_ue8m0=False)
+    m, k = x2d.shape
+    return (q.float().view(m, k // group, group) * s.unsqueeze(-1)).view(m, k).to(x2d.dtype)
+
 
 def _dequant(weight: torch.Tensor, scale: torch.Tensor, block: list[int]) -> torch.Tensor:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import _upcast_e8m0_to_fp32
@@ -36,7 +79,6 @@ def install() -> None:
     import os
 
     from vllm.logger import init_logger
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
     from vllm.model_executor.layers.quantization import fp8 as fp8_module
     from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 
@@ -49,12 +91,9 @@ def install() -> None:
     # Round the activations to FP8 per 128-group (fp32 scales) as the stock W8A8 path does,
     # then dequantise and run the bf16 GEMM: stock numerics up to bf16 rounding of q*s.
     act_fp8 = os.environ.get("DSV4_BF16_LINEAR_ACT", "fp8") != "bf16"
+    # DSV4_FP8_ROUND=triton: that rounding in one fused kernel (fp8_round_triton)
+    fake_quant = fp8_round_triton if os.environ.get("DSV4_FP8_ROUND") == "triton" else fp8_round_torch
     state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
-
-    def fake_quant(x2d, group):
-        q, s = per_token_group_quant_fp8(x2d, group, use_ue8m0=False)
-        m, k = x2d.shape
-        return (q.float().view(m, k // group, group) * s.unsqueeze(-1)).view(m, k).to(x2d.dtype)
 
     def run(self, layer, x, bias):
         if not act_fp8:
