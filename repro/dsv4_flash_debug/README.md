@@ -352,6 +352,47 @@ generated HIP sources of both kernels look correct (barriers where needed, launc
 sizes 96/128/10240 bytes matching their use, TileLang's warp reduction is 32 lanes wide by
 design). Root cause not found; the `fusedpost` variant avoids it.
 
+### Where decode time goes now, and three configuration experiments (Nov 9)
+
+All with the recommended setup (`MHC_FIX=triton MHC_NATIVE=fusedpost TRITON_LOGITS=1
+NO_ASYNC=1 BF16_LINEAR=1`), one change per allocation.
+
+**Profile** (job 23547966, eager, `analyze_trace.py`, ms of GPU compute per decode step;
+all-reduce left out, in an eager trace it is mostly ranks waiting for each other):
+
+| component | 1 user | 32 users | note |
+|---|---|---|---|
+| MoE experts | 16.6 | 18.4 | at 1 user the MXFP4 matmul is only 24 %; `pack_bitmatrix` and other routing kernels most of the rest |
+| sparse attention + other attention | 18.2 | 15.6 | `_sparse_attn_decode_ragged_kernel`, hipBLASLt |
+| dense linears | 9.4 | 12.7 | bf16 GEMM ~3 ms; the FP8 activation rounding ~6 ms (quant 1.8 ms + a separate dequantise elementwise) |
+| hyper-connections | 6.1 | 8.6 | Triton big-fuse, TileLang prenorm GEMM, torch post (hipBLASLt einsum) |
+| decoder other, compressor, indexer, norms, head | 7.5 | 12.6 | |
+| **GPU compute** | **~58** | **~68** | |
+| time per token with graphs | 70 | 108 | |
+| **not GPU compute** | **~12** | **~40** | grows with users |
+
+Full decode graphs (below) remove the model's launch gaps and change nothing, so the
+missing time is outside the model forward: RCCL (maybe 5–9 ms) and host work (scheduling,
+input preparation, sampling), which `--no-async-scheduling` serialises with the GPU.
+
+| experiment | job | tok/s at 1 / 4 / 16 / 32 users | accuracy | verdict |
+|---|---|---|---|---|
+| recommended setup | 23546991 | 14.0 / 50.5 / 166.6 / 261.9 | GSM8K 97.6 % (500) | |
+| full decode graphs (`CUDAGRAPH_MODE=FULL_AND_PIECEWISE`) | 23547970 | 14.1 / 50.7 / 167.8 / 263.3 | 97.5 % (200) | no gain |
+| expert parallelism (`--enable-expert-parallel`) | 23547968 | 12.8 / 49.4 / 160.1 / 250.6 | 97.0 % (200) | 4–9 % slower |
+
+**More concurrent users** (job 23547967, `MORE_VLLM_ARGS="--max-num-seqs 128"`, KV cache
+158k tokens instead of ~185k because more graph sizes are captured; accuracy not probed):
+
+| users | out tok/s | per user | median TPOT | p99 TPOT |
+|---|---|---|---|---|
+| 32 | 259 | 8.1 | 108 ms | 122 ms |
+| 64 | **376** | 5.9 | 155 ms | 167 ms |
+| 128 | **503** | 3.9 | 238 ms | 248 ms |
+
+1.45× the 32-user throughput at 64 users and 1.94× at 128; at 128 each user is below reading
+speed, so 64 suits an interactive service and 128 batch work.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
