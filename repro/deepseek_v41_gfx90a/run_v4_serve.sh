@@ -68,7 +68,7 @@ RUN=(singularity exec -B "${SHM}:/dev/shm")
 # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
 PLUGIN=0; { [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ]; } && PLUGIN=1
 if [ "${PLUGIN}" = 1 ]; then
-  export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
+  export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
   export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
@@ -113,8 +113,16 @@ if [ "${PLUGIN}" = 1 ]; then
     base=$(stalls)
     while sleep 20; do
       if [ "$(stalls)" -gt "${base}" ]; then
-        echo "HANG: signalling $(pgrep -u "${USER}" -f "VLLM::Worker" | wc -l) workers"
-        pkill -USR1 -u "${USER}" -f "VLLM::Worker" || true; break
+        D="${LOG}/stacks"; mkdir -p "${D}"
+        echo "HANG $(date +%T): signalling $(pgrep -u "${USER}" -f "VLLM::" | wc -l) vLLM processes; dumps in ${D}"
+        for k in 1 2; do "${RUN[@]}" rocm-smi --showuse --showmemuse > "${D}/gpu-use-${k}.txt" 2>&1; sleep 5; done
+        pkill -USR1 -u "${USER}" -f "VLLM::" || true; sleep 10
+        # Native stacks: a process stuck in a GPU sync or an RCCL call shows it here.
+        for pid in $(pgrep -u "${USER}" -f "VLLM::(Worker_TP0|EngineCore)"); do
+          timeout 180 "${RUN[@]}" rocgdb -p "${pid}" -batch -ex "thread apply all bt 25" \
+            > "${D}/gdb-${pid}.txt" 2>&1 || true
+        done
+        echo "HANG: dumps written; stopping the server"; kill "${SERVER}" 2>/dev/null || true; break
       fi
     done ) &
   WATCH=$!

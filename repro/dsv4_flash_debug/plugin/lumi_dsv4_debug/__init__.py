@@ -155,12 +155,23 @@ def _indexer_gate() -> None:
     _log("DSV4_INDEXER_GATE: sparse indexer runs its non-aiter fallbacks (chunked MQA logits)")
 
 
+_STACK_FILE = None
+
 def register() -> None:
     import faulthandler
     import signal
 
     # `pkill -USR1 -f VLLM::Worker` dumps every worker's Python stacks into the server log.
-    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    # DSV4_STACK_DIR: one file per process, since worker stderr goes through a pipe that vLLM
+    # prefixes and forwards, where dumps from a hung process were lost.
+    stack_dir = os.environ.get("DSV4_STACK_DIR")
+    if stack_dir:
+        os.makedirs(stack_dir, exist_ok=True)
+        global _STACK_FILE
+        _STACK_FILE = open(os.path.join(stack_dir, f"stack-{os.getpid()}.txt"), "w")
+        faulthandler.register(signal.SIGUSR1, file=_STACK_FILE, all_threads=True)
+    else:
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
