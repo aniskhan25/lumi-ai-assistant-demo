@@ -204,6 +204,12 @@ def install_native(ops: str) -> None:
                  GEMM + the big-fuse kernel); drops TileLang's fused post+GEMM kernels
       fused      fused post+pre entirely in torch
       pre        standalone pre (first layer) in torch
+      gemm       the pre step's prenorm GEMM via vLLM's torch version (fp32 matmul + squared
+                 sum) instead of TileLang; the big-fuse kernel still runs after it
+      post       the final post (after the last layer) in torch instead of TileLang
+
+    `fusedpost,gemm,post,head` with DSV4_MHC_FIX=triton is TileLang-free: torch post, torch
+    prenorm GEMM, Triton big-fuse, Triton hc_head.
     """
     import vllm.model_executor.layers.mhc as m
     from vllm.model_executor.kernels.mhc.torch import mhc_post_torch
@@ -215,6 +221,15 @@ def install_native(ops: str) -> None:
             m.MHCFusedPostPreOp.forward_hip = m.MHCFusedPostPreOp.forward_native
         elif op == "pre":
             m.MHCPreOp.forward_hip = m.MHCPreOp.forward_native
+        elif op == "post":
+            m.MHCPostOp.forward_hip = m.MHCPostOp.forward_native
+        elif op == "gemm":
+            import vllm.model_executor.kernels.mhc.tilelang as tlw
+
+            def prenorm_gemm(x, fn, out, sqrsum, hidden_size, hc_mult, *a, **k):
+                tlw._torch_hc_prenorm_gemm(x, fn, out, sqrsum)
+
+            tlw._tilelang_hc_prenorm_gemm = prenorm_gemm  # looked up at call time
         elif op == "fusedpost":
             def forward_hip(self, x, residual, post_layer_mix, comb_res_mix, fn, hc_scale,
                             hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
