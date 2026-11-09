@@ -23,6 +23,7 @@ TOL = float(os.environ.get("DSV4_GRAPH_DIFF_TOL", "1e-2"))
 _bufs: dict[str, torch.Tensor] = {}
 _order: list[str] = []
 _stats = {"steps": 0, "diverged": 0, "skipped": 0}
+_pad_first: dict[str, int] = {}
 
 
 def _log(msg: str) -> None:
@@ -111,6 +112,16 @@ def install() -> None:
             _stats["skipped"] += 1
             return out
         graph = {k: _bufs[k][:n].clone() for k in _order}
+        # where do pad rows first go non-finite in the graph run? (they feed the router)
+        pad = (~real).nonzero().squeeze(1)
+        if len(pad):
+            for k in _order:
+                gp = graph[k].index_select(0, pad)
+                if not torch.isfinite(gp).all():
+                    _pad_first[k] = _pad_first.get(k, 0) + 1
+                    break
+            else:
+                _pad_first["finite"] = _pad_first.get("finite", 0) + 1
         self.runnable(*args, **kwargs)  # eager rerun refills the buffers
         idx = real.nonzero().squeeze(1)
         bad = []
@@ -132,7 +143,8 @@ def install() -> None:
                  f"{len(bad)} sites, next: "
                  + ", ".join(f"{b[0]} {b[1]:.3g}" for b in bad[1:6]))
         if _stats["steps"] % 500 == 0:
-            _log(f"{_stats}")
+            _log(f"{_stats} pad rows first non-finite at: "
+                 f"{sorted(_pad_first.items(), key=lambda kv: -kv[1])[:8]}")
         return out
 
     BreakableCUDAGraphWrapper._replay = _replay
