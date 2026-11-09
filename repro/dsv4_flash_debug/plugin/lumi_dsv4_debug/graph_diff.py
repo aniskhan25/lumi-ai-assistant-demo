@@ -5,7 +5,7 @@ eagerly on the same static inputs (same padded batch, same attention metadata; t
 cache writes repeat with the same values). Every decoder layer copies its attention
 output, MoE output and residual stream into static buffers allocated before capture, so
 the copies are replayed with the graph and do not change the graph-pool layout. The
-two sets are compared on the real rows (slot_mapping >= 0), and the first site that
+two sets are compared on the real rows (the first num_actual_tokens), and the first site that
 differs is logged: that is where graph replay first computes something eager does not.
 
 DSV4_GRAPH_DIFF_TOL (default 1e-2): relative threshold, max |graph - eager| over the
@@ -62,12 +62,21 @@ def _instrument(model) -> None:
         if not hasattr(layer, "attn"):
             continue
         _wrap(layer.attn, f"L{i:02d}.attn", lambda o: o)
+        if hasattr(layer.ffn, "gate"):  # router logits: do non-finite pad rows reach top-k?
+            _wrap(layer.ffn.gate, f"L{i:02d}.gate", _first)
         _wrap(layer.ffn, f"L{i:02d}.ffn", lambda o: o)
         # fused path: (x, residual, post, comb); unfused: (stream, None, None, None)
         _wrap(layer, f"L{i:02d}.stream", lambda o: o[1] if o[1] is not None else o[0])
 
 
+_diag_left = 3
+
+
 def _real_rows(num_tokens: int) -> torch.Tensor | None:
+    """Real rows are the first num_actual_tokens (vLLM pads at the end). Slot mappings
+    are not reliable: compressor caches give -1 to real tokens that do not close a
+    block, and some entries keep stale slots past the real tokens."""
+    global _diag_left
     from vllm.forward_context import get_forward_context
 
     md = get_forward_context().attn_metadata
@@ -75,15 +84,22 @@ def _real_rows(num_tokens: int) -> torch.Tensor | None:
         md = md[0] if md else None
     if not isinstance(md, dict):
         return None
-    # compressor caches give -1 to tokens that do not close a block, so a row is real
-    # when any cache gives it a slot; pad rows get -1 everywhere
-    real = None
-    for m in md.values():
+    counts, diag = [], {}
+    for key, m in md.items():
+        na = getattr(m, "num_actual_tokens", None)
+        if isinstance(na, int) and 0 < na <= num_tokens:
+            counts.append(na)
         sm = getattr(m, "slot_mapping", None)
-        if isinstance(sm, torch.Tensor) and sm.ndim == 1 and sm.shape[0] >= num_tokens:
-            r = sm[:num_tokens] >= 0
-            real = r if real is None else real | r
-    return real
+        npos = (int((sm[:num_tokens] >= 0).sum()) if isinstance(sm, torch.Tensor)
+                and sm.ndim == 1 and sm.shape[0] >= num_tokens else None)
+        diag.setdefault((type(m).__name__, na, npos), key)
+    if _diag_left and (len(set(counts)) != 1 or counts[0] < num_tokens):
+        _diag_left -= 1
+        _log(f"metadata at {num_tokens} tokens (type, num_actual_tokens, slots>=0): "
+             f"{sorted(diag, key=str)}")
+    if not counts:
+        return None
+    return torch.arange(num_tokens, device="cuda") < min(counts)
 
 
 def _first(o):
