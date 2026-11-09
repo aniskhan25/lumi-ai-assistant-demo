@@ -393,6 +393,29 @@ input preparation, sampling), which `--no-async-scheduling` serialises with the 
 1.45× the 32-user throughput at 64 users and 1.94× at 128; at 128 each user is below reading
 speed, so 64 suits an interactive service and 128 batch work.
 
+### Fused FP8 activation rounding; async scheduling; 64 sequences (Nov 9)
+
+**Fused rounding** (`bf16_linear.fp8_round_triton`, now the default; `FP8_ROUND=torch` for
+vLLM's quantiser + dequantise). `test_fp8_round.py` (job 23548678, one GCD): bit-identical
+to the served path for every case (K 4096/1024/256, M 1–300, outlier, tiny, all-zero and
+strided inputs), 2.3–4.9 µs per call instead of 11.5–14.3 µs. Served (job 23556297, 500
+questions): **GSM8K 98.0 %**, differing from the recipe run on 4 questions, as two
+torch-path runs differ from each other. Speed (job 23555546, same code):
+**15.0 / 53.8 / 177.1 / 273.3 tok/s** at 1 / 4 / 16 / 32 users, TPOT 66 / 71 / 80 / 104 ms,
++4–7 % on the recipe.
+
+**Async scheduling** (recipe without `NO_ASYNC=1`, job 23548655): no hang in a 17-minute
+probe + sweep run (GSM8K 99 % of 100), but only +3.5–4 % (14.5 / 52.2 / 173.4 / 271.0 tok/s),
+and vLLM's capacity estimate halves, 184k → 94k tokens, from the same 16.92 GiB. The cause:
+`max_in_flight_tokens` = concurrent batches × `max_num_batched_tokens`, and every
+sliding-window layer reserves window + in-flight tokens per request; with async there are 2
+batches in flight, and V4's window is small, so the per-request reservation doubles. Not
+adopted: little gain, and the reservation would cap admission at high concurrency.
+
+**64 sequences** (`--max-num-seqs 64`, job 23555546): 390.5 tok/s at 64 users (TPOT 150 ms),
+but **GSM8K 96.0 %**, losing 11 questions the recipe gets right (gaining 3): a regression,
+not noise. With 64 sequences vLLM captures graphs up to 128 tokens instead of 64.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
