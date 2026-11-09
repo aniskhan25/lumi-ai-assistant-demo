@@ -81,6 +81,16 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
 
+Validated at both batch limits (jobs 23564811, 23564812; 500 GSM8K questions each, sanity
+5/5, both needles, no runaway answers):
+
+| `--max-num-seqs` | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 | KV cache |
+|---|---|---|---|---|
+| 32 (default) | 97.6 % | 9.9 / 35.8 / 121.0 / 196.1 / – | 101 / 149 / – ms | 185k tokens |
+| 64 (`MORE_VLLM_ARGS="--max-num-seqs 64"`) | 97.2 % | 9.9 / 35.7 / 121.3 / 196.6 / **304.6** | 101 / 148 / 195 ms | 176k tokens |
+
+That is 3.2–3.3× eager. 64 sequences gives 1.55× the 32-user throughput at ~5 tok/s per user.
+
 **Do not use the faster hyper-connection variants (`MHC_FIX=...`) in production.** They
 reach 262–282 tok/s at 32 users, but under CUDA graphs they lose 2–8 GSM8K points
 depending on memory layout (see "A layout-sensitive bug under CUDA graphs" below); the
