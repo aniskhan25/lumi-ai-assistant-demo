@@ -71,16 +71,20 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh     # from the repo root; TP=8, eager
 ```
 
-For speed, add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1` and replace
-`TORCH_MHC=1` with `MHC_FIX=triton MHC_NATIVE=fusedpost`: piecewise CUDA graphs, the batched
-indexer kernel, bf16 dense linears and the corrected hyper-connection pre kernel. That is
-4.3–4.7× faster than eager at every load, same accuracy (job 23546991; see Speed):
+For speed, add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1` (piecewise CUDA graphs,
+the batched indexer kernel, bf16 dense linears with fused FP8 activation rounding), keeping
+`TORCH_MHC=1`:
 
 ```bash
-AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton MHC_NATIVE=fusedpost \
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
   TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
+
+**Do not use the faster hyper-connection variants (`MHC_FIX=...`) in production.** They
+reach 262–282 tok/s at 32 users, but under CUDA graphs they lose 2–8 GSM8K points
+depending on memory layout (see "A layout-sensitive bug under CUDA graphs" below); the
+torch hyper-connections are the only configuration that passed at every batch limit.
 
 That is five changes against the stock container:
 
@@ -415,6 +419,42 @@ adopted: little gain, and the reservation would cap admission at high concurrenc
 **64 sequences** (`--max-num-seqs 64`, job 23555546): 390.5 tok/s at 64 users (TPOT 150 ms),
 but **GSM8K 96.0 %**, losing 11 questions the recipe gets right (gaining 3): a regression,
 not noise. With 64 sequences vLLM captures graphs up to 128 tokens instead of 64.
+
+### A layout-sensitive bug under CUDA graphs (Nov 9)
+
+`--max-num-seqs 64` reproduces it reliably, so it could be bisected. The GSM8K probe runs at
+16 concurrent requests, so the batches themselves are the same at 32 or 64 sequences: only
+buffer sizes and the CUDA-graph pool layout change. GSM8K over 500 questions, questions
+lost / gained against the recipe run 23546991 (two clean runs differ by 1–3 questions):
+
+| configuration | max seqs | job | GSM8K | lost / gained | runaway |
+|---|---|---|---|---|---|
+| torch hyper-connections (`TORCH_MHC=1`), torch baseline | 32 | 23541195 | 98.0 % | 3 / 1 | 0 |
+| `MHC_FIX=triton MHC_NATIVE=fusedpost` (+ fused rounding) | 32 | 23546991, 23556297 | 97.6, 98.0 % | – / –, 1 / 3 | 0 |
+| same, eager | 64 | 23557403 | 97.8 % | 2 / 3 | 0 |
+| `TORCH_MHC=1` | 64 | 23557405 | 97.4 % | 3 / 2 | 0 |
+| vLLM's fused decoder layer, every mHC op in torch (`MHC_NATIVE=fused,pre,post,head`) | 64 | 23559340 | 97.4 % | 2 / 1 | 0 |
+| fusedpost | 64 | 23555546 | **96.0 %** | 11 / 3 | 0 |
+| fusedpost, graph capture capped at 64 tokens | 64 | 23556639 | **96.0 %** | 8 / 0 | 5 |
+| fusedpost, torch indexer logits (`TRITON_LOGITS=0`) | 64 | 23557404 | **95.8 %** | 13 / 4 | 0 |
+| fusedpost, W8A8 FP8 linears (`BF16_LINEAR=0`) | 64 | 23557406 | **90.2 %** | 41 / 4 | 13 |
+| TileLang-free (`fusedpost,gemm,post,head`) | 32 / 64 | 23558657, 23558655 | **96.4, 94.8 %** | 8 / 2, 18 / 4 | 7, 6 |
+| vLLM's pre wrapper with a plain-torch big-fuse (`MHC_FIX=torch`) | 64 | 23560731 | **95.8 %** | 13 / 4 | 0 |
+| no mHC custom op at all (`MHC_FIX=direct`: torch GEMM + Triton big-fuse) | 64 | 23561973 | **94.8 %** | 16 / 2 | 3 |
+| same, full decode graphs (`FULL_AND_PIECEWISE`) | 64 | 23562860 | **93.8 %** | 20 / 1 | 1 |
+
+What this rules out: my Triton big-fuse kernel (plain torch in its place still fails),
+TileLang (the TileLang-free path fails), vLLM's mHC custom-op wrappers (the direct path
+fails), vLLM's fused decoder layer (it passes with torch ops), the batched indexer kernel and
+the bf16 linears (swapping them back still fails), breakable piecewise graphs (full decode
+graphs fail too), and CUDA-graph replay of the mHC ops in isolation (`test_mhc_graph.py`:
+bit-exact). Eager has never failed. Two implementations of the same pre-step arithmetic fail
+while vLLM's `mhc_pre_torch` passes, and fusedpost passes at 32 sequences but fails at 64:
+no single op explains it. It behaves like a memory-safety bug in something captured into CUDA
+graphs whose effect depends on what sits where in the graph pool; the mHC code and the batch
+limit only change that layout. Not located. Remaining suspects are components captured in
+every configuration: the MXFP4 MoE (`triton_unfused`), hipBLASLt and the ROCm skinny GEMMs,
+RCCL inside graphs, norms.
 
 ## Open
 
