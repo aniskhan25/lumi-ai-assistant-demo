@@ -137,10 +137,60 @@ def wave64_tilelang_module():
     return mod
 
 
+def mhc_pre_direct(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps,
+                   hc_post_mult_value, sinkhorn_repeat, *_, **__):
+    """mHC pre as a plain function, no vLLM custom-op wrapper: fp32 prenorm GEMM and squared
+    sum in torch, then the Triton big-fuse kernel. Returns what mhc_pre_torch returns."""
+    hc, hidden = residual.shape[-2], residual.shape[-1]
+    outer = residual.shape[:-2]
+    flat = residual.reshape(-1, hc, hidden)
+    t = flat.shape[0]
+    x = flat.reshape(t, hc * hidden).float()
+    mixes = (x @ fn.t()).unsqueeze(0)  # [1, T, hc3]: n_splits = 1
+    sqrsum = x.square().sum(-1).unsqueeze(0)  # [1, T]
+    post = torch.empty(t, hc, dtype=torch.float32, device=residual.device)
+    comb = torch.empty(t, hc * hc, dtype=torch.float32, device=residual.device)
+    layer_input = torch.empty(t, hidden, dtype=torch.bfloat16, device=residual.device)
+    mhc_pre_big_fuse_triton(mixes, sqrsum, hc_scale, hc_base, flat, post, comb, layer_input,
+                            hidden, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
+                            sinkhorn_repeat, 1, hc)
+    return (post.view(*outer, hc, 1), comb.view(*outer, hc, hc),
+            layer_input.view(*outer, hidden))
+
+
+def install_direct() -> None:
+    """DSV4_MHC_FIX=direct: the fast mHC path with no vLLM mHC custom op in it. pre and fused
+    post+pre call mhc_pre_direct (fused: torch post first), the final post runs in torch,
+    hc_head on vLLM's Triton kernel. The decoder keeps vLLM's fused layer structure."""
+    import vllm.model_executor.layers.mhc as m
+    from vllm.model_executor.kernels.mhc.torch import mhc_post_torch
+
+    def pre_forward_hip(self, residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
+                        hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, *a, **k):
+        return mhc_pre_direct(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
+                              hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat)
+
+    def fused_forward_hip(self, x, residual, post_layer_mix, comb_res_mix, fn, hc_scale,
+                          hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
+                          sinkhorn_repeat, *a, **k):
+        residual_cur = mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
+        post, comb, layer_input = mhc_pre_direct(
+            residual_cur, fn, hc_scale, hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps,
+            hc_post_mult_value, sinkhorn_repeat)
+        return residual_cur, post, comb, layer_input
+
+    m.MHCPreOp.forward_hip = pre_forward_hip
+    m.MHCFusedPostPreOp.forward_hip = fused_forward_hip
+    m.MHCPostOp.forward_hip = m.MHCPostOp.forward_native
+    m.HCHeadOp.forward_hip = m.HCHeadOp.forward_xpu
+
+
 def install(mode: str) -> None:
     import vllm.model_executor.kernels.mhc.tilelang_kernels as tk
 
-    if mode == "triton":
+    if mode == "direct":
+        install_direct()
+    elif mode == "triton":
         tk.mhc_pre_big_fuse_tilelang = mhc_pre_big_fuse_triton
     elif mode == "torch":  # bisection: vLLM's pre wrapper with a plain-torch big-fuse step
         tk.mhc_pre_big_fuse_tilelang = mhc_pre_big_fuse_torch
@@ -150,7 +200,7 @@ def install(mode: str) -> None:
                      "mhc_pre_big_fuse_broadcast_with_norm_tilelang"):
             setattr(tk, name, getattr(mod, name))
     else:
-        raise ValueError(f"DSV4_MHC_FIX={mode!r}: expected triton, torch or wave64")
+        raise ValueError(f"DSV4_MHC_FIX={mode!r}: expected direct, triton, torch or wave64")
 
 
 def install_check() -> None:
