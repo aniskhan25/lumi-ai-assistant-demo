@@ -92,6 +92,29 @@ def mhc_pre_big_fuse_triton(
     )
 
 
+def mhc_pre_big_fuse_torch(
+    gemm_out_mul, gemm_out_sqrsum, hc_scale, hc_base, residual, post_mix, comb_mix,
+    layer_input, hidden_size, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
+    sinkhorn_repeat, n_splits=16, hc_mult=4,
+):
+    """The big-fuse step in plain torch, same arguments, writing the same output buffers:
+    mhc_pre_torch's arithmetic from the prenorm GEMM onwards. For bisection only."""
+    hc = hc_mult
+    mixes = gemm_out_mul.sum(0)
+    mixes = mixes * torch.rsqrt(gemm_out_sqrsum.sum(0) / (hc * hidden_size) + rms_eps)[:, None]
+    pre = torch.sigmoid(mixes[:, :hc] * hc_scale[0] + hc_base[:hc]) + hc_pre_eps
+    post_mix.copy_(torch.sigmoid(mixes[:, hc:2 * hc] * hc_scale[1] + hc_base[hc:2 * hc])
+                   * hc_post_mult_value)
+    cm = (mixes[:, 2 * hc:].view(-1, hc, hc) * hc_scale[2]
+          + hc_base[2 * hc:].view(1, hc, hc)).softmax(-1) + hc_sinkhorn_eps
+    cm = cm / (cm.sum(-2, keepdim=True) + hc_sinkhorn_eps)
+    for _ in range(sinkhorn_repeat - 1):
+        cm = cm / (cm.sum(-1, keepdim=True) + hc_sinkhorn_eps)
+        cm = cm / (cm.sum(-2, keepdim=True) + hc_sinkhorn_eps)
+    comb_mix.copy_(cm.view(comb_mix.shape))
+    layer_input.copy_((pre.unsqueeze(-1) * residual.float()).sum(1).to(layer_input.dtype))
+
+
 def wave64_tilelang_module():
     """vLLM's tilelang_kernels.py with the three big-fuse kernels at 128 threads split at 64.
     Loaded from a real file: TileLang parses kernel source with inspect."""
@@ -119,13 +142,15 @@ def install(mode: str) -> None:
 
     if mode == "triton":
         tk.mhc_pre_big_fuse_tilelang = mhc_pre_big_fuse_triton
+    elif mode == "torch":  # bisection: vLLM's pre wrapper with a plain-torch big-fuse step
+        tk.mhc_pre_big_fuse_tilelang = mhc_pre_big_fuse_torch
     elif mode == "wave64":
         mod = wave64_tilelang_module()
         for name in ("mhc_pre_big_fuse_tilelang", "mhc_pre_big_fuse_with_norm_tilelang",
                      "mhc_pre_big_fuse_broadcast_with_norm_tilelang"):
             setattr(tk, name, getattr(mod, name))
     else:
-        raise ValueError(f"DSV4_MHC_FIX={mode!r}: expected triton or wave64")
+        raise ValueError(f"DSV4_MHC_FIX={mode!r}: expected triton, torch or wave64")
 
 
 def install_check() -> None:
