@@ -91,10 +91,13 @@ Validated at both batch limits (jobs 23564811, 23564812; 500 GSM8K questions eac
 
 That is 3.2–3.3× eager. 64 sequences gives 1.55× the 32-user throughput at ~5 tok/s per user.
 
-**Do not use the faster hyper-connection variants (`MHC_FIX=...`) in production.** They
-reach 262–282 tok/s at 32 users, but under CUDA graphs they lose 2–8 GSM8K points
-depending on memory layout (see "A layout-sensitive bug under CUDA graphs" below); the
-torch hyper-connections are the only configuration that passed at every batch limit.
+**Without `ROUTER_GUARD=1`, do not use the faster hyper-connection variants
+(`MHC_FIX=...`).** They reach 262–282 tok/s at 32 users, but under CUDA graphs they lose 2–8
+GSM8K points, depending on memory layout. The cause is NaN in graph pad rows, which reaches
+the MoE router (see "A layout-sensitive bug under CUDA graphs" below). The guard fixes it:
+`MHC_FIX=direct` plus the guard gave 97.2 % and 378 tok/s at 64 sequences in one run. That
+is not yet validated as a recipe. The torch recipe is only lucky: in its layout the pad rows
+stay finite. It should get the guard too.
 
 That is five changes against the stock container:
 
@@ -462,9 +465,39 @@ bit-exact). Eager has never failed. Two implementations of the same pre-step ari
 while vLLM's `mhc_pre_torch` passes, and fusedpost passes at 32 sequences but fails at 64:
 no single op explains it. It behaves like a memory-safety bug in something captured into CUDA
 graphs whose effect depends on what sits where in the graph pool; the mHC code and the batch
-limit only change that layout. Not located. Remaining suspects are components captured in
-every configuration: the MXFP4 MoE (`triton_unfused`), hipBLASLt and the ROCm skinny GEMMs,
-RCCL inside graphs, norms.
+limit only change that layout.
+
+**Root cause: NaN pad rows reach the MoE router.** A graph is captured for a fixed number
+of tokens, so a batch is padded up to the next capture size. Nothing initialises the pad
+rows: they hold whatever is left in the graph pool, and that can be NaN. The rest follows
+from two defects:
+
+1. ROCm's V4 router (`ops.topk_hash_softplus_sqrt`, called by `fused_topk_bias`) returns ids
+   `[0]*6` for an all-NaN row (`test_topk_nan.py`, job 23568164). An all-+Inf row gives
+   `[0..5]` with NaN weights. Finite rows match the torch reference.
+2. The `triton_unfused` experts build their dispatch and combine maps from a bitmatrix.
+   A row with duplicate ids sets one bit for six top-k slots, so the maps fall out of step
+   and **other rows** get the wrong expert outputs (`test_moe_pad_rows.py`, job 23569828).
+   Padding R real rows to vLLM's capture sizes with `[0]*6` pad rows corrupts real rows at
+   26 of 64 values of R. Examples (R, padded, rows corrupted): (17, 24, 10), (34, 40, 21),
+   (61, 64, 10).
+
+Eager runs have no pad rows, so they never fail. Whether a graph run fails depends on
+whether the pool memory under the pad rows happens to hold NaN, which explains why the
+results track memory layout and no single op.
+
+**Fix:** `ROUTER_GUARD=1` (`router_guard.py`) replaces NaN in the gate logits with 0 before
+top-k. That costs one elementwise op per MoE layer. Results, `MHC_FIX=direct` with 64
+sequences (job 23568663, 500 questions):
+
+| | GSM8K | lost / gained | runaway | tok/s at 1 / 32 / 64 users |
+|---|---|---|---|---|
+| without the guard (23561973) | 94.8 % | 16 / 2 | 3 | – |
+| with the guard (23568663) | **97.2 %** | 4 / 2 | 1 | 14.3 / 261.3 / **377.9** |
+
+TPOT was 69 / 107 / 154 ms. Two of the four lost questions, and the runaway (q119, which runs
+to 1024 tokens), are also lost by the torch-mHC run at 64 sequences. The guard run reached
+378 tok/s at 64 users, against 305 for the recipe.
 
 ## Open
 
@@ -495,6 +528,9 @@ RCCL inside graphs, norms.
   2. The Triton 3.6 `CanonicalizePointers` assertion.
   3. The aiter-only sparse-indexer gate (upstream main still opens it only for gfx950).
   4. The dense fp32 score in `fp8_mqa_logits_torch`.
+  5. Graph pad rows are not sanitised: ROCm's `topk_hash_softplus_sqrt` returns duplicate
+     ids for NaN rows, and the `triton_unfused` bitmatrix routing then corrupts *other*
+     rows. Each would be a bug alone. Attach `test_topk_nan.py` and `test_moe_pad_rows.py`.
 - **DeepSeek-V4.1-Flash:** its blocker on gfx90a was that the shared V4 attention stack gave
   wrong output. That is now explained and worked around, so the stack is viable on gfx90a.
   The port itself is still large and the model needs two nodes (see
@@ -519,4 +555,8 @@ RCCL inside graphs, norms.
 | `profile_decode.py`, `analyze_trace.py` | decode profile driver (`PROFILE=1`) and per-component GPU-time split |
 | `test_skinny_gemm_strides.py`, `run_skinny_test.sh` | ROCm skinny bf16 GEMMs with strided inputs (they are fine) |
 | `bench_fp8_linear.py`, `run_fp8_linear_bench.sh`, `fp8_configs/` | dense FP8 linears: stock vs tuned vs bf16; tuned MI250X configs |
+| `plugin/lumi_dsv4_debug/router_guard.py` | NaN-to-0 on MoE gate logits before top-k (`DSV4_ROUTER_GUARD`, `count` also logs how many rows) |
+| `plugin/lumi_dsv4_debug/graph_diff.py` | per-layer graph-vs-eager rerun of each replayed step; first diverging site and where pad rows go non-finite (`DSV4_GRAPH_DIFF`) |
+| `test_topk_nan.py`, `run_topk_nan_test.sh` | V4 router on NaN / Inf rows vs the torch reference |
+| `test_moe_pad_rows.py`, `run_moe_pad_test.sh` | `triton_unfused` experts with duplicate-id pad rows; sweep over capture sizes |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
