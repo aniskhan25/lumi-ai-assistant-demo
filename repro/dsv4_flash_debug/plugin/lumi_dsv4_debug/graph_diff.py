@@ -75,11 +75,15 @@ def _real_rows(num_tokens: int) -> torch.Tensor | None:
         md = md[0] if md else None
     if not isinstance(md, dict):
         return None
+    # compressor caches give -1 to tokens that do not close a block, so a row is real
+    # when any cache gives it a slot; pad rows get -1 everywhere
+    real = None
     for m in md.values():
         sm = getattr(m, "slot_mapping", None)
-        if isinstance(sm, torch.Tensor) and sm.shape[0] >= num_tokens:
-            return sm[:num_tokens] >= 0
-    return None
+        if isinstance(sm, torch.Tensor) and sm.ndim == 1 and sm.shape[0] >= num_tokens:
+            r = sm[:num_tokens] >= 0
+            real = r if real is None else real | r
+    return real
 
 
 def _first(o):
@@ -108,7 +112,7 @@ def install() -> None:
         out = orig_replay(self, entry, args, kwargs)
         n = _first(out).shape[0]
         real = _real_rows(n)
-        if n > MAX_ROWS or real is None or not _bufs:
+        if n > MAX_ROWS or real is None or not _bufs or not bool(real.any()):
             _stats["skipped"] += 1
             return out
         graph = {k: _bufs[k][:n].clone() for k in _order}
