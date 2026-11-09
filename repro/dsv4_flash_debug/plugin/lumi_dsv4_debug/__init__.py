@@ -27,6 +27,8 @@ DSV4_MHC_CHECK=1     Debug, eager only: log mHC calls whose outputs are non-fini
 DSV4_ROUTER_GUARD=1  nan_to_num the MoE gate logits before ROCm's top-k (router_guard.py):
                      non-finite graph pad rows otherwise get duplicate expert ids, which
                      corrupt the MoE routing of real tokens. =count also logs how many.
+DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
+                     layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
                      0.26 already does this for gfx942 ("TileLang MHC currently produces
                      incorrect results on gfx942", vllm/model_executor/layers/mhc.py), but
@@ -219,6 +221,11 @@ def register() -> None:
 
         router_guard.install()
         _log(f"DSV4_ROUTER_GUARD={os.environ['DSV4_ROUTER_GUARD']}: non-finite gate rows sanitised before top-k")
+    if os.environ.get("DSV4_GRAPH_DIFF") == "1":
+        from . import graph_diff
+
+        graph_diff.install()
+        _log("DSV4_GRAPH_DIFF: every graph replay rerun eagerly and compared per layer")
     if os.environ.get("DSV4_BF16_LINEAR") == "1":
         from . import bf16_linear
 

@@ -47,6 +47,8 @@
 #   MHC_CHECK=1              (eager) log mHC calls that are non-finite or differ from the reference
 #   MHC_NATIVE=head,fusedpost,fused,pre   route those mHC ops to reference kernels (bisection)
 #   MHC_META=1 / MHC_NANTRACE=1   log mHC argument layouts / where a NaN first appears (graph-safe)
+#   ROUTER_GUARD=1|count     nan_to_num MoE gate logits before ROCm top-k (plugin router_guard.py)
+#   GRAPH_DIFF=1             rerun each graph step eagerly, log first diverging layer site
 #   NANFILL=1                fill fresh float allocations with NaN (exposes reads of unwritten memory)
 set -euo pipefail
 
@@ -71,13 +73,13 @@ PLUGIN=0; { [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ]; } && PLUGIN=1
 if [ "${PLUGIN}" = 1 ]; then
   export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
-  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-0}"
+  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-0}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
 elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-0} GRAPH_DIFF=${GRAPH_DIFF:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
