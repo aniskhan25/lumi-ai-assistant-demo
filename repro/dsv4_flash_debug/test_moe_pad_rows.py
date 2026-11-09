@@ -99,3 +99,28 @@ for name, case in cases.items():
                 or err[r].abs().max().item() > tol]
     print(f"{name:55s} real rows corrupted: {len(bad_rows)}/{R} {bad_rows}  "
           f"max err {err.abs().nan_to_num(float('inf')).max().item():.3e}")
+
+
+# Sweep: R real rows padded to vLLM's capture sizes, pad rows as an all-NaN router
+# row comes back ([0]*6), i.e. exactly the serving layout.
+sizes = [1, 2, 4] + list(range(8, 129, 8))
+print("\nsweep: real rows R padded to the next capture size with [0]*6 pad rows")
+hits = []
+for R in range(1, 65):
+    Mp = next(s for s in sizes if s >= R)
+    P = Mp - R
+    xr = torch.randn(R, K, device=dev).bfloat16()
+    ir = distinct_ids(R)
+    wr = torch.softmax(torch.randn(R, TOPK, device=dev), -1)
+    alone, _ = experts(xr, ir, wr)
+    if P == 0:
+        continue
+    x = torch.cat([xr, torch.randn(P, K, device=dev).bfloat16()])
+    ids = torch.cat([ir, torch.zeros(P, TOPK, device=dev, dtype=torch.int32)])
+    w = torch.cat([wr, torch.full((P, TOPK), 0.2, device=dev)])
+    out, _ = experts(x, ids, w)
+    d = (out[:R].float() - alone.float()).abs().amax(1)
+    n = int((d > 1e-3 * alone.float().abs().max()).sum())
+    if n:
+        hits.append((R, Mp, n))
+print("corrupted (R, padded, rows):", hits if hits else "none")
