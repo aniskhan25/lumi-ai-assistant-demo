@@ -19,6 +19,7 @@ import math
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 
 SANITY = [
@@ -60,7 +61,13 @@ def chat(base_url, model, prompt, max_tokens, logprobs=False, timeout=900):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             out = json.loads(r.read())
     except Exception as e:  # a broken server must still yield a report
-        return {"text": "", "error": repr(e)[:300], "finish_reason": None,
+        error = repr(e)[:300]
+        if isinstance(e, urllib.error.HTTPError):  # vLLM puts the reason in the body
+            try:
+                error += " " + e.read().decode(errors="replace")[:700]
+            except Exception:  # noqa: BLE001
+                pass
+        return {"text": "", "error": error, "finish_reason": None,
                 "completion_tokens": 0, "prompt_tokens": 0,
                 "seconds": round(time.time() - t0, 2), "nonfinite_logprobs": 0,
                 "n_logprobs": 0}
