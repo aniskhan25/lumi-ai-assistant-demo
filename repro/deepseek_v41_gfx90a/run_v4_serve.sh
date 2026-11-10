@@ -3,7 +3,7 @@
 #SBATCH --account=project_462000131
 #SBATCH --partition=dev-g
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=56
 #SBATCH --mem-per-gpu=60G
@@ -50,6 +50,11 @@
 #   ROUTER_GUARD=1|0|count   nan_to_num MoE gate logits before ROCm top-k (default 1; plugin router_guard.py)
 #   GRAPH_DIFF=1             rerun each graph step eagerly, log first diverging layer site
 #   NANFILL=1                fill fresh float allocations with NaN (exposes reads of unwritten memory)
+#
+# Multi-node (V4.1 needs two nodes): `sbatch --nodes=2 ...` serves TP=8 per node with
+# pipeline parallelism across nodes (PP defaults to the node count), one vLLM per node via
+# srun; rank 0 runs the API server on this node, the others are --headless. Logs of
+# ranks > 0 go to server-rank<N>.log.
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif}"
@@ -102,8 +107,27 @@ SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
        --no-enable-prefix-caching --kv-cache-dtype fp8
        ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}} ${MORE_VLLM_ARGS:-})
-echo "Serving: ${SERVE[*]}"
-"${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
+NODES="${SLURM_JOB_NUM_NODES:-1}"
+echo "Serving on ${NODES} node(s): ${SERVE[*]}"
+if [ "${NODES}" -gt 1 ]; then
+  # Multi-node RCCL hangs creating communicators with the default MR cache monitor
+  # (laifs-container-recipes#44, see launch_vllm_multinode_rank.sh).
+  export FI_MR_CACHE_MONITOR="${FI_MR_CACHE_MONITOR:-userfaultfd}"
+  SERVE+=(--pipeline-parallel-size "${PP:-${NODES}}" --distributed-executor-backend mp
+          --nnodes "${NODES}" --master-port "$((PORT + 1))"
+          --master-addr "$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n1)")
+  # Per node: its own /dev/shm dir and GPU list; rank 0 logs to server.log. The command
+  # goes in as arguments, so the JSON in --compilation-config survives unescaped.
+  export SHM LOG
+  srun --ntasks="${NODES}" --ntasks-per-node=1 --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
+    --kill-on-bad-exit=1 --export=ALL bash -c 'mkdir -p "${SHM}"
+      export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"; R="${SLURM_PROCID}"
+      if [ "${R}" = 0 ]; then exec "$@" --node-rank 0 > "${LOG}/server.log" 2>&1
+      else exec "$@" --node-rank "${R}" --headless > "${LOG}/server-rank${R}.log" 2>&1; fi' \
+    _ "${RUN[@]}" "${SERVE[@]}" &
+else
+  "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
+fi
 SERVER=$!
 trap 'kill ${WATCH:-} 2>/dev/null || true; kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT
 
@@ -133,7 +157,9 @@ fi
 SECONDS=0
 until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; do
   if ! kill -0 "${SERVER}" 2>/dev/null || [ "${SECONDS}" -gt 3600 ]; then
-    echo "SERVER_FAILED after ${SECONDS}s"; grep -v amdsmi "${LOG}/server.log" | tail -80; exit 1
+    echo "SERVER_FAILED after ${SECONDS}s"; grep -v amdsmi "${LOG}/server.log" | tail -80
+    for f in "${LOG}"/server-rank*.log; do [ -f "${f}" ] && { echo "--- ${f}"; grep -v amdsmi "${f}" | tail -40; }; done
+    exit 1
   fi
   sleep 5
 done
