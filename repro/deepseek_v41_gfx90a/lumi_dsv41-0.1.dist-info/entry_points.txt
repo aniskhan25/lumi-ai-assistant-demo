@@ -1,0 +1,2 @@
+[vllm.general_plugins]
+lumi_dsv41 = lumi_dsv41:register
