@@ -73,13 +73,13 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 TORCH_MHC=1 \
 
 For speed, add `COMPILE=1 TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1` (piecewise CUDA graphs,
 the batched indexer kernel, bf16 dense linears with fused FP8 activation rounding), and
-replace `TORCH_MHC=1` with `MHC_FIX=direct` (the hyper-connections as a torch GEMM and a
-Triton kernel). `ROUTER_GUARD=1` is the default and must stay on: under CUDA graphs it is
+replace `TORCH_MHC=1` with `MHC_FIX=triton`, vLLM's fused TileLang hyper-connections with
+my Triton kernel in place of the broken TileLang pre stage. `ROUTER_GUARD=1` is the default and must stay on: under CUDA graphs it is
 what keeps NaN in pad rows out of the MoE router (see "A layout-sensitive bug under CUDA
 graphs" below).
 
 ```bash
-AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=direct \
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton \
   TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -90,15 +90,20 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| `MHC_FIX=direct` | 32 (default) | 23572794 | 97.4 % | 14.3 / 51.1 / 168.5 / 263.2 / – | 69 / 107 / – ms |
-| `MHC_FIX=direct` | 64 | 23572795 | 97.8 % | 14.4 / 51.1 / 169.3 / **263.8** / **379.2** | 69 / 107 / 154 ms |
+| `MHC_FIX=triton` | 32 (default) | 23591543 | 97.4 % | 15.5 / 56.1 / 187.0 / 296.1 / – | 64 / 97 / – ms |
+| `MHC_FIX=triton` | 64 | 23591544 | 97.8 % | 15.5 / 56.2 / 187.9 / **298.0** / **436.6** | 64 / 97 / 136 ms |
+| `MHC_FIX=direct` | 32 | 23572794 | 97.4 % | 14.3 / 51.1 / 168.5 / 263.2 / – | 69 / 107 / – ms |
+| `MHC_FIX=direct` | 64 | 23572795 | 97.8 % | 14.4 / 51.1 / 169.3 / 263.8 / 379.2 | 69 / 107 / 154 ms |
 | `TORCH_MHC=1` | 32 | 23564811 | 97.6 % | 9.9 / 35.8 / 121.0 / 196.1 / – | 101 / 149 / – ms |
 | `TORCH_MHC=1` | 64 | 23572796 | 98.0 % | 9.8 / – / – / 195.0 / 302.9 | 101 / 149 / 196 ms |
 
-`MHC_FIX=direct` with 64 sequences is 4.4–6.3× eager and 1.35–1.46× the torch
-hyper-connections, at most 0.6 GSM8K points lower. 64 sequences gives 1.44× the 32-user
-throughput at ~6.5 tok/s per user. `TORCH_MHC=1` (23564811 ran before the guard existed and
-was lucky: its pad rows stayed finite) is the fallback if the fast path ever misbehaves.
+`MHC_FIX=triton` with 64 sequences is 5.0–7.3× eager. It is 1.53–1.58× the torch
+hyper-connections at every load, and 1.08–1.15× `MHC_FIX=direct`, at the same GSM8K. 64
+sequences gives 1.47× the 32-user throughput at ~6.8 tok/s per user. Each run took 500 GSM8K
+questions plus the speed sweep: sanity 5/5, both needles, no garbage, no runaway answers.
+`MHC_FIX=direct` drops TileLang from the hyper-connections entirely and is the fallback,
+then `TORCH_MHC=1`. Run 23564811 predates the guard; it passed only because its pad rows
+happened to stay finite.
 
 That is five changes against the stock container:
 
@@ -521,13 +526,15 @@ from the earlier NaN, not a second bug. Only 4 divergences remain, at single-tok
 are numerical noise in the rerun.
 
 **Validated with the guard** (500 questions + speed sweep each; `ROUTER_GUARD=1` is now the
-default in `run_v4_serve.sh`; this is the recipe above):
+default in `run_v4_serve.sh`):
 
 | configuration | max seqs | job | GSM8K | lost / gained | garbage / runaway | tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|---|---|
 | `MHC_FIX=direct` | 32 | 23572794 | 97.4 % | 4 / 3 | 0 / 0 | 14.3 / 51.1 / 168.5 / 263.2 / – | 69 / 107 / – ms |
-| `MHC_FIX=direct` | 64 | 23572795 | 97.8 % | 4 / 5 | 0 / 0 | 14.4 / 51.1 / 169.3 / 263.8 / **379.2** | 69 / 107 / 154 ms |
-| `TORCH_MHC=1` (recipe) | 64 | 23572796 | 98.0 % | 1 / 3 | 0 / 0 | 9.8 / – / – / 195.0 / 302.9 | 101 / 149 / 196 ms |
+| `MHC_FIX=direct` | 64 | 23572795 | 97.8 % | 4 / 5 | 0 / 0 | 14.4 / 51.1 / 169.3 / 263.8 / 379.2 | 69 / 107 / 154 ms |
+| `MHC_FIX=triton` (TileLang fused post, recipe) | 32 | 23591543 | 97.4 % | 3 / 2 | 0 / 0 | 15.5 / 56.1 / 187.0 / 296.1 / – | 64 / 97 / – ms |
+| `MHC_FIX=triton` (TileLang fused post, recipe) | 64 | 23591544 | 97.8 % | 2 / 3 | 0 / 0 | 15.5 / 56.2 / 187.9 / 298.0 / **436.6** | 64 / 97 / 136 ms |
+| `TORCH_MHC=1` | 64 | 23572796 | 98.0 % | 1 / 3 | 0 / 0 | 9.8 / – / – / 195.0 / 302.9 | 101 / 149 / 196 ms |
 
 The fast path loses questions 93, 106 and 187 in both runs. In the probe these are near
 misses, and the torch recipe at 64 sequences lost 93 as well. With the guard, the fast path
@@ -542,10 +549,9 @@ is 1.35–1.46× the torch recipe at 1–64 users and costs at most 0.6 GSM8K po
   3. ~~Dense FP8 linears~~: done, bf16 GEMM with FP8-rounded activations, 1.5–1.75× on top
      (above). The rounding could be fused into a kernel to win back its ~6 ms per step.
   4. ~~A correct hyper-connection pre kernel~~: Triton big-fuse kernel (above). Served as
-     `MHC_FIX=direct` + `ROUTER_GUARD=1`, 264 tok/s at 32 users and 379 at 64 (recipe).
-     Open: the NaN seen with TileLang's fused post+GEMM under graphs is probably the same
-     pad-row bug. Retest `MHC_FIX=triton` without `fusedpost`, with the guard on (could add
-     ~7 %).
+     `MHC_FIX=triton` + `ROUTER_GUARD=1`, 296 tok/s at 32 users and 437 at 64 (recipe).
+     The NaN seen earlier with TileLang's fused post+GEMM was the pad-row bug: with the guard
+     it passes (jobs 23591543, 23591544).
   5. MXFP4 MoE (~17 ms): mostly routing glue at low batch (`pack_bitmatrix` etc.), not the
      matmul; tile tuning would barely help.
   6. **Async scheduling** (Nov 9 profile): ~12 ms per token at 1 user and ~40 ms at 32 are
