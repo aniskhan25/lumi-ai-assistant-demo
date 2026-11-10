@@ -4,6 +4,19 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-10): the V4-Flash garbage is fixed; the V4.1 port blockers remain.**
+> Branches `bug/dsv4-flash-gfx90a-garbage` and `perf/dsv4-flash-gfx90a-compile`
+> (`repro/dsv4_flash_debug/README.md`) found two bugs:
+> - vLLM's TileLang mHC "pre" kernel is wrong on gfx90a. It is replaced with Triton (`MHC_FIX=triton`).
+> - Under CUDA graphs, NaN in pad rows reaches the MoE router and corrupts real rows. It is
+>   guarded (`ROUTER_GUARD=1`).
+>
+> V4-Flash is now correct on one node: GSM8K 97.4–97.8 % with no garbage, and 298 / 437 tok/s
+> at 32 / 64 users (jobs 23591543/23591544). Blockers 2 and 3 below are still bypassed, not
+> fixed (`AMDGCN_USE_BUFFER_OPS=0`, `INDEXER_GATE=1`). So verdict point 1 no longer holds.
+> Points 2 and 3 still do: the ~10k-line core sparse-MLA port, onto which the V4 fixes would
+> have to be re-applied, and 475 GiB needing two nodes without PP.
+
 ## The model (config of 2026-09-10)
 
 `DeepseekV41ForCausalLM`, 40 layers, hidden 5120, 384 routed experts with 6 active plus 1
@@ -111,7 +124,8 @@ path passes. **So the garbage comes from something these tests do not cover.** C
 1. **V4.1 sits on top of DeepSeek-V4's attention stack, and that stack does not produce
    correct output on gfx90a today**, even for V4, which 0.26 supports natively. It took a
    compiler workaround and a gate bypass just to start, and then the output was garbage. A
-   V4.1 port would inherit all of that.
+   V4.1 port would inherit all of that. *(Superseded 2026-11-10: V4-Flash is now correct; see
+   the status note at the top.)*
 2. **The port itself is about an order of magnitude bigger than Qwen3.8's.** It means carrying
    newer copies of ~10k lines of core sparse-MLA attention code that 0.26's own V4 also uses,
    plus 17 missing modules.
