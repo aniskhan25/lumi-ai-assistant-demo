@@ -141,10 +141,62 @@ encodings. Worth reporting meanwhile, to laifs-container-recipes and upstream:
 - the FP4 indexer-cache crashes;
 - the `launch_pdl` test break.
 
+## Port plan, phases 0–1 (2026-11-10)
+
+### Phase 0: checks without GPUs
+
+- **No newer container.** `lumi-multitorch-latest.sif` is still 20261028 (vLLM 0.26), so V4.1
+  needs a port.
+- **PP exists for V4 in 0.26.** `DeepseekV4ForCausalLM` implements `SupportsPP`, using
+  `make_layers`, `PPMissingLayer` and intermediate tensors.
+- **The dense linears are MXFP8, not block-FP8.** V4.1's `quantization_config` has
+  `weight_block_size [32, 32]` with `ue8m0` scales, while V4-Flash has `[128, 128]`. Upstream
+  routes such layers to `ModelOptLinearMethod(QuantSpec(kMxfp8Static, kMxfp8Dynamic),
+  CkptCtx(scale_block_size=(32, 32)))`, which 0.26 lacks.
+  - 0.26's `ModelOptMxFp8LinearMethod` expects 1×32 weight scales, so the 32×32 checkpoint
+    scales must be expanded at load time.
+  - Its native MXFP8 kernel is gfx950-only (`supports_mx()`). On gfx90a only `emulation` is
+    left.
+  - The V4 fast path (`BF16_LINEAR`: dequantise to bf16 once, keep FP8 activation rounding)
+    carries over, but the rounding becomes MXFP8: an e8m0 scale per 32 values, instead of
+    V4's fp32 scale per 128.
+  - Lesson from V4: dropping the activation rounding costs GSM8K points.
+- **Import audit against current main** (`65711a1`; `amd/` + `common/`, no NVIDIA or
+  monokernel; 32 files, 14.3k lines). 19 modules are missing from 0.26 (several are imported
+  only in NVIDIA or optional branches) and 43 names are missing from existing modules. This
+  is the same scale as at `790be38`.
+- **Storage.** Scratch has 61 TiB free. `/flash` has 2 TiB free.
+
+### Phase 1: V4-Flash on two nodes, PP=2 × TP=8 (job 23602435)
+
+`run_v4_serve.sh` now has a multi-node mode: `sbatch --nodes=2` starts one vLLM per node via
+srun, with mp, `--nnodes`/`--headless` and `FI_MR_CACHE_MONITOR=userfaultfd`. It used the
+1-node recipe unchanged, with `--max-num-seqs 64`.
+
+| | GSM8K (500) | sanity / needles | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
+|---|---|---|---|---|
+| 1 node, TP=8 (23591544) | 97.8 % | 5/5, 2/2 | 15.5 / 56.2 / 187.9 / 298.0 / 436.6 | 64 / 97 / 136 ms |
+| **2 nodes, PP=2 × TP=8** | **97.6 %**, 0 garbage | 5/5, 2/2 | 15.0 / 54.5 / 185.7 / 329.9 / 506.1 | 66 / 88 / 114 ms |
+
+- **Accuracy.** The plugin fixes work unchanged across a pipeline stage boundary. The 0.2-point
+  gap is one question.
+- **KV cache.** Each stage gets about 310k tokens.
+- **Throughput.** PP=2 is +11 % at 32 users and +16 % at 64, and −3 % at 1 user. That is per
+  2 nodes, so per node it is lower; the point is that V4.1 needs two nodes anyway.
+- **Loading weights took 1492 s, against ~104 s on one node.** 16 ranks read 149 GiB from
+  Lustre at once. At V4.1's 475 GiB, staging the checkpoint on `/flash` is worth measuring
+  before phase 3.
+- **Exit status.** Slurm reports the job `FAILED` (exit 9). The step is SIGKILLed 32 s after the
+  exit trap's SIGTERM, which is cosmetic. The probe passed and every sweep point ran.
+
 ## Reproduce
 
 ```bash
 # from the repository root on LUMI
 sbatch --partition=dev-g repro/deepseek_v41_gfx90a/run_kernel_tests.sh
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh   # garbage
+# phase 1: correct V4-Flash on two nodes (PP=2 x TP=8)
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
+  MORE_VLLM_ARGS="--max-num-seqs 64" PROBE_GSM8K_N=500 BENCH=1 CONCURRENCIES="1 4 16 32 64" \
+  sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
