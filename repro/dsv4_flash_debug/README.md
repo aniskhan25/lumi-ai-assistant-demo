@@ -499,6 +499,33 @@ TPOT was 69 / 107 / 154 ms. Two of the four lost questions, and the runaway (q11
 to 1024 tokens), are also lost by the torch-mHC run at 64 sequences. The guard run reached
 378 tok/s at 64 users, against 305 for the recipe.
 
+**Caught in the act** (`GRAPH_DIFF=1`, no guard, job 23574590, 200 questions, 97.0 % with 3
+garbage answers and 3 runaways). Each replayed step is rerun eagerly on the same padded inputs,
+and every layer's outputs are compared. In steps padded to 120 tokens (113–118 real), the pad
+rows were finite after the layer's attention but non-finite in its router logits. The MoE in
+the same layer then made 3–5 *real* rows NaN, and the eager rerun of the same step did not.
+This happened at layers 7, 21, 22, 23, 25 and 28. In the code path, the router logits come
+from the hyper-connection pre-step on the stream, then a norm and the gate. With
+`MHC_FIX=direct`, that pre-step on uninitialised pad rows is what produces the non-finite
+values. The torch pre-step happens to stay finite on the same rows, which is why
+`TORCH_MHC=1` passed. Late in that run (from step ~1,700, while runaway requests were
+decoding), attention in layers 29–33 also differed between graph and eager on real rows,
+finite but with rel ≈ 1. Whether that is fallout from the earlier NaN or a rerun artifact is
+being checked with the guard on (job 23586042).
+
+**Validated with the guard** (500 questions + speed sweep each; `ROUTER_GUARD=1` is now the
+default in `run_v4_serve.sh`):
+
+| configuration | max seqs | job | GSM8K | lost / gained | garbage / runaway | tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
+|---|---|---|---|---|---|---|---|
+| `MHC_FIX=direct` | 32 | 23572794 | 97.4 % | 4 / 3 | 0 / 0 | 14.3 / 51.1 / 168.5 / 263.2 / – | 69 / 107 / – ms |
+| `MHC_FIX=direct` | 64 | 23572795 | 97.8 % | 4 / 5 | 0 / 0 | 14.4 / 51.1 / 169.3 / 263.8 / **379.2** | 69 / 107 / 154 ms |
+| `TORCH_MHC=1` (recipe) | 64 | 23572796 | 98.0 % | 1 / 3 | 0 / 0 | 9.8 / – / – / 195.0 / 302.9 | 101 / 149 / 196 ms |
+
+The fast path loses questions 93, 106 and 187 in both runs. In the probe these are near
+misses, and the torch recipe at 64 sequences lost 93 as well. With the guard, the fast path
+is 1.35–1.46× the torch recipe at 1–64 users and costs at most 0.6 GSM8K points.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
