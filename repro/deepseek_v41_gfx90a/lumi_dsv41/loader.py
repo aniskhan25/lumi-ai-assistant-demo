@@ -42,6 +42,7 @@ STUBS = frozenset({
     "vllm.v1.attention.ops.rocm_paged_mxfp4_indexer",
     "vllm.v1.attention.ops.pcp",
     "vllm.v1.attention.ops.shardq",
+    "vllm.models.deepseek_v41.amd.mono_decode",  # opt-in monokernel (--monokernel, gfx942/950)
 })
 
 
