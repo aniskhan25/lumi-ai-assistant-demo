@@ -245,6 +245,29 @@ def _group_rings(module) -> None:
         return groups
 
     module.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
+    # The packer pads every non-MLA group to the MLA layer-tuple page sizes and splits it
+    # into tuples; nothing in it depends on the group being sliding-window MLA except
+    # one assertion. Let the ring groups through it.
+    _source_patch(
+        module, "_get_kv_cache_groups_uniform_groups",
+        "isinstance(spec, SlidingWindowMLASpec)",
+        "isinstance(spec, (SlidingWindowMLASpec, CircularBufferSpec))",
+        extra_globals={"CircularBufferSpec": CircularBufferSpec},
+    )
+
+
+def _source_patch(module, name, old, new, extra_globals=None) -> None:
+    """Re-define module.name from its own source with one exact text replacement."""
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(getattr(module, name)))
+    if source.count(old) != 1:
+        raise RuntimeError(f"lumi_dsv41: cannot patch {module.__name__}.{name}: "
+                           f"{old!r} found {source.count(old)} times")
+    module.__dict__.update(extra_globals or {})
+    exec(compile(source.replace(old, new), inspect.getsourcefile(module), "exec"),
+         module.__dict__)
 
 
 def _debug_kv_groups(module) -> None:
