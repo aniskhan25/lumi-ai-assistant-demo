@@ -30,7 +30,7 @@ def run(i: int) -> None:
                        "ignore_eos": True, "temperature": 0.0}).encode()
     req = urllib.request.Request(f"{base}/v1/completions", body,
                                  {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=900) as resp:
+    with urllib.request.urlopen(req, timeout=3600) as resp:
         for line in resp:
             if line.startswith(b"data: ") and b"[DONE]" not in line:
                 with lock:
@@ -39,7 +39,7 @@ def run(i: int) -> None:
 
 def post(path: str) -> None:
     urllib.request.urlopen(urllib.request.Request(f"{base}{path}", b"", method="POST"),
-                           timeout=900).read()
+                           timeout=3600).read()
 
 
 threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(concurrency)]
