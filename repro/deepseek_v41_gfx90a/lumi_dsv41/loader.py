@@ -9,6 +9,8 @@ It does not import vllm itself.
   a module `__getattr__` that loads 0.26's copy on first use, under a private name. That
   keeps 0.26 importers working where upstream moved helpers (e.g. the context-parallel
   ones in v1/attention/ops/common.py) without executing 0.26's copy otherwise.
+- A module in hooks.HOOKS is 0.26's, with functions run on it right after it executes:
+  grafts of upstream helpers (graft.py) and a few hand-written additions (hooks.py).
 - A module in STUBS is an empty placeholder: upstream imports it on NVIDIA, CPU, vision
   or optional paths only. Any name from it is a class that raises when used.
 """
@@ -22,6 +24,9 @@ import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor"
+# Our own edits of whole vendored files (e.g. a language-model-only package __init__);
+# searched before vendor/.
+OVERRIDES = pathlib.Path(__file__).resolve().parent / "overrides"
 PRIVATE = "_lumi_dsv41_v026."
 
 STUBS = frozenset({
@@ -141,8 +146,18 @@ class VendorFinder(importlib.abc.MetaPathFinder):
             return None
         if fullname in STUBS:
             return importlib.machinery.ModuleSpec(fullname, _StubLoader(), is_package=True)
-        base = VENDOR.joinpath("vllm", *fullname.split(".")[1:])
+        from . import hooks  # noqa: PLC0415 - imported lazily, it does not import vllm
+
+        if fullname in hooks.HOOKS:
+            return self._hooked(fullname, path, target, hooks.HOOKS[fullname])
+        rel = fullname.split(".")[1:]
+        base = VENDOR.joinpath("vllm", *rel)
+        override = OVERRIDES.joinpath("vllm", *rel)
         init, single = base / "__init__.py", base.with_suffix(".py")
+        if (override / "__init__.py").exists():
+            init = override / "__init__.py"
+        elif override.with_suffix(".py").exists():
+            single = override.with_suffix(".py")
         if init.exists():
             # New packages only (vendor never carries a 0.26 package's __init__).
             locations = [str(base)]
@@ -156,6 +171,30 @@ class VendorFinder(importlib.abc.MetaPathFinder):
             loader = _ShadowLoader(fullname, str(single), self._old_path(fullname))
             return importlib.util.spec_from_file_location(fullname, single, loader=loader)
         return None
+
+
+    def _hooked(self, fullname, path, target, functions):
+        for finder in sys.meta_path:
+            if finder is self or not hasattr(finder, "find_spec"):
+                continue
+            spec = finder.find_spec(fullname, path, target)
+            if spec is not None:
+                spec.loader = _HookLoader(spec.loader, functions)
+                return spec
+        return None
+
+
+class _HookLoader(importlib.abc.Loader):
+    def __init__(self, loader, functions):
+        self.loader, self.functions = loader, functions
+
+    def create_module(self, spec):
+        return self.loader.create_module(spec)
+
+    def exec_module(self, module):
+        self.loader.exec_module(module)
+        for function in self.functions:
+            function(module)
 
 
 def install() -> None:

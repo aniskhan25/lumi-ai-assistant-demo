@@ -1,4 +1,4 @@
-"""Upstream's CircularBufferSpec and CircularBufferManager, ported to vLLM 0.26.
+"""Upstream's CircularBufferManager, ported to vLLM 0.26 (the spec is in hooks.py).
 
 V4.1's compressor keeps the raw keys of the token group that is still open in a
 ring: one block per request for its whole lifetime, never prefix-cached. Upstream's core
@@ -8,49 +8,13 @@ manager registered through 0.26's KVCacheSpecRegistry instead.
 
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec  # defined in hooks.py
 
 logger = init_logger("vllm.lumi_dsv41")  # vLLM configures only "vllm.*" loggers
-
-
-@dataclass(frozen=True, kw_only=True)
-class CircularBufferSpec(AttentionSpec):
-    """One block per request; `block_size` is the ring capacity."""
-
-    head_size_v: int = 0
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        # Keys only (upstream head_size_v=0); 0.26's AttentionSpec counts K and V.
-        from vllm.utils.torch_utils import get_dtype_size
-
-        return self.block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
-
-    @property
-    def block_table_token_alignment(self):
-        return None
-
-    def max_memory_usage_bytes(self, vllm_config) -> int:
-        return self.page_size_bytes
-
-    def max_num_blocks_per_req(self, vllm_config, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(self, kv_cache_specs) -> bool:
-        return all(isinstance(s, CircularBufferSpec) for s in kv_cache_specs.values())
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
 
 
 class CircularBufferManager(FullAttentionManager):
