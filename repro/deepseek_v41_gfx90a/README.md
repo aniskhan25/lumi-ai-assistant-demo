@@ -4,6 +4,9 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-11): V4.1-Flash serves correctly on one node through a plugin on vLLM
+> 0.26: GSM8K 100/100, no garbage (job 23642691). See "Phases 2–3" below.**
+>
 > **Status (2026-11-10): the V4-Flash garbage is fixed; the V4.1 port blockers remain.**
 > Branches `bug/dsv4-flash-gfx90a-garbage` and `perf/dsv4-flash-gfx90a-compile`
 > (`repro/dsv4_flash_debug/README.md`) found two bugs:
@@ -189,6 +192,35 @@ srun, with mp, `--nnodes`/`--headless` and `FI_MR_CACHE_MONITOR=userfaultfd`. It
 - **Exit status.** Slurm reports the job `FAILED` (exit 9). The step is SIGKILLed 32 s after the
   exit trap's SIGTERM, which is cosmetic. The probe passed and every sweep point ran.
 
+## Phases 2–3: V4.1 served by a plugin on vLLM 0.26 (2026-11-11)
+
+No newer container is coming, so V4.1 runs as a plugin (`lumi_dsv41/`) on LAIF 20261028:
+upstream's V4.1 model and its sparse-attention stack are vendored at 65711a1
+(`vendor_sync.py`) and adapted to 0.26 through import hooks, grafts and source patches
+(`lumi_dsv41/hooks.py`). One node, TP=8 with expert parallelism, eager, MRV2, fp8 KV.
+
+**Result (job 23642691): GSM8K 100/100, no garbage, all five sanity answers right, 2.1k
+needle right.** The 16.8k needle stopped after `482`. That is being checked.
+
+What it took on the real checkpoint, in order:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| 1 h readiness timeout at shard 39/48 | 8 ranks each read 475 GiB from scratch; the page cache cannot hold it next to 189 GiB of pinned Engram tables | `stage_flash.sh` copies it to LUMI-F; load 724 s, then ~300 s once cached |
+| OOM after load: 62 GiB of weights per GCD | 0.26's ROCm MXFP4 sizing rounds each rank's expert width (2304/8 = 288) up to 512 | `--enable-expert-parallel`: whole experts, 2304 = 9 × 256, no padding; 37 GiB per GCD |
+| OOM in profiling: 32 GiB indexer workspace | upstream bounds decode-logit rows by `max_num_seqs` via `get_current_vllm_config()`, which 0.26 does not provide in the forward | capture the serving limits at model init (`_decode_rows_bound`) |
+| Fluent but drifting text, GSM8K 3 %, 36/200 garbage | upstream bug: on GPUs other than gfx942/950 the fallback decode kernel skips the inverse RoPE yet reports it applied, so the caller skips its own pass | withhold the positions there (`_decode_inv_rope`); the caller's inverse RoPE then covers decode rows |
+
+How the last one was found without a reference implementation (`decode_vs_prefill.py`,
+`DIAG=1`): greedy decode records each token's logprob, then the same tokens are scored as a
+prompt (prefill). They differed by up to 23 nats (mean 0.64–1.07) before the fix, and by a
+mean of 0.01–0.05 after it. Ruled out on the way: Engram hashing (real hashes, correct
+lookback ids), the SWA KV record (0.26's C++ encoder and upstream's OCP writer are
+byte-identical on gfx90a, `test_kv_format.py`) and the compressor ring.
+
+Memory per GCD: 37.2 GiB weights, 17.3 GiB KV cache (744k tokens, 22.7 concurrent 32k
+requests). Host: 189 GiB of pinned Engram tables per node.
+
 ## Reproduce
 
 ```bash
@@ -199,4 +231,8 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 sbatch repro/deepseek_v41_gfx90a/run_v4_s
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" PROBE_GSM8K_N=500 BENCH=1 CONCURRENCIES="1 4 16 32 64" \
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
+# V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
+sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 DIAG=1 PROBE_GSM8K_N=100 READY_TIMEOUT=5400 \
+  sbatch --time=02:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
