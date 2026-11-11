@@ -5,7 +5,8 @@ Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, b
 port work and before downloading its 475 GiB.
 
 > **Status (2026-11-11): V4.1-Flash serves correctly on one node through a plugin on vLLM
-> 0.26: GSM8K 100/100, no garbage (job 23642691). See "Phases 2–3" below.**
+> 0.26: GSM8K 99/100, no garbage, needles at 2.1k and 16.8k tokens right, decode agrees with
+> prefill to 0.02–0.05 nats up to 20k tokens (job 23644138). See "Phases 2–3" below.**
 >
 > **Status (2026-11-10): the V4-Flash garbage is fixed; the V4.1 port blockers remain.**
 > Branches `bug/dsv4-flash-gfx90a-garbage` and `perf/dsv4-flash-gfx90a-compile`
@@ -199,8 +200,9 @@ upstream's V4.1 model and its sparse-attention stack are vendored at 65711a1
 (`vendor_sync.py`) and adapted to 0.26 through import hooks, grafts and source patches
 (`lumi_dsv41/hooks.py`). One node, TP=8 with expert parallelism, eager, MRV2, fp8 KV.
 
-**Result (job 23642691): GSM8K 100/100, no garbage, all five sanity answers right, 2.1k
-needle right.** The 16.8k needle stopped after `482`. That is being checked.
+**Result (job 23644138): GSM8K 99/100, no garbage, all five sanity answers right, needles at
+2.1k and 16.8k tokens right, and decode agrees with prefill to a mean of 0.02–0.05 nats for
+prompts of 42 to 19.7k tokens.**
 
 What it took on the real checkpoint, in order:
 
@@ -210,11 +212,13 @@ What it took on the real checkpoint, in order:
 | OOM after load: 62 GiB of weights per GCD | 0.26's ROCm MXFP4 sizing rounds each rank's expert width (2304/8 = 288) up to 512 | `--enable-expert-parallel`: whole experts, 2304 = 9 × 256, no padding; 37 GiB per GCD |
 | OOM in profiling: 32 GiB indexer workspace | upstream bounds decode-logit rows by `max_num_seqs` via `get_current_vllm_config()`, which 0.26 does not provide in the forward | capture the serving limits at model init (`_decode_rows_bound`) |
 | Fluent but drifting text, GSM8K 3 %, 36/200 garbage | upstream bug: on GPUs other than gfx942/950 the fallback decode kernel skips the inverse RoPE yet reports it applied, so the caller skips its own pass | withhold the positions there (`_decode_inv_rope`); the caller's inverse RoPE then covers decode rows |
+| Short prompts fine (GSM8K 100/100), but past ~3k tokens decode diverges from prefill from the 5th token; 16.8k needle answers `482` | upstream bug: on ROCm the indexer K cache is written in 16×16 tiles (`indexer_k_store.py`, SHUFFLE); prefill gathers it tile-aware, but without aiter the decode logits fall back to `fp8_paged_mqa_logits_torch`, which reads it row-major. Wrong scores pick the wrong top-512 once a context has more than 512 compressed positions | un-tile each gathered page in the fallback (`_paged_logits_unshuffle`) |
 
 How the last one was found without a reference implementation (`decode_vs_prefill.py`,
 `DIAG=1`): greedy decode records each token's logprob, then the same tokens are scored as a
-prompt (prefill). They differed by up to 23 nats (mean 0.64–1.07) before the fix, and by a
-mean of 0.01–0.05 after it. Ruled out on the way: Engram hashing (real hashes, correct
+prompt (prefill). They differed by up to 23 nats (mean 0.64–1.07) before the RoPE fix, and by a
+mean of 0.01–0.05 after it for short prompts. Prompts of 3.3k–19.7k tokens still differed (mean
+0.9–1.6, first >0.5 nats at the 5th token) until the indexer fix, and agree to 0.02–0.03 after. Ruled out on the way: Engram hashing (real hashes, correct
 lookback ids), the SWA KV record (0.26's C++ encoder and upstream's OCP writer are
 byte-identical on gfx90a, `test_kv_format.py`) and the compressor ring.
 
