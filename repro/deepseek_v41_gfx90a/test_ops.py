@@ -8,7 +8,7 @@ from lumi_dsv41.ops import qnorm_rope_kv_rope_quant_insert
 torch.manual_seed(0)
 dev = "cuda"
 T, H, D, PAD, ROT, BS = 37, 64, 512, 128, 64, 32
-for dtype in (torch.float32, torch.bfloat16):
+for dtype in (torch.float32,):  # the kernel requires a float32 cos_sin_cache
     q = torch.randn(T, H, D, device=dev, dtype=torch.bfloat16)
     kv = torch.randn(T, D, device=dev, dtype=torch.bfloat16)
     pos = torch.randint(0, 4096, (T,), device=dev, dtype=torch.int64)
