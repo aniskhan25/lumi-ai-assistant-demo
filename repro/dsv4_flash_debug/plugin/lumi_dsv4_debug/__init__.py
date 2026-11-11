@@ -27,6 +27,8 @@ DSV4_MHC_CHECK=1     Debug, eager only: log mHC calls whose outputs are non-fini
 DSV4_ROUTER_GUARD=1  nan_to_num the MoE gate logits before ROCm's top-k (router_guard.py):
                      non-finite graph pad rows otherwise get duplicate expert ids, which
                      corrupt the MoE routing of real tokens. =count also logs how many.
+DSV4_SPARSE_SPLIT=1  Decode sparse attention with vLLM's split-K kernels, gated to gfx942/950,
+                     instead of the one-workgroup-per-query fallback (sparse_split.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
                      layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
@@ -216,6 +218,11 @@ def register() -> None:
 
         mhc_fix.install_check()
         _log("DSV4_MHC_CHECK: every mHC call recomputed with the reference and compared (eager only)")
+    if os.environ.get("DSV4_SPARSE_SPLIT") == "1":
+        from . import sparse_split
+
+        sparse_split.install()
+        _log("DSV4_SPARSE_SPLIT=1: split-K sparse attention decode (gfx942/950 path)")
     if os.environ.get("DSV4_ROUTER_GUARD") in ("1", "count"):
         from . import router_guard
 
