@@ -201,7 +201,15 @@ def _mhc_kernels(module) -> None:
     module.mhc_pre_delayed_torch = mhc_pre_delayed_torch
 
 
+def _fp8_utils(module) -> None:
+    """Upstream's get_fp8_block_weight_scale also recognises a Quark per-block scheme
+    0.26 does not have; block-FP8 layers otherwise keep `weight_scale_inv`."""
+    if not hasattr(module, "get_fp8_block_weight_scale"):
+        module.get_fp8_block_weight_scale = lambda layer: getattr(layer, "weight_scale_inv", None)
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]
 HOOKS["vllm.model_executor.kernels.mhc"] = [_mhc_kernels]
 HOOKS["vllm._aiter_ops"] = [_aiter_ops]
 HOOKS["vllm.platforms.rocm"].append(_rocm_platform)

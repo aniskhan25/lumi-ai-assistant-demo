@@ -24,7 +24,6 @@ GRAFTS = {
     "vllm.distributed.kv_transfer.kv_connector.utils": ["kv_connector_may_load_foreign_kv"],
     "vllm.forward_context": ["in_piecewise_cudagraph"],
     "vllm.model_executor.layers.fusion.quant_activation": ["get_input_quant_key"],
-    "vllm.model_executor.layers.quantization.utils.fp8_utils": ["get_fp8_block_weight_scale"],
     "vllm.model_executor.model_loader.weight_utils": ["make_attention_sink"],
     "vllm.platforms.rocm": ["_ON_RDNA", "get_cdna_version"],
     "vllm.utils.cpu_resource_utils": ["get_available_memory"],
