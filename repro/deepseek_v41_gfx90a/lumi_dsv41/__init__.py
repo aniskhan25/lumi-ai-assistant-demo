@@ -45,7 +45,13 @@ def _config_class(model_configs):
         def verify_and_update_config(vllm_config) -> None:
             # Upstream's default "auto" lets the indexer pick its cache format (fp8);
             # 0.26 defaults to "bf16". (0.26 types the field without "auto".)
-            object.__setattr__(vllm_config.attention_config, "indexer_kv_dtype", "auto")
+            attention = vllm_config.attention_config
+            object.__setattr__(attention, "indexer_kv_dtype", "auto")
+            # Upstream resolves this in VllmConfig.__post_init__ (factor * max_model_len
+            # sizes the sparse-MLA prefill workspace).
+            if getattr(attention, "sparse_mla_prefill_workspace_factor", None) is None:
+                factor = 5 if vllm_config.model_config.max_model_len <= 256 * 1024 else 2
+                object.__setattr__(attention, "sparse_mla_prefill_workspace_factor", factor)
             if vllm_config.speculative_config is not None:
                 raise NotImplementedError("DeepSeek-V4.1 on vLLM 0.26: MTP/DSpark not ported")
             if vllm_config.cache_config.enable_prefix_caching:
