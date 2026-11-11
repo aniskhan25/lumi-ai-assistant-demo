@@ -21,6 +21,8 @@ RULES = [
     ("sparse indexer", "sparse_attn_indexer"),
     ("sparse indexer", "paged_logits.py"),
     ("compressor", "deepseek_v4/compressor.py"),
+    ("compressor", "deepseek_v41/compressor.py"),
+    ("Engram", "engram"),
     ("compressor", "fused_compress_quant_cache"),
     ("sparse attention", "rocm_sparse_attn"),
     ("sparse attention", "_rocm_sparse_attn"),
@@ -38,10 +40,14 @@ RULES = [
     ("norms / rope / quant", "rotary_embedding"),
     ("norms / rope / quant", "input_quant_fp8"),
     ("attention (other)", "deepseek_v4/attention.py"),
+    ("attention (other)", "deepseek_v41/attention.py"),
+    ("attention (other)", "deepseek_v41/amd/"),
     ("embedding / head / sampler", "sampler"),
     ("embedding / head / sampler", "logits_processor"),
     ("embedding / head / sampler", "vocab_parallel_embedding"),
     ("decoder layer (other)", "deepseek_v4/"),
+    ("decoder layer (other)", "deepseek_v41/"),
+    ("decoder layer (other)", "lumi_dsv41/"),
 ]
 
 events = json.load(gzip.open(sys.argv[1]))["traceEvents"]
@@ -96,7 +102,8 @@ for k in kernels:
     names[c][k["name"][:70]] += k["dur"]
 
 steps = sum(1 for e in events if e.get("cat") == "python_function"
-            and e["name"].endswith(": execute_model") and "gpu_model_runner" in e["name"])
+            and e["name"].endswith(": execute_model")
+            and ("gpu_model_runner" in e["name"] or "gpu/model_runner" in e["name"]))
 busy = sum(per.values())
 span = (max(k["ts"] + k["dur"] for k in kernels) - min(k["ts"] for k in kernels)) if kernels else 0
 print(f"{len(kernels)} kernels, {steps} model steps, GPU busy {busy / 1e3:.1f} ms "
