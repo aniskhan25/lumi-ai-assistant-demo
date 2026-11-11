@@ -25,6 +25,24 @@ PROMPTS = [
 ]
 
 
+FILLER = (
+    "The committee reviewed the annual report and noted several minor corrections. "
+    "Rainfall in the northern districts was slightly above the long-term average. "
+    "The archive moved to a new building with climate-controlled storage rooms. "
+    "Several volunteers helped catalogue the donated books over the summer. "
+)
+
+
+def long_prompt(target_tokens: int) -> str:
+    """~target_tokens of filler with a fact in the middle and a question about it: decode
+    past the sliding window, where the indexer's top-k and candidate blocks matter."""
+    reps = max(1, target_tokens // 60)
+    half = FILLER * (reps // 2)
+    return (half + "Remember this: the access code for the east wing is 48213. " + half
+            + "\nWhat is the access code for the east wing? Then write two sentences "
+            "about why archives need climate control.")
+
+
 def post(base, path, body):
     r = requests.post(f"{base}{path}", json=body, timeout=1200)
     r.raise_for_status()
@@ -102,12 +120,15 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--gsm8k-parquet")
     ap.add_argument("--max-tokens", type=int, default=256)
+    ap.add_argument("--long-tokens", type=int, nargs="*", default=[4000, 12000, 17000, 24000])
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     res = {"compare": [], "gold": []}
-    for p in PROMPTS:
+    prompts = PROMPTS + [long_prompt(n) for n in a.long_tokens]
+    for p in prompts:
         r = compare(a.base_url, a.model, p, a.max_tokens)
-        print(f"[diag] gen={r['generated']} decode_nll={r['decode_nll']} "
+        r["prompt"] = p[:200]
+        print(f"[diag] prompt={r['prompt_tokens']} gen={r['generated']} decode_nll={r['decode_nll']} "
               f"prefill_nll={r['prefill_nll_of_same_tokens']} mean|d|={r['mean_abs_diff']} "
               f"max|d|={r['max_abs_diff']} first>0.5@{r['first_diff_gt_0.5']} "
               f"per32={r['mean_abs_diff_per_32']}", flush=True)
