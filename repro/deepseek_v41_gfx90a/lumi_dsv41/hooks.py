@@ -355,7 +355,32 @@ def _metadata_builders(module) -> None:
     cls.create_metadata_builders = create_metadata_builders
 
 
+def _kv_cache_shapes(module) -> None:
+    """Upstream backends no longer implement get_kv_cache_shape: the worker derives a
+    [blocks, head slots, states, state content] page from the spec. 0.26's reshape asks
+    the backend; fall back to upstream's layout when the backend does not answer. Here
+    block_size is already the kernel block in states (storage_block_size)."""
+    from vllm.utils.torch_utils import get_dtype_size
+
+    def _lumi_kv_cache_shape(backend, spec, num_blocks, block_size, num_kv_heads,
+                             head_size, cache_dtype_str="auto"):
+        try:
+            return backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                              head_size, cache_dtype_str=cache_dtype_str)
+        except NotImplementedError:
+            content = spec.state_content_size_bytes
+            dtype_size = get_dtype_size(spec.dtype)
+            assert content % dtype_size == 0, (spec, content)
+            return (num_blocks, num_kv_heads, block_size, content // dtype_size)
+
+    module._lumi_kv_cache_shape = _lumi_kv_cache_shape
+    _source_patch(module, "_reshape_kv_cache",
+                  "kv_cache_shape = group.backend.get_kv_cache_shape(",
+                  "kv_cache_shape = _lumi_kv_cache_shape(group.backend, kv_cache_spec, ")
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
