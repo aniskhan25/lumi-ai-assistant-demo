@@ -56,6 +56,7 @@ vllm/v1/kv_cache_layout.py
 vllm/config/engram.py
 
 [SHADOW]
+vllm/model_executor/kernels/mhc/torch.py
 vllm/model_executor/kernels/mhc/triton.py
 vllm/model_executor/layers/mhc.py
 vllm/model_executor/layers/sparse_attn_indexer.py

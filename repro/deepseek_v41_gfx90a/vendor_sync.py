@@ -54,6 +54,7 @@ GRAFT = [
     "v1/kv_cache_interface.py",
 ]
 SHADOW = [
+    "model_executor/kernels/mhc/torch.py",
     "model_executor/kernels/mhc/triton.py",
     "model_executor/layers/mhc.py",
     "model_executor/layers/sparse_attn_indexer.py",

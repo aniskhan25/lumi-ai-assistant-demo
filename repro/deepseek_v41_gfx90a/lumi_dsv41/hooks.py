@@ -193,7 +193,16 @@ def _mhc_no_tilelang(module) -> None:
         module.HAS_TILELANG_MHC = False
 
 
+def _mhc_kernels(module) -> None:
+    """0.26's kernels/mhc package re-exports its own torch fallbacks; upstream's adds the
+    delayed pre (kernels/mhc/torch.py, vendored)."""
+    from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
+
+    module.mhc_pre_delayed_torch = mhc_pre_delayed_torch
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.model_executor.kernels.mhc"] = [_mhc_kernels]
 HOOKS["vllm._aiter_ops"] = [_aiter_ops]
 HOOKS["vllm.platforms.rocm"].append(_rocm_platform)
 HOOKS["vllm.envs"] = [_envs]
