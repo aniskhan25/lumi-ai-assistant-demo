@@ -67,6 +67,14 @@ class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
     def get_model_state_cls():
         return DeepseekV41ModelState
 
+    def forward(self, *args, **kwargs):
+        # load_weights() derives the mHC broadcast weights after loading; with
+        # --load-format dummy it never runs, so derive them on first use.
+        if not getattr(self, "_mhc_finalized", False):
+            self.model.finalize_mhc_broadcast_weights()
+            self._mhc_finalized = True
+        return super().forward(*args, **kwargs)
+
 
 @triton.jit
 def _gather_lookback_kernel(
