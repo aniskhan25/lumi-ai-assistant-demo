@@ -379,7 +379,23 @@ def _kv_cache_shapes(module) -> None:
                   "kv_cache_shape = _lumi_kv_cache_shape(group.backend, kv_cache_spec, ")
 
 
+def _backend_block_dim(module) -> None:
+    """Upstream backends define no get_kv_cache_shape; their [B, H, N, C] pages have the
+    block index first (see _kv_cache_shapes)."""
+    cls = module.AttentionBackend
+    stock = cls.get_kv_cache_block_dim.__func__
+
+    def get_kv_cache_block_dim(cls, *args, **kwargs) -> int:
+        try:
+            return stock(cls, *args, **kwargs)
+        except NotImplementedError:
+            return 0
+
+    cls.get_kv_cache_block_dim = classmethod(get_kv_cache_block_dim)
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
 HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
