@@ -287,17 +287,23 @@ def _group_rings(module) -> None:
 
 
 def _source_patch(module, name, old, new, extra_globals=None) -> None:
-    """Re-define module.name from its own source with one exact text replacement."""
+    """Re-define module.name (or module.Class.method) from its own source with one
+    exact text replacement."""
     import inspect
     import textwrap
 
-    source = textwrap.dedent(inspect.getsource(getattr(module, name)))
+    owner_name, _, attr = name.rpartition(".")
+    owner = getattr(module, owner_name) if owner_name else module
+    target = owner.__dict__[attr] if owner_name else getattr(module, attr)
+    source = textwrap.dedent(inspect.getsource(target))
     if source.count(old) != 1:
         raise RuntimeError(f"lumi_dsv41: cannot patch {module.__name__}.{name}: "
                            f"{old!r} found {source.count(old)} times")
     module.__dict__.update(extra_globals or {})
+    scope = {}
     exec(compile(source.replace(old, new), inspect.getsourcefile(module), "exec"),
-         module.__dict__)
+         module.__dict__, scope)
+    setattr(owner, attr, scope[attr])
 
 
 def _debug_kv_groups(module) -> None:
@@ -485,9 +491,23 @@ def _indexer_gate(module) -> None:
     cls.forward_hip = forward_hip
 
 
+def _v41_attention(module) -> None:
+    """V4.1's query skips V4's per-head norm; 0.26's fused kernel always applies it.
+    Route the call to ops.py (KV side still on 0.26's kernel; query in PyTorch)."""
+    from . import ops
+
+    _source_patch(
+        module, "DeepseekV4Attention._fused_qnorm_rope_kv_insert",
+        "torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(",
+        "_lumi_qnorm_rope_kv_rope_quant_insert(",
+        extra_globals={"_lumi_qnorm_rope_kv_rope_quant_insert": ops.qnorm_rope_kv_rope_quant_insert},
+    )
+
+
 # Functions run on vendored (upstream) modules right after they execute.
 VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [_indexer_op],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
+    "vllm.models.deepseek_v41.attention": [_v41_attention],
 }
