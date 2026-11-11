@@ -7,7 +7,7 @@ quantization registrations. Put the parent directory on PYTHONPATH.
 """
 
 ARCH = "DeepseekV41ForCausalLM"
-MODEL = "vllm.models.deepseek_v41.amd.model:DeepseekV41LLMForCausalLM"
+MODEL = "lumi_dsv41.model:DeepseekV41ForCausalLM"
 
 
 def register() -> None:
@@ -25,6 +25,7 @@ def register() -> None:
     if ARCH not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model(ARCH, MODEL)
     model_configs.MODELS_CONFIG_MAP[ARCH] = _config_class(model_configs)
+    from . import quant  # noqa: F401 - registers the deepseek_v41_fp8 method
 
 
 def _config_class(model_configs):
