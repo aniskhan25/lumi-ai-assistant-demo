@@ -66,6 +66,10 @@ CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m5
 REPO="${SLURM_SUBMIT_DIR:-$(pwd)}"
 MODEL_DIR="models--deepseek-ai--DeepSeek-V4-Flash"; [ "${V41:-0}" = 1 ] && MODEL_DIR="models--deepseek-ai--DeepSeek-V4.1-Flash"
 SNAPSHOT="$(ls -d /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/${MODEL_DIR}/snapshots/* | head -n1)"
+# V4.1 loads from the LUMI-F copy (stage_flash.sh) when present: from scratch, 8 ranks
+# each reading 476 GB took >1 h (the page cache cannot hold it beside the pinned Engram).
+FLASH="/flash/${SLURM_JOB_ACCOUNT}/${USER}/DeepSeek-V4.1-Flash"
+[ "${V41:-0}" = 1 ] && [ -f "${FLASH}/config.json" ] && SNAPSHOT="${FLASH}"
 GSM8K="$(ls /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/datasets--openai--gsm8k/snapshots/*/main/test-00000-of-00001.parquet | head -n1)"
 PORT="$((20000 + ${SLURM_JOB_ID} % 20000))"   # shared nodes share ports
 LOG="${REPO}/benchmarks/results/dsv4$([ "${V41:-0}" = 1 ] && echo 1)-flash/job_${SLURM_JOB_ID}"
@@ -170,7 +174,7 @@ if [ "${PLUGIN}" = 1 ]; then
 fi
 SECONDS=0
 until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; do
-  if ! kill -0 "${SERVER}" 2>/dev/null || [ "${SECONDS}" -gt 3600 ]; then
+  if ! kill -0 "${SERVER}" 2>/dev/null || [ "${SECONDS}" -gt "${READY_TIMEOUT:-3600}" ]; then
     echo "SERVER_FAILED after ${SECONDS}s"; grep -v amdsmi "${LOG}/server.log" | tail -80
     for f in "${LOG}"/server-rank*.log; do [ -f "${f}" ] && { echo "--- ${f}"; grep -v amdsmi "${f}" | tail -40; }; done
     exit 1
