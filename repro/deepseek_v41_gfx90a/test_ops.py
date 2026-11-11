@@ -1,6 +1,7 @@
 """lumi_dsv41.ops vs 0.26's compiled kernel, with the V4 query norm on (the kernel's only
 mode): the query path (norm, GPT-J RoPE, head padding) must match. One GCD."""
 import torch
+import vllm._custom_ops  # noqa: F401 - loads the _C ops
 
 from lumi_dsv41.ops import qnorm_rope_kv_rope_quant_insert
 
