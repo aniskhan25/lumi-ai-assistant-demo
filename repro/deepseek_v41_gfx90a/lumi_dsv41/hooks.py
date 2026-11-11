@@ -72,6 +72,36 @@ def _kv_cache_interface(module) -> None:
     CircularBufferSpec.__qualname__ = "CircularBufferSpec"
     module.CircularBufferSpec = CircularBufferSpec
     graft.apply(module)
+    _spec_state_properties(module)
+
+
+def _spec_state_properties(module) -> None:
+    """Upstream's per-state view of a page (tokens_per_state, num_states,
+    state_content_size_bytes), in terms of 0.26's compress_ratio (see kv_specs.py)."""
+    from vllm.utils.torch_utils import get_dtype_size
+
+    def tokens_per_state(self):
+        return getattr(self, "compress_ratio", 1)
+
+    def num_states(self):
+        return self.block_size // tokens_per_state(self)
+
+    def state_content_size_bytes(self):
+        if (getattr(self, "cache_dtype_str", None) == "fp8_ds_mla"
+                and getattr(self, "model_version", None) == "deepseek_v4"):
+            from . import kv_specs
+
+            return kv_specs.FP8_DS_MLA_STATE_BYTES
+        head_size_v = getattr(self, "head_size_v", self.head_size)
+        if isinstance(self, (module.MLAAttentionSpec, module.SlidingWindowMLASpec)):
+            head_size_v = 0  # one latent vector per state, no separate V
+        return (self.head_size + head_size_v) * get_dtype_size(self.dtype)
+
+    base = module.KVCacheSpec
+    for name, fn in (("tokens_per_state", tokens_per_state), ("num_states", num_states),
+                     ("state_content_size_bytes", state_content_size_bytes)):
+        if not hasattr(base, name):
+            setattr(base, name, property(fn))
 
 
 # Config fields upstream added after 0.26, as class-level defaults: instances that lack
