@@ -67,6 +67,13 @@ class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
     def get_model_state_cls():
         return DeepseekV41ModelState
 
+    def load_weights(self, weights):
+        # Language model only (vision_n_layers=0): the image-sentinel routing bias has
+        # no parameter; upstream skips the other vision tensors itself.
+        return super().load_weights(
+            (name, tensor) for name, tensor in weights if not name.endswith(".gate.bias_vl")
+        )
+
     def forward(self, *args, **kwargs):
         # load_weights() derives the mHC broadcast weights after loading; with
         # --load-format dummy it never runs, so derive them on first use.
