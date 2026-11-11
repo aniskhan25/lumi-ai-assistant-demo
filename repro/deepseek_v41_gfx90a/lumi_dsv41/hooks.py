@@ -220,6 +220,33 @@ def _multi_stream_utils(module) -> None:
     module.execute_in_parallel = execute_in_parallel
 
 
+def _group_rings(module) -> None:
+    """0.26's DeepSeek-V4 grouping (group_and_unify_kv_cache_specs) knows only the MLA
+    and sliding-window MLA specs and drops anything else; V4.1's compressor keeps its open
+    token group in a CircularBufferSpec ring. Give the rings their own uniform group(s)."""
+    from collections import defaultdict
+
+    from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
+
+    stock = module.group_and_unify_kv_cache_specs
+
+    def group_and_unify_kv_cache_specs(kv_cache_spec):
+        rings = {n: s for n, s in kv_cache_spec.items() if isinstance(s, CircularBufferSpec)}
+        groups = stock({n: s for n, s in kv_cache_spec.items() if n not in rings})
+        if groups is None or not rings:
+            return groups
+        by_size = defaultdict(dict)
+        for name, spec in rings.items():
+            by_size[spec.block_size][name] = spec
+        for specs in by_size.values():
+            uniform = UniformTypeKVCacheSpecs.from_specs(specs)
+            assert uniform is not None
+            groups.append(uniform)
+        return groups
+
+    module.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
+
+
 def _debug_kv_groups(module) -> None:
     """DSV41_DEBUG_KV=1: log the KV cache groups and any layer left out of them."""
     import os
@@ -247,7 +274,7 @@ def _debug_kv_groups(module) -> None:
 
 
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
-HOOKS["vllm.v1.core.kv_cache_utils"] = [_debug_kv_groups]
+HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]
 HOOKS["vllm.model_executor.kernels.mhc"] = [_mhc_kernels]
