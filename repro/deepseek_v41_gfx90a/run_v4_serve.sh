@@ -117,6 +117,10 @@ echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEX
 if [ "${COMPILE:-0}" = 1 ]; then
   DEFAULT_EXTRA="--moe-backend triton_unfused --compilation-config {\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\"}"
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
+# V4.1 experts are 2304 wide. Under TP=8 each rank's 288 is rounded up to 512 by 0.26's
+# ROCm MXFP4 sizing (multiples of 256): 62 GiB of weights per GCD, OOM. Expert parallel
+# keeps whole experts (2304 = 9 x 256), no padding.
+[ "${V41:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --enable-expert-parallel"
 [ "${NO_ASYNC:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --no-async-scheduling"
 PROF_DIR="${LOG}/profile"
 [ "${PROFILE:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROF_DIR}\",\"ignore_frontend\":true}"

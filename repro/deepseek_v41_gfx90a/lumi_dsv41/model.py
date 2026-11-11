@@ -71,7 +71,7 @@ def _report_gpu_memory(model) -> None:
                 seen.add(t.data_ptr())
                 by_type[f"{type(mod).__name__}.{name}[{kind}] {t.dtype}"] += (
                     t.untyped_storage().nbytes())
-    log = init_logger(__name__)
+    log = init_logger("vllm.lumi_dsv41")  # vLLM configures only the vllm.* loggers
     total = sum(by_type.values())
     log.info("DSV41_DEBUG_MEM: allocated %.2f GiB, tensors %.2f GiB",
              torch.cuda.memory_allocated() / 2**30, total / 2**30)
