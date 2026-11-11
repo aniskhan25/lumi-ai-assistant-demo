@@ -359,6 +359,14 @@ def _metadata_builders(module) -> None:
         ]
 
     cls.create_metadata_builders = create_metadata_builders
+    # Upstream layers unpack their page view in bind_kv_cache() (e.g. [B, H=1, N, C] ->
+    # [B, N, C]); 0.26 assigns layer.kv_cache directly. Call the method when present.
+    module._lumi_bind_layer = lambda layer, kv_cache: (
+        layer.bind_kv_cache(kv_cache) if hasattr(layer, "bind_kv_cache")
+        else setattr(layer, "kv_cache", kv_cache))
+    _source_patch(module, "bind_kv_cache",
+                  "forward_context[layer_name].kv_cache = kv_cache",
+                  "_lumi_bind_layer(forward_context[layer_name], kv_cache)")
 
 
 def _kv_cache_shapes(module) -> None:
