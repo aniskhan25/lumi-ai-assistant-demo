@@ -400,9 +400,28 @@ def _backend_block_dim(module) -> None:
     cls.get_kv_cache_block_dim = classmethod(get_kv_cache_block_dim)
 
 
+def _debug_kv_views(module) -> None:
+    """DSV41_DEBUG_KV=1: log the shape/stride/dtype of every KV view 0.26 builds."""
+    import os
+
+    if os.environ.get("DSV41_DEBUG_KV") != "1":
+        return
+    stock = module._reshape_kv_cache
+
+    def _reshape_kv_cache(*args, **kwargs):
+        caches = stock(*args, **kwargs)
+        for name, t in caches.items():
+            if hasattr(t, "shape"):
+                print(f"[DSV41_DEBUG_KV] view {name}: {tuple(t.shape)} {tuple(t.stride())} "
+                      f"{t.dtype}", flush=True)
+        return caches
+
+    module._reshape_kv_cache = _reshape_kv_cache
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
 HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
-HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes]
+HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes, _debug_kv_views]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
