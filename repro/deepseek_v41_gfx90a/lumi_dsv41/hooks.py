@@ -470,6 +470,30 @@ def _indexer_op(module) -> None:
     )
 
 
+def _chunked_mqa_logits(module) -> None:
+    """The indexer's torch MQA-logits fallback materialises a dense fp32 [heads, rows, kv]
+    score in one go (4 GiB for an 8k-row prefill chunk at 12k context: OOM next to the
+    KV cache). Rows are independent: compute them in chunks of ~512 MiB of scores, the
+    same arithmetic per row (V4 plugin, job 23494641)."""
+    import torch
+
+    stock = module.fp8_mqa_logits_torch
+
+    def fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke):
+        m, h, n = q.shape[0], q.shape[1], kv[0].shape[0]
+        rows = max(1, (512 << 20) // max(1, h * n * 4))
+        if rows >= m:
+            return stock(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+        out = torch.empty(m, n, dtype=torch.float32, device=q.device)
+        for start in range(0, m, rows):
+            end = min(m, start + rows)
+            out[start:end] = stock(q[start:end], kv, weights[start:end],
+                                   cu_seqlen_ks[start:end], cu_seqlen_ke[start:end])
+        return out
+
+    module.fp8_mqa_logits_torch = fp8_mqa_logits_torch
+
+
 def _indexer_gate(module) -> None:
     """Upstream's SparseAttnIndexer.forward_hip runs the op only with aiter or on gfx950
     and raises otherwise; on gfx90a make the identical call (op registered above)."""
@@ -534,7 +558,7 @@ def _v41_attention(module) -> None:
 # Functions run on vendored (upstream) modules right after they execute.
 VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
-    "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [_indexer_op],
+    "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [_indexer_op, _chunked_mqa_logits],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }
