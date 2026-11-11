@@ -34,11 +34,13 @@ NEW = [
     "transformers_utils/configs/deepseek_v41.py",
     "models/common/__init__.py",
     "v1/kv_cache_layout.py",
+    "config/engram.py",
 ]
 # Engine modules: never loaded from here; shims.py execs single definitions from them
 # (see GRAFTS there) inside 0.26's module of the same name.
 GRAFT = [
     "config/multimodal.py",
+    "config/utils.py",
     "distributed/device_communicators/shm_broadcast.py",
     "distributed/kv_transfer/kv_connector/utils.py",
     "forward_context.py",

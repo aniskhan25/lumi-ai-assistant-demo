@@ -19,6 +19,7 @@ GRAFT_ROOT = ROOT / "vendor" / "graft" / "vllm"
 
 GRAFTS = {
     "vllm.config.multimodal": ["MultiModalDummyOptions"],
+    "vllm.config.utils": ["CompileFactors", "get_compile_factors"],
     "vllm.distributed.device_communicators.shm_broadcast": ["SHM_PATH", "check_shm_free_space"],
     "vllm.distributed.kv_transfer.kv_connector.utils": ["kv_connector_may_load_foreign_kv"],
     "vllm.forward_context": ["in_piecewise_cudagraph"],

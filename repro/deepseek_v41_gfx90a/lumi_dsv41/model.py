@@ -30,6 +30,15 @@ def _set_missing_defaults(vllm_config) -> None:
         for name, value in fields.items():
             if not hasattr(config, name):
                 object.__setattr__(config, name, value)
+    if getattr(vllm_config, "engram_config", None) is None:
+        # Upstream VllmConfig._resolve_and_verify_engram_config, for a model with Engram.
+        from vllm.config.engram import EngramConfig  # vendored, new since 0.26
+
+        engram = EngramConfig()
+        engram.verify_model_config(vllm_config.model_config)
+        engram.resolve_dp_shared_memory(vllm_config.parallel_config)
+        engram.verify_parallel_config(vllm_config.parallel_config)
+        object.__setattr__(vllm_config, "engram_config", engram)
 
 
 class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):

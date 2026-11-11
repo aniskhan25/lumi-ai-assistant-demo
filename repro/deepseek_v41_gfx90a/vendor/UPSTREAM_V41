@@ -53,6 +53,7 @@ vllm/transformers_utils/deepseek_v4_utils.py
 vllm/transformers_utils/configs/deepseek_v41.py
 vllm/models/common/__init__.py
 vllm/v1/kv_cache_layout.py
+vllm/config/engram.py
 
 [SHADOW]
 vllm/model_executor/kernels/mhc/triton.py
@@ -71,6 +72,7 @@ vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
 
 [GRAFT]
 vllm/config/multimodal.py
+vllm/config/utils.py
 vllm/distributed/device_communicators/shm_broadcast.py
 vllm/distributed/kv_transfer/kv_connector/utils.py
 vllm/forward_context.py
