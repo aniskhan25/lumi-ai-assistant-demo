@@ -234,7 +234,82 @@ HOOKS["vllm.distributed.parallel_state"] = [_engram_dp]
 HOOKS["vllm.distributed"] = [_engram_dp]
 HOOKS["vllm.v1.kv_cache_interface"] = [_kv_cache_interface]
 
+def _indexer_op(module) -> None:
+    """Register the ROCm sparse indexer op without aiter, as upstream does on gfx950:
+    every step inside it has a non-aiter path (Triton cache insert and gather, compiled
+    top-k, torch/Triton MQA logits); V4's INDEXER_GATE finding."""
+    import torch
+
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    if not current_platform.is_rocm():
+        return
+    try:
+        torch.ops.vllm.rocm_aiter_sparse_attn_indexer
+        return
+    except (AttributeError, RuntimeError):
+        pass
+    direct_register_custom_op(
+        op_name="rocm_aiter_sparse_attn_indexer",
+        op_func=module.rocm_aiter_sparse_attn_indexer,
+        mutates_args=["topk_indices_buffer", "candidate_blocks"],
+        fake_impl=module.rocm_aiter_sparse_attn_indexer_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+
+def _indexer_gate(module) -> None:
+    """Upstream's SparseAttnIndexer.forward_hip runs the op only with aiter or on gfx950
+    and raises otherwise; on gfx90a make the identical call (op registered above)."""
+    import torch
+
+    cls = module.SparseAttnIndexer
+    stock = cls.forward_hip
+
+    def forward_hip(self, hidden_states, q_quant, k, weights):
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import on_gfx950
+
+        if rocm_aiter_ops.is_enabled() or on_gfx950():
+            return stock(self, hidden_states, q_quant, k, weights)
+        assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
+        assert isinstance(q_quant, torch.Tensor)
+        import vllm.v1.attention.ops.rocm_aiter_mla_sparse  # noqa: F401 - registers the op
+
+        return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            hidden_states,
+            module._encode_layer_name(self.k_cache.prefix),
+            self.k_cache.kv_cache,
+            q_quant,
+            k,
+            weights,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+            skip_k_cache_insert=self.skip_k_cache_insert,
+            compress_ratio=self.compress_ratio,
+            candidate_blocks=self.candidate_blocks,
+            candidate_block_size=self.candidate_block_size,
+            candidate_write=self.candidate_write,
+            use_pcp=self.use_pcp,
+            pcp_shard_decode_requests=self.pcp_shard_decode_requests,
+            cache_layout=self.cache_layout,
+            dcp_rank=self.dcp_rank,
+            dcp_world_size=self.dcp_world_size,
+            cp_interleave=self._parallel_config.cp_kv_cache_interleave_size,
+        )
+
+    cls.forward_hip = forward_hip
+
+
 # Functions run on vendored (upstream) modules right after they execute.
 VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
+    "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [_indexer_op],
+    "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
 }
