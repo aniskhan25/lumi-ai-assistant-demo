@@ -37,6 +37,8 @@ def _config_class(model_configs):
             # Upstream routes "fp8" to deepseek_v41.quant_config for this model type;
             # 0.26 only knows V4's, so V4.1's gets its own method name (quant.py).
             for hf in (model_config.hf_config, model_config.hf_text_config):
+                # Language model only: no vision tower, so no image-sentinel routing.
+                hf.vision_n_layers = 0
                 quant = getattr(hf, "quantization_config", None)
                 if quant is not None and quant.get("quant_method") == "fp8":
                     quant["quant_method"] = "deepseek_v41_fp8"

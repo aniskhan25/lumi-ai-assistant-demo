@@ -31,6 +31,29 @@ def _set_missing_defaults(vllm_config) -> None:
         object.__setattr__(vllm_config, "engram_config", engram)
 
 
+def _moe_fields() -> None:
+    """Upstream's V4.1 MoE subclasses the ROCm V4 MoE and fills in the protocol fields an
+    older base lacks; 0.26's base also lacks these two."""
+    cls = upstream.DeepseekV4MoE
+    if getattr(cls, "_lumi_dsv41", False):
+        return
+    init = cls.__init__
+
+    def __init__(self, vllm_config, *args, **kwargs):
+        init(self, vllm_config, *args, **kwargs)
+        config = vllm_config.model_config.hf_config
+        if not hasattr(self, "n_shared_experts"):
+            self.n_shared_experts = config.n_shared_experts
+        if not hasattr(self, "use_mega_moe"):
+            self.use_mega_moe = False
+
+    cls.__init__ = __init__
+    cls._lumi_dsv41 = True
+
+
+_moe_fields()
+
+
 class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
     def __init__(self, *, vllm_config, prefix: str = ""):
         _set_missing_defaults(vllm_config)
