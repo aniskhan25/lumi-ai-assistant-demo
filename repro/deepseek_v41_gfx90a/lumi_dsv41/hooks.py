@@ -326,7 +326,37 @@ def _debug_kv_groups(module) -> None:
     module.get_kv_cache_groups = get_kv_cache_groups
 
 
+def _metadata_builders(module) -> None:
+    """Upstream's AttentionGroup passes block_table_width to builders that declare
+    requires_block_table_width (V4.1's indexer). Pass the width of the block table 0.26's
+    Model Runner V2 actually builds for a full-attention group, cdiv(max_model_len,
+    block_size) per KV block, since the builder copies rows of it into its buffer."""
+    from vllm.utils.math_utils import cdiv
+
+    cls = module.AttentionGroup
+
+    def create_metadata_builders(self, vllm_config, device, kernel_block_size=None,
+                                 num_metadata_builders: int = 1):
+        spec = self.kv_cache_spec
+        spec_builder = (spec.copy_with_new_block_size(kernel_block_size)
+                        if kernel_block_size is not None else spec)
+        builder_cls = self.backend.get_builder_cls()
+        kwargs = {}
+        if getattr(builder_cls, "requires_block_table_width", False):
+            width = cdiv(vllm_config.model_config.max_model_len, spec.block_size)
+            if kernel_block_size is not None:
+                width *= spec.block_size // kernel_block_size
+            kwargs["block_table_width"] = width
+        self.metadata_builders = [
+            builder_cls(spec_builder, self.layer_names, vllm_config, device, **kwargs)
+            for _ in range(num_metadata_builders)
+        ]
+
+    cls.create_metadata_builders = create_metadata_builders
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]
