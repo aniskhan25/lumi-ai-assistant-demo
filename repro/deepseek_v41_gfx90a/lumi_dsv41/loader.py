@@ -90,6 +90,10 @@ class _ShadowLoader(importlib.machinery.SourceFileLoader):
 
     def exec_module(self, module):
         super().exec_module(module)
+        if "MLAAttentionSpec" in module.__dict__ or "SlidingWindowMLASpec" in module.__dict__:
+            from . import kv_specs  # upstream spec arguments -> 0.26 specs
+
+            kv_specs.install_in(module)
         if self.old_origin is None:
             return
         own = module.__dict__.get("__getattr__")
