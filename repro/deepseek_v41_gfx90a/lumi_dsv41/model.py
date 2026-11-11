@@ -9,6 +9,8 @@
 - Engine config fields upstream reads that 0.26 does not have are set to their defaults.
 """
 
+import collections
+import os
 from typing import Any
 
 import torch
@@ -54,6 +56,29 @@ def _moe_fields() -> None:
 _moe_fields()
 
 
+def _report_gpu_memory(model) -> None:
+    """DSV41_DEBUG_MEM=1: GPU bytes of parameters and buffers by owning module type."""
+    from vllm.logger import init_logger
+
+    by_type = collections.Counter()
+    seen = set()
+    for mod_name, mod in model.named_modules():
+        for kind, items in (("p", mod.named_parameters(recurse=False)),
+                            ("b", mod.named_buffers(recurse=False))):
+            for name, t in items:
+                if t is None or not t.is_cuda or t.data_ptr() in seen:
+                    continue
+                seen.add(t.data_ptr())
+                by_type[f"{type(mod).__name__}.{name}[{kind}] {t.dtype}"] += (
+                    t.untyped_storage().nbytes())
+    log = init_logger(__name__)
+    total = sum(by_type.values())
+    log.info("DSV41_DEBUG_MEM: allocated %.2f GiB, tensors %.2f GiB",
+             torch.cuda.memory_allocated() / 2**30, total / 2**30)
+    for key, nbytes in by_type.most_common(25):
+        log.info("DSV41_DEBUG_MEM: %8.3f GiB %s", nbytes / 2**30, key)
+
+
 class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
     def __init__(self, *, vllm_config, prefix: str = ""):
         _set_missing_defaults(vllm_config)
@@ -62,6 +87,8 @@ class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
         self.hf_to_vllm_mapper = upstream._make_deepseek_v4_weights_mapper(
             expert_dtype, "weight_scale_inv"
         )
+        if os.environ.get("DSV41_DEBUG_MEM") == "1":
+            _report_gpu_memory(self)
 
     @staticmethod
     def get_model_state_cls():
