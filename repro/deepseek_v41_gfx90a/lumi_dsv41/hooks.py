@@ -494,6 +494,27 @@ def _chunked_mqa_logits(module) -> None:
     module.fp8_mqa_logits_torch = fp8_mqa_logits_torch
 
 
+# (max_num_seqs, num_speculative_tokens), set by the model's __init__ (model.py).
+SERVING_LIMITS: tuple[int, int] | None = None
+
+
+def _decode_rows_bound(module) -> None:
+    """Upstream bounds the decode-logits workspace rows by max_num_seqs through
+    get_current_vllm_config(), which under 0.26 does not return the serving config in the
+    profiling forward: the bound falls back to max_num_batched_tokens and gfx90a's
+    [heads, rows, max_model_len] fp32 reservation becomes 32 GiB (8192 rows, 32k context)
+    instead of 128 MiB. Use the limits captured when the model was built."""
+    stock = module._max_decode_logits_rows
+
+    def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+        if SERVING_LIMITS is None:
+            return stock(num_batched_tokens)
+        max_num_seqs, num_spec = SERVING_LIMITS
+        return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
+
+    module._max_decode_logits_rows = _max_decode_logits_rows
+
+
 def _indexer_gate(module) -> None:
     """Upstream's SparseAttnIndexer.forward_hip runs the op only with aiter or on gfx950
     and raises otherwise; on gfx90a make the identical call (op registered above)."""
@@ -558,7 +579,8 @@ def _v41_attention(module) -> None:
 # Functions run on vendored (upstream) modules right after they execute.
 VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
-    "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [_indexer_op, _chunked_mqa_logits],
+    "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
+        _indexer_op, _chunked_mqa_logits, _decode_rows_bound],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }

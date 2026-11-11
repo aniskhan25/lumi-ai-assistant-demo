@@ -82,6 +82,11 @@ def _report_gpu_memory(model) -> None:
 class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
     def __init__(self, *, vllm_config, prefix: str = ""):
         _set_missing_defaults(vllm_config)
+        from lumi_dsv41 import hooks
+
+        spec = vllm_config.speculative_config
+        hooks.SERVING_LIMITS = (vllm_config.scheduler_config.max_num_seqs,
+                                getattr(spec, "num_speculative_tokens", 0) or 0)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         expert_dtype = getattr(self.config, "expert_dtype", "fp4")
         self.hf_to_vllm_mapper = upstream._make_deepseek_v4_weights_mapper(
