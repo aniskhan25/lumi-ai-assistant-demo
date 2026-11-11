@@ -220,7 +220,31 @@ def _multi_stream_utils(module) -> None:
     module.execute_in_parallel = execute_in_parallel
 
 
+def _debug_kv_groups(module) -> None:
+    """DSV41_DEBUG_KV=1: log the KV cache groups and any layer left out of them."""
+    import os
+
+    if os.environ.get("DSV41_DEBUG_KV") != "1":
+        return
+    stock = module.get_kv_cache_groups
+
+    def get_kv_cache_groups(vllm_config, kv_cache_spec):
+        specs = dict(kv_cache_spec)
+        groups = stock(vllm_config, kv_cache_spec)
+        grouped = {n for g in groups for n in g.layer_names}
+        for i, g in enumerate(groups):
+            print(f"[DSV41_DEBUG_KV] group {i}: {type(g.kv_cache_spec).__name__} "
+                  f"{len(g.layer_names)} layers {g.layer_names[:4]}...", flush=True)
+        for name, spec in specs.items():
+            if name not in grouped:
+                print(f"[DSV41_DEBUG_KV] UNGROUPED {name}: {spec}", flush=True)
+        return groups
+
+    module.get_kv_cache_groups = get_kv_cache_groups
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.v1.core.kv_cache_utils"] = [_debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]
 HOOKS["vllm.model_executor.kernels.mhc"] = [_mhc_kernels]
