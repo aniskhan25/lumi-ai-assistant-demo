@@ -578,6 +578,55 @@ def _paged_logits_unshuffle(module) -> None:
     module.fp8_paged_mqa_logits_torch = fp8_paged_mqa_logits_torch
 
 
+def _paged_logits_triton(module) -> None:
+    """Decode logits off gfx942/950 without aiter: one batched Triton launch with no host
+    sync (paged_logits.py) instead of the per-sequence torch loop above, so the indexer can
+    sit inside a CUDA graph and does not grow with the batch. On with DSV41_TRITON_LOGITS=1
+    (run_v4_serve.sh TRITON_LOGITS=1); DSV41_LOGITS_CHECK=N compares the first N calls with
+    the torch loop."""
+    import os
+
+    if module._ON_GFX942 or module._ON_GFX950 or os.environ.get("DSV41_TRITON_LOGITS") != "1":
+        return
+    import torch
+
+    from vllm.logger import init_logger
+
+    from .paged_logits import fp8_paged_mqa_logits_triton
+
+    log = init_logger("vllm.lumi_dsv41.paged_logits")
+    stock = module.rocm_fp8_paged_mqa_logits
+    checks = {"left": int(os.environ.get("DSV41_LOGITS_CHECK", "0")), "logged": False}
+
+    def rocm_fp8_paged_mqa_logits(q_fp8, kv_cache_fp8, weights, context_lens, block_tables,
+                                  schedule_metadata, max_model_len, **kw):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_enabled() or q_fp8.shape[1] != 1:
+            return stock(q_fp8, kv_cache_fp8, weights, context_lens, block_tables,
+                         schedule_metadata, max_model_len, **kw)
+        # The writer tiles iff block_size > 1 (indexer_k_store.py).
+        shuffle = kv_cache_fp8.shape[1] > 1
+        if not checks["logged"]:
+            checks["logged"] = True
+            log.info("Triton decode logits: q %s, kv %s, shuffle=%s, max_model_len %d",
+                     tuple(q_fp8.shape), tuple(kv_cache_fp8.shape), shuffle, max_model_len)
+        out = fp8_paged_mqa_logits_triton(q_fp8, kv_cache_fp8, weights, context_lens,
+                                          block_tables, max_model_len, shuffle)
+        if checks["left"] > 0:
+            checks["left"] -= 1
+            want = module.fp8_paged_mqa_logits_torch(q_fp8, kv_cache_fp8, weights,
+                                                     context_lens, block_tables, max_model_len)
+            fin = torch.isfinite(want)
+            err = (out[fin] - want[fin]).abs().max().item() if fin.any() else 0.0
+            log.info("Triton decode logits check: lens %s, -inf mask %s, max abs err %.3g",
+                     context_lens.reshape(-1).tolist()[:8],
+                     "same" if torch.equal(torch.isinf(out), torch.isinf(want)) else "DIFF", err)
+        return out
+
+    module.rocm_fp8_paged_mqa_logits = rocm_fp8_paged_mqa_logits
+
+
 def _indexer_gate(module) -> None:
     """Upstream's SparseAttnIndexer.forward_hip runs the op only with aiter or on gfx950
     and raises otherwise; on gfx90a make the identical call (op registered above)."""
@@ -681,7 +730,7 @@ VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
         _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
-        _paged_logits_unshuffle],
+        _paged_logits_unshuffle, _paged_logits_triton],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }

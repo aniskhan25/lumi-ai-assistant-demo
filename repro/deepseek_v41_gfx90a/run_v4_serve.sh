@@ -86,9 +86,13 @@ RUN=(singularity exec -B "${SHM}:/dev/shm")
 # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
 PLUGIN=0; { [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ]; } && PLUGIN=1
 if [ "${V41:-0}" = 1 ]; then
-  if [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ] || [ "${INDEXER_GATE:-0}" = 1 ] || [ "${TRITON_LOGITS:-0}" = 1 ]; then
-    echo "V41=1: TORCH_MHC/MHC_FIX/INDEXER_GATE/TRITON_LOGITS target 0.26's V4 modules, which V4.1 replaces"; exit 2
+  if [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ] || [ "${INDEXER_GATE:-0}" = 1 ]; then
+    echo "V41=1: TORCH_MHC/MHC_FIX/INDEXER_GATE target 0.26's V4 modules, which V4.1 replaces"; exit 2
   fi
+  # TRITON_LOGITS=1: lumi_dsv41's tiled-cache decode logits kernel (paged_logits.py)
+  # instead of upstream's per-sequence torch loop. LOGITS_CHECK=N compares N calls.
+  export DSV41_TRITON_LOGITS="${TRITON_LOGITS:-0}" DSV41_LOGITS_CHECK="${LOGITS_CHECK:-0}"
+  TRITON_LOGITS=0  # not the V4 plugin's kernel (row-major cache)
   PLUGIN=1; export VLLM_USE_V2_MODEL_RUNNER=1
 fi
 if [ "${PLUGIN}" = 1 ]; then
