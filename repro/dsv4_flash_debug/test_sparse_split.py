@@ -51,16 +51,37 @@ def run(gate, *args):
 
 
 def timed(fn, iters=50):
-    for _ in range(3):
-        fn()
+    """GPU time per call in us, from replays of a graph holding `iters` calls (serving
+    replays graphs, so eager host overhead would bias toward the one-launch fallback)."""
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            fn()
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for _ in range(iters):
+            fn()
+    g.replay()
     start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
     start.record()
-    for _ in range(iters):
-        fn()
+    for _ in range(5):
+        g.replay()
     end.record()
     torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters * 1e3
+    return start.elapsed_time(end) / (5 * iters) * 1e3
+
+
+def forced(splits, *args):
+    """Split path with a fixed split count instead of the gfx950-tuned heuristic."""
+    saved = m._decode_num_splits
+    m._decode_num_splits = lambda *a, **k: splits
+    try:
+        return run(True, *args)
+    finally:
+        m._decode_num_splits = saved
 
 
 swa = make_cache(256)
@@ -71,7 +92,10 @@ sparse_split.install()
 shim = m._rocm_sparse_attn_decode_ragged_triton
 m._rocm_sparse_attn_decode_ragged_triton = orig
 
-print(f"{'layer':<18} {'B':>4} {'max rel err':>12} {'fallback us':>12} {'split us':>9} {'speedup':>8}")
+SPLITS = (1, 2, 4, 8, 16)
+print(f"GPU us per call (graph replay); sN = split path forced to N splits; CUs={m._decode_cu_count()}")
+print(f"{'layer':<16} {'B':>4} {'rel err':>8} {'fallback':>9} {'auto':>11}"
+      + "".join(f"{'s' + str(n):>8}" for n in SPLITS))
 ok = True
 for layer, extra_len in (("SWA only", 0), ("ratio 4, top-k", 512), ("ratio 128", 16)):
     for B in (1, 4, 16, 32, 64, 128):
@@ -88,9 +112,14 @@ for layer, extra_len in (("SWA only", 0), ("ratio 4, top-k", 512), ("ratio 128",
         m._rocm_sparse_attn_decode_ragged_triton = orig
         err = ((out - ref).abs().max() / ref.abs().max()).item()
         good = err < 2e-2 and torch.isfinite(out).all().item() and torch.equal(out, via_shim)
+        for n in SPLITS:
+            e = ((forced(n, *args).float() - ref).abs().max() / ref.abs().max()).item()
+            good &= e < 2e-2
         ok &= good
+        auto = m._decode_num_splits(B, 1, 128, extra_len, 32)
         t_ref = timed(lambda: run(False, *args))
-        t_out = timed(lambda: run(True, *args))
-        print(f"{layer:<18} {B:>4} {err:>12.2e} {t_ref:>12.1f} {t_out:>9.1f} "
-              f"{t_ref / t_out:>7.1f}x{'' if good else '  MISMATCH'}")
+        t_auto = timed(lambda: run(True, *args))
+        ts = [timed(lambda: forced(n, *args)) for n in SPLITS]
+        print(f"{layer:<16} {B:>4} {err:>8.1e} {t_ref:>9.1f} {t_auto:>7.1f}/s{auto:<2}"
+              + "".join(f"{t:>8.1f}" for t in ts) + ("" if good else "  MISMATCH"))
 print("PASS" if ok else "FAIL")
