@@ -537,6 +537,47 @@ def _decode_inv_rope(module) -> None:
     module.rocm_sparse_attn_decode = rocm_sparse_attn_decode
 
 
+def _paged_logits_unshuffle(module) -> None:
+    """V4.1's indexer K writer (indexer_k_store.py) stores values on ROCm in the 16x16-tiled
+    ("SHUFFLE") layout, which prefill's gather and aiter's Preshuffle decode kernel read.
+    Without aiter, decode falls back to fp8_paged_mqa_logits_torch, which reads the values
+    row-major: permuted key bytes, wrong top-k once a context has more compressed
+    positions than index_topk (decode diverged from prefill from ~3k tokens on, job
+    23643490). Un-tile each gathered page: within a block, byte b of position p is at
+    [p // 16, b // 16, p % 16, b % 16]. Scales (fp32, one per position) are not tiled."""
+    import torch
+    import torch.nn.functional as F
+
+    stock = module.fp8_paged_mqa_logits_torch
+    fp8 = module.FP8_DTYPE
+    tile = 16
+
+    def fp8_paged_mqa_logits_torch(q, kv_cache, weights, context_lens, block_tables,
+                                   max_model_len):
+        batch, next_n, _, dim = q.shape
+        block = kv_cache.shape[1]
+        if next_n != 1 or block <= 1:  # untiled caches (the writer tiles iff block > 1)
+            return stock(q, kv_cache, weights, context_lens, block_tables, max_model_len)
+        assert block % tile == 0 and dim % tile == 0
+        logits = torch.full((batch, max_model_len), float("-inf"), device=q.device,
+                            dtype=torch.float32)
+        lens = context_lens.reshape(batch, -1)[:, -1].tolist()
+        flat = kv_cache.view(kv_cache.shape[0], -1)
+        for i, seq_len in enumerate(lens):
+            pages = -(-seq_len // block)
+            cache = flat[block_tables[i, :pages].long()]
+            values = (cache[:, : block * dim]
+                      .view(pages, block // tile, dim // tile, tile, tile)
+                      .permute(0, 1, 3, 2, 4).reshape(pages * block, dim))
+            scales = cache[:, block * dim:].contiguous().view(torch.float32).reshape(-1)
+            score = F.relu(F.linear(values.view(fp8).float(), q[i, 0].float()))
+            score = (score * weights[i][None, :]).sum(dim=1) * scales
+            logits[i, :seq_len] = score[:seq_len]
+        return logits
+
+    module.fp8_paged_mqa_logits_torch = fp8_paged_mqa_logits_torch
+
+
 def _indexer_gate(module) -> None:
     """Upstream's SparseAttnIndexer.forward_hip runs the op only with aiter or on gfx950
     and raises otherwise; on gfx90a make the identical call (op registered above)."""
@@ -639,7 +680,8 @@ VENDORED_HOOKS = {
     "vllm.models.deepseek_v41.common.engram": [_debug_engram],
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
-        _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope],
+        _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
+        _paged_logits_unshuffle],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }
