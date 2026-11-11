@@ -12,7 +12,7 @@ export VLLM_USE_V2_MODEL_RUNNER=1 AMDGCN_USE_BUFFER_OPS="${AMDGCN_USE_BUFFER_OPS
 export HF_HUB_OFFLINE=1 VLLM_CACHE_ROOT="/scratch/project_462000131/${USER}/vllm-cache"
 PORT=$((30000 + RANDOM % 20000))
 vllm serve "${TINY}" --served-model-name tiny --port "${PORT}" --load-format dummy \
-  --tensor-parallel-size 1 --max-model-len 16384 --max-num-seqs 8 --max-num-batched-tokens 4096 \
+  --tensor-parallel-size "${TP:-1}" --max-model-len 16384 --max-num-seqs 8 --max-num-batched-tokens 4096 \
   --gpu-memory-utilization 0.85 --no-enable-prefix-caching --kv-cache-dtype fp8 \
   --moe-backend triton_unfused ${EAGER---enforce-eager} ${EXTRA:-} > "${LOG}" 2>&1 &
 SERVER=$!
