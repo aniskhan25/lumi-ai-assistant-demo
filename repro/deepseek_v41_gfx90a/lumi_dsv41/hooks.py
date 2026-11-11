@@ -208,7 +208,20 @@ def _fp8_utils(module) -> None:
         module.get_fp8_block_weight_scale = lambda layer: getattr(layer, "weight_scale_inv", None)
 
 
+def _multi_stream_utils(module) -> None:
+    """Upstream's execute_in_parallel(default_first=...) orders the default stream's
+    work only when multi-stream runs; the plugin keeps it off (enable=False), where both
+    run sequentially, default first."""
+    stock = module.execute_in_parallel
+
+    def execute_in_parallel(*args, default_first: bool = False, **kwargs):
+        return stock(*args, **kwargs)
+
+    module.execute_in_parallel = execute_in_parallel
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]
 HOOKS["vllm.model_executor.kernels.mhc"] = [_mhc_kernels]
 HOOKS["vllm._aiter_ops"] = [_aiter_ops]

@@ -62,6 +62,9 @@ vllm/model_executor/layers/mhc.py
 vllm/model_executor/layers/sparse_attn_indexer.py
 vllm/models/deepseek_v4/attention.py
 vllm/models/deepseek_v4/common/ops/cache_utils.py
+vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py
+vllm/models/deepseek_v4/common/ops/fused_indexer_q.py
+vllm/models/deepseek_v4/common/ops/fused_inv_rope_fp8_quant.py
 vllm/models/deepseek_v4/common/ops/save_partial_states.py
 vllm/models/deepseek_v4/compressor.py
 vllm/v1/attention/backends/mla/compressor_utils.py
