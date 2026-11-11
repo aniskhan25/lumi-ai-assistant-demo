@@ -192,6 +192,13 @@ grep -hE "Loading weights took|Model loading took|backend|KV cache|Maximum concu
 STATUS=0
 # The Qwen3.8 branch's smoke_requests.py is not on this branch; the probe covers the
 # same ground for correctness (non-finite logprobs, garbage, 2.3k/18.2k needle, GSM8K).
+# DIAG=1: decode vs prefill logprobs on the same tokens, and gold-solution NLL
+# (decode_vs_prefill.py), before the probe.
+if [ "${DIAG:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/decode_vs_prefill.py" \
+    --base-url "http://127.0.0.1:${PORT}" --model dsv4 --gsm8k-parquet "${GSM8K}" \
+    --out "${LOG}/diag.json" || STATUS=1
+fi
 if [ "${PROBE:-1}" = 1 ]; then
   "${RUN[@]}" python "${REPO}/repro/lexivo_mimo_gfx90a/probe.py" \
     --base-url "http://127.0.0.1:${PORT}" --model dsv4 \

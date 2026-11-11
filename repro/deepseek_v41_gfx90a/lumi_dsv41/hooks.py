@@ -577,7 +577,44 @@ def _v41_attention(module) -> None:
 
 
 # Functions run on vendored (upstream) modules right after they execute.
+def _debug_engram(module) -> None:
+    """DSV41_DEBUG_ENGRAM=1: log the first real and the first skipped n-gram hash, and the
+    lookback ids of the first decode-only batch, to check Engram sees real hashes."""
+    import os
+
+    if os.environ.get("DSV41_DEBUG_ENGRAM") != "1":
+        return
+    from vllm.logger import init_logger
+
+    log = init_logger("vllm.lumi_dsv41.engram")
+    cls = module.NgramHashState
+    ensure, call = cls.ensure_cache, cls.forward
+    seen = set()
+
+    def ensure_cache(self):
+        ok = ensure(self)
+        if ok not in seen:
+            seen.add(ok)
+            log.info("DSV41_DEBUG_ENGRAM: ensure_cache=%s (cache numel %d)", ok,
+                     self.swa_cache_module.kv_cache.numel())
+        return ok
+
+    def forward(self, input_ids, positions, query_start_loc, *args):
+        out = call(self, input_ids, positions, query_start_loc, *args)
+        n = query_start_loc.numel() - 1
+        if "decode" not in seen and n > 0 and input_ids.numel() == n:
+            seen.add("decode")
+            lookback = args[1]
+            log.info("DSV41_DEBUG_ENGRAM: decode ids %s positions %s lookback %s hashes %s",
+                     input_ids[:2].tolist(), positions[:2].tolist(),
+                     lookback[:2].tolist(), out[:2].flatten()[:8].tolist())
+        return out
+
+    cls.ensure_cache, cls.forward = ensure_cache, forward
+
+
 VENDORED_HOOKS = {
+    "vllm.models.deepseek_v41.common.engram": [_debug_engram],
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
         _indexer_op, _chunked_mqa_logits, _decode_rows_bound],
