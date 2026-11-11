@@ -515,6 +515,28 @@ def _decode_rows_bound(module) -> None:
     module._max_decode_logits_rows = _max_decode_logits_rows
 
 
+def _decode_inv_rope(module) -> None:
+    """rocm_sparse_attn_decode reports every row as inverse-RoPE'd when given
+    inv_rope_positions (it returns output.shape[0]), but only the gfx942/gfx950 split-K
+    reduce applies it: the fallback kernel for other GPUs returns before that. On gfx90a
+    the caller (DeepseekV41 ROCm attention) then skips its standalone inverse RoPE for the
+    decode rows, so every decode token reaches wo_a with a rotated RoPE tail: prefill is
+    right, decode drifts (decode and prefill logprobs of the same tokens differed by up to
+    23 nats, GSM8K 3 %, job 23641719). Withhold the positions there: the call then
+    returns 0 and the caller's rocm_inverse_rope_rows_ covers the decode rows too."""
+    if module._ON_GFX942 or module._ON_GFX950:
+        return
+    stock = module.rocm_sparse_attn_decode
+
+    def rocm_sparse_attn_decode(*args, **kwargs):
+        kwargs.pop("inv_rope_positions", None)
+        kwargs.pop("inv_rope_cos_sin_cache", None)
+        assert kwargs.get("output_mxfp8") is None, "MXFP8 decode output needs gfx950"
+        return stock(*args, **kwargs)
+
+    module.rocm_sparse_attn_decode = rocm_sparse_attn_decode
+
+
 def _indexer_gate(module) -> None:
     """Upstream's SparseAttnIndexer.forward_hip runs the op only with aiter or on gfx950
     and raises otherwise; on gfx90a make the identical call (op registered above)."""
@@ -617,7 +639,7 @@ VENDORED_HOOKS = {
     "vllm.models.deepseek_v41.common.engram": [_debug_engram],
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
-        _indexer_op, _chunked_mqa_logits, _decode_rows_bound],
+        _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }
