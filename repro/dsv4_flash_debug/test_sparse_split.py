@@ -4,7 +4,8 @@ vLLM 0.26 gates its split-K decode kernels (partial + reduce) to gfx942/gfx950; 
 a one-pass kernel with one workgroup per query and head block (sparse_split.py). This runs
 both on V4-Flash's per-rank shapes at TP=8 (8 heads, head_dim 512 = 448 FP8 nope + 64 bf16
 rope, SWA window 128, top-k 512) with fp8_ds_mla caches, compares the outputs and times them.
-Also checks that the plugin shim gives the split result.
+Also checks that the plugin shim gives the split result up to MAX_QUERIES and the
+fallback result above it.
 """
 
 import os
@@ -111,7 +112,8 @@ for layer, extra_len in (("SWA only", 0), ("ratio 4, top-k", 512), ("ratio 128",
         via_shim = m._rocm_sparse_attn_decode_ragged_triton(*args).float()
         m._rocm_sparse_attn_decode_ragged_triton = orig
         err = ((out - ref).abs().max() / ref.abs().max()).item()
-        good = err < 2e-2 and torch.isfinite(out).all().item() and torch.equal(out, via_shim)
+        want = out if B <= sparse_split.MAX_QUERIES else ref  # shim splits small batches only
+        good = err < 2e-2 and torch.isfinite(out).all().item() and torch.equal(want, via_shim)
         for n in SPLITS:
             e = ((forced(n, *args).float() - ref).abs().max() / ref.abs().max()).item()
             good &= e < 2e-2
