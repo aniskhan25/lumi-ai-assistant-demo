@@ -127,7 +127,63 @@ def _config_defaults(module) -> None:
             )
 
 
+def _aiter_ops(module) -> None:
+    """rocm_aiter_ops members V4.1's ROCm code calls. LAIF ships no aiter (gfx942/950
+    only), where upstream's checks all return False and its kernels never run."""
+    cls = module.rocm_aiter_ops
+
+    def disabled(cls) -> bool:
+        return False
+
+    for name in ("is_rdna_aiter_enabled", "is_triton_sparse_mla_enabled",
+                 "is_indexer_top_k_enabled"):
+        if not hasattr(cls, name):
+            setattr(cls, name, classmethod(disabled))
+    if not hasattr(cls, "is_indexer_top_k_supported"):
+        cls.is_indexer_top_k_supported = classmethod(lambda cls, **kwargs: False)
+    if not hasattr(cls, "dsv4_indexer_prefers_native_top_k"):
+        # Upstream verbatim (a shape heuristic, no aiter call).
+        def dsv4_indexer_prefers_native_top_k(*, num_rows, num_columns, topk_tokens) -> bool:
+            return topk_tokens == 512 and 0 < num_rows <= 384 and num_columns <= 1024 * 1024
+
+        cls.dsv4_indexer_prefers_native_top_k = staticmethod(dsv4_indexer_prefers_native_top_k)
+    for name in ("fused_qk_rmsnorm_group_quant", "gemm_a8w8_blockscale_bpreshuffle",
+                 "indexer_top_k_decode", "indexer_top_k_prefill", "triton_sparse_mla_fwd",
+                 "mhc_fused_post_pre_delayed_prefers_unfused"):
+        if not hasattr(cls, name):
+            def unavailable(*args, _name=name, **kwargs):
+                raise NotImplementedError(f"rocm_aiter_ops.{_name}: aiter is not available on gfx90a")
+
+            setattr(cls, name, staticmethod(unavailable))
+
+
+def _rocm_platform(module) -> None:
+    cls = module.RocmPlatform
+    if not hasattr(cls, "enable_multi_stream_overlap"):
+        # Upstream's ROCm gate allows side streams only inside graph capture; keep
+        # every overlap off on gfx90a (the interface default).
+        cls.enable_multi_stream_overlap = classmethod(lambda cls, aux_stream_list, attn_metadata: False)
+
+
+def _envs(module) -> None:
+    """Upstream environment variables (envs.py), with upstream's defaults."""
+    import os
+
+    added = {
+        "VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB":
+            lambda: int(os.getenv("VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB", "2048")),
+        "VLLM_TRITON_JIT_WARMUP_NUM_THREADS":
+            lambda: int(os.getenv("VLLM_TRITON_JIT_WARMUP_NUM_THREADS", "4")),
+        "VLLM_USE_FUSED_MQA_TOPK": lambda: bool(int(os.getenv("VLLM_USE_FUSED_MQA_TOPK", "1"))),
+    }
+    for name, fn in added.items():
+        module.environment_variables.setdefault(name, fn)
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm._aiter_ops"] = [_aiter_ops]
+HOOKS["vllm.platforms.rocm"].append(_rocm_platform)
+HOOKS["vllm.envs"] = [_envs]
 for _target in CONFIG_DEFAULTS:
     HOOKS.setdefault(_target.split(":")[0], []).append(_config_defaults)
 HOOKS.setdefault("vllm.config.parallel", []).append(_config_defaults)
