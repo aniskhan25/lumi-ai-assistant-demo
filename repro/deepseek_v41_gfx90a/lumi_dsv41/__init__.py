@@ -43,6 +43,9 @@ def _config_class(model_configs):
 
         @staticmethod
         def verify_and_update_config(vllm_config) -> None:
+            # Upstream's default "auto" lets the indexer pick its cache format (fp8);
+            # 0.26 defaults to "bf16". (0.26 types the field without "auto".)
+            object.__setattr__(vllm_config.attention_config, "indexer_kv_dtype", "auto")
             if vllm_config.speculative_config is not None:
                 raise NotImplementedError("DeepSeek-V4.1 on vLLM 0.26: MTP/DSpark not ported")
             if vllm_config.cache_config.enable_prefix_caching:

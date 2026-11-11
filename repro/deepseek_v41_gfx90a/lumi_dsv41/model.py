@@ -17,19 +17,9 @@ from vllm.models.deepseek_v41.amd import model as upstream
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
-# Engine options added after 0.26, at upstream's defaults (features left off).
-_CONFIG_DEFAULTS = {
-    "cache_config": {"swa_bounded_replay": False},
-    "compilation_config": {"cudagraph_decoder_replay": False},
-}
-
-
 def _set_missing_defaults(vllm_config) -> None:
-    for section, fields in _CONFIG_DEFAULTS.items():
-        config = getattr(vllm_config, section)
-        for name, value in fields.items():
-            if not hasattr(config, name):
-                object.__setattr__(config, name, value)
+    # Missing config fields are class-level defaults (hooks.CONFIG_DEFAULTS); the
+    # Engram config is per instance.
     if getattr(vllm_config, "engram_config", None) is None:
         # Upstream VllmConfig._resolve_and_verify_engram_config, for a model with Engram.
         from vllm.config.engram import EngramConfig  # vendored, new since 0.26

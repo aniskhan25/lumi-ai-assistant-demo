@@ -74,7 +74,63 @@ def _kv_cache_interface(module) -> None:
     graft.apply(module)
 
 
+# Config fields upstream added after 0.26, as class-level defaults: instances that lack
+# the field read these, and pickling to workers is unaffected. Values are upstream's
+# defaults, except where an upstream default enables a feature that needs engine support
+# 0.26 lacks (marked), or upstream resolves the value per platform (ROCm gfx90a here).
+CONFIG_DEFAULTS = {
+    "vllm.config.attention:AttentionConfig": {
+        "hisparse_config": None,
+        "indexer_sparse_logits": False,  # upstream: resolved; True only on SM100 + DeepGEMM
+        "indexer_logits_dtype": "float32",  # upstream: resolved; bf16 only with MX scales
+        "sparse_mla_prefill_workspace_factor": None,
+        "sparse_mla_shard_q": True,
+    },
+    "vllm.config.cache:CacheConfig": {"swa_bounded_replay": False},  # upstream True: needs scheduler replay
+    "vllm.config.compilation:CompilationConfig": {"cudagraph_decoder_replay": False},
+    "vllm.config.kernel:KernelConfig": {
+        "enable_jit_warmup": False,  # upstream True: 0.26's runner has no warmup registry
+        "monokernel": False,
+        "sparse_indexer_topk_backend": "auto",
+    },
+    "vllm.config.speculative:SpeculativeConfig": {"enable_adaptive_verification": False},
+}
+
+
+def _config_defaults(module) -> None:
+    for target, fields in CONFIG_DEFAULTS.items():
+        module_name, cls_name = target.split(":")
+        if module_name != module.__name__:
+            continue
+        cls = getattr(module, cls_name)
+        for name, value in fields.items():
+            if name not in getattr(cls, "__dataclass_fields__", {}) and not hasattr(cls, name):
+                setattr(cls, name, value)
+    if module.__name__ == "vllm.config.attention":
+        cls = module.AttentionConfig
+
+        def resolve_indexer_kv_dtype(self, default):
+            """Upstream: substitute `default` for "auto"."""
+            return default if self.indexer_kv_dtype == "auto" else self.indexer_kv_dtype
+
+        def resolve_indexer_logits_dtype(self, default):
+            return default if self.indexer_logits_dtype == "auto" else self.indexer_logits_dtype
+
+        cls.resolve_indexer_kv_dtype = resolve_indexer_kv_dtype
+        cls.resolve_indexer_logits_dtype = resolve_indexer_logits_dtype
+    if module.__name__ == "vllm.config.parallel":
+        cls = module.ParallelConfig
+        if not hasattr(cls, "pcp_shard_decode_requests"):
+            cls.pcp_shard_decode_requests = property(
+                lambda self: self.prefill_context_parallel_size > 1
+                and self.decode_context_parallel_size == 1
+            )
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+for _target in CONFIG_DEFAULTS:
+    HOOKS.setdefault(_target.split(":")[0], []).append(_config_defaults)
+HOOKS.setdefault("vllm.config.parallel", []).append(_config_defaults)
 HOOKS["vllm.distributed.parallel_state"] = [_engram_dp]
 HOOKS["vllm.distributed"] = [_engram_dp]
 HOOKS["vllm.v1.kv_cache_interface"] = [_kv_cache_interface]
