@@ -236,6 +236,9 @@ def _debug_kv_groups(module) -> None:
             print(f"[DSV41_DEBUG_KV] group {i}: {type(g.kv_cache_spec).__name__} "
                   f"{len(g.layer_names)} layers {g.layer_names[:4]}...", flush=True)
         for name, spec in specs.items():
+            print(f"[DSV41_DEBUG_KV] spec {name}: {type(spec).__name__} block={spec.block_size} "
+                  f"page={spec.page_size_bytes} window={getattr(spec, 'sliding_window', None)} "
+                  f"ratio={getattr(spec, 'compress_ratio', None)}", flush=True)
             if name not in grouped:
                 print(f"[DSV41_DEBUG_KV] UNGROUPED {name}: {spec}", flush=True)
         return groups
