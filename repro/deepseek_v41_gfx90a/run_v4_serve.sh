@@ -51,6 +51,11 @@
 #   GRAPH_DIFF=1             rerun each graph step eagerly, log first diverging layer site
 #   NANFILL=1                fill fresh float allocations with NaN (exposes reads of unwritten memory)
 #
+# DeepSeek-V4.1-Flash (V41=1): the lumi_dsv41 plugin (this directory) on Model Runner V2.
+# It carries its own gfx90a fixes (no TileLang mHC, indexer gate, chunked logits), so
+# TORCH_MHC/MHC_FIX/INDEXER_GATE/TRITON_LOGITS are refused; BF16_LINEAR and ROUTER_GUARD
+# (0.26 modules V4.1 still uses) come from the V4 plugin as before.
+#
 # Multi-node (V4.1 needs two nodes): `sbatch --nodes=2 ...` serves TP=8 per node with
 # pipeline parallelism across nodes (PP defaults to the node count), one vLLM per node via
 # srun; rank 0 runs the API server on this node, the others are --headless. Logs of
@@ -59,10 +64,11 @@ set -euo pipefail
 
 CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif}"
 REPO="${SLURM_SUBMIT_DIR:-$(pwd)}"
-SNAPSHOT="$(ls -d /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots/* | head -n1)"
+MODEL_DIR="models--deepseek-ai--DeepSeek-V4-Flash"; [ "${V41:-0}" = 1 ] && MODEL_DIR="models--deepseek-ai--DeepSeek-V4.1-Flash"
+SNAPSHOT="$(ls -d /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/${MODEL_DIR}/snapshots/* | head -n1)"
 GSM8K="$(ls /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/datasets--openai--gsm8k/snapshots/*/main/test-00000-of-00001.parquet | head -n1)"
 PORT="$((20000 + ${SLURM_JOB_ID} % 20000))"   # shared nodes share ports
-LOG="${REPO}/benchmarks/results/dsv4-flash/job_${SLURM_JOB_ID}"
+LOG="${REPO}/benchmarks/results/dsv4$([ "${V41:-0}" = 1 ] && echo 1)-flash/job_${SLURM_JOB_ID}"
 mkdir -p "${LOG}"
 
 module load Local-LAIF lumi-aif-singularity-bindings
@@ -75,11 +81,19 @@ SHM="/tmp/shm-${SLURM_JOB_ID}"; mkdir -p "${SHM}"
 RUN=(singularity exec -B "${SHM}:/dev/shm")
 # The container sets PYTHONPATH itself, overriding the host value; pass ours with --env.
 PLUGIN=0; { [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ]; } && PLUGIN=1
+if [ "${V41:-0}" = 1 ]; then
+  if [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ] || [ "${INDEXER_GATE:-0}" = 1 ] || [ "${TRITON_LOGITS:-0}" = 1 ]; then
+    echo "V41=1: TORCH_MHC/MHC_FIX/INDEXER_GATE/TRITON_LOGITS target 0.26's V4 modules, which V4.1 replaces"; exit 2
+  fi
+  PLUGIN=1; export VLLM_USE_V2_MODEL_RUNNER=1
+fi
 if [ "${PLUGIN}" = 1 ]; then
   export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
   export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}"
-  RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
+  PP_DIRS="${REPO}/repro/dsv4_flash_debug/plugin"
+  [ "${V41:-0}" = 1 ] && PP_DIRS="${REPO}/repro/deepseek_v41_gfx90a:${PP_DIRS}"
+  RUN+=(--env "PYTHONPATH=${PP_DIRS}:/opt/venv/lib/python3.12/site-packages")
 elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
@@ -184,7 +198,7 @@ if [ "${BENCH:-0}" = 1 ]; then
   bench() {  # concurrency, prompts, input len, output len, result name
     "${RUN[@]}" vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
       --base-url "http://127.0.0.1:${PORT}" --model dsv4 --tokenizer "${SNAPSHOT}" \
-      --tokenizer-mode deepseek_v4 --dataset-name random --random-input-len "$3" \
+      $([ "${V41:-0}" = 1 ] || echo --tokenizer-mode deepseek_v4) --dataset-name random --random-input-len "$3" \
       --random-output-len "$4" --ignore-eos --num-prompts "$2" --max-concurrency "$1" \
       --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
       --save-result --result-dir "${LOG}" --result-filename "$5.json" \
