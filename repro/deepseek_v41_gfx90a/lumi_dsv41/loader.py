@@ -94,6 +94,10 @@ class _ShadowLoader(importlib.machinery.SourceFileLoader):
             from . import kv_specs  # upstream spec arguments -> 0.26 specs
 
             kv_specs.install_in(module)
+        from . import hooks
+
+        for function in hooks.VENDORED_HOOKS.get(module.__name__, ()):
+            function(module)
         if self.old_origin is None:
             return
         own = module.__dict__.get("__getattr__")

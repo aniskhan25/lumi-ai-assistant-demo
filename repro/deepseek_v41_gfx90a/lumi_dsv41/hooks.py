@@ -180,6 +180,19 @@ def _envs(module) -> None:
         module.environment_variables.setdefault(name, fn)
 
 
+def _mhc_no_tilelang(module) -> None:
+    """TileLang mHC is wrong on gfx90a: its HIP codegen drops barriers in the
+    warp-specialised pre stage (found on V4-Flash, repro/dsv4_flash_debug). Upstream turns
+    it off only on gfx942; do the same on gfx90a, so the torch/Triton fallbacks run
+    (V4's DSV4_TORCH_MHC=1)."""
+    import os
+
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm() and os.environ.get("DSV41_TILELANG_MHC") != "1":
+        module.HAS_TILELANG_MHC = False
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
 HOOKS["vllm._aiter_ops"] = [_aiter_ops]
 HOOKS["vllm.platforms.rocm"].append(_rocm_platform)
@@ -190,3 +203,8 @@ HOOKS.setdefault("vllm.config.parallel", []).append(_config_defaults)
 HOOKS["vllm.distributed.parallel_state"] = [_engram_dp]
 HOOKS["vllm.distributed"] = [_engram_dp]
 HOOKS["vllm.v1.kv_cache_interface"] = [_kv_cache_interface]
+
+# Functions run on vendored (upstream) modules right after they execute.
+VENDORED_HOOKS = {
+    "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
+}
