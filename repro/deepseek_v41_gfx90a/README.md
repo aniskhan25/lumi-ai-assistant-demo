@@ -4,6 +4,10 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 13.5 /
+> 52.6 / 169 / 261 tok/s at 1 / 4 / 16 / 32 users, GSM8K 99/100 (job 23667236). See
+> "Phase 4: speed" below.**
+>
 > **Status (2026-11-11): V4.1-Flash serves correctly on one node through a plugin on vLLM
 > 0.26: GSM8K 99/100, no garbage, needles at 2.1k and 16.8k tokens right, decode agrees with
 > prefill to 0.02–0.05 nats up to 20k tokens (job 23644138). See "Phases 2–3" below.**
@@ -225,6 +229,44 @@ byte-identical on gfx90a, `test_kv_format.py`) and the compressor ring.
 Memory per GCD: 37.2 GiB weights, 17.3 GiB KV cache (744k tokens, 22.7 concurrent 32k
 requests). Host: 189 GiB of pinned Engram tables per node.
 
+## Phase 4: speed (2026-11-12)
+
+One node, 1024 tokens in, 512 out, `--max-num-seqs 32`; each row one allocation, and each
+row after the first also passed the decode-vs-prefill check to 19.7k tokens, both needles and
+GSM8K (99–100/100).
+
+| setup | job | tok/s at 1 / 4 / 16 / 32 users | TPOT at 1 / 32 users |
+|---|---|---|---|
+| eager | 23653727 | 3.5 / 13.6 / 45.8 / 81.7 | 284 / 367 ms |
+| + batched Triton indexer logits (`TRITON_LOGITS=1`) | 23658965 | 3.6 / 14.1 / 51.1 / 97.0 | 278 / 306 ms |
+| + CUDA graphs (`COMPILE=1`, `NO_ASYNC=1`) | 23666441 | 9.4 / 35.9 / 117.7 / 183.7 | 106 / 157 ms |
+| + mHC in Triton (`MHC_TRITON=1`) | 23667236 | **13.5 / 52.6 / 169.0 / 260.9** | **74 / 110 ms** |
+
+V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
+
+- **Eager is launch-bound.** A decode step is ~14,600 kernel launches. In the eager profile
+  (job 23660212, `PROFILE=1`) every rank spends ~80 % of its GPU time in the all-reduce
+  kernel waiting for the other ranks' hosts to catch up. GPU work proper: mHC 47 ms, sparse
+  attention 20, MoE 18, the rest under 10 (profiler-inflated).
+- **Indexer logits** (`lumi_dsv41/paged_logits.py`): one batched launch, no host sync,
+  reading the tiled cache. `test_paged_logits.py` (job 23658925): same -inf mask, rel. error
+  ~1e-7 and the same top-512 as vLLM's torch fallback on the untiled copy, also under graph
+  replay; 0.05–0.4 ms instead of 7 ms at 32 sequences.
+- **CUDA graphs were silently off.** 0.26 enables its breakable CUDA graphs (PIECEWISE
+  without torch.compile) automatically only for its own model names; for the plugin model
+  it logs "torch.compile is turned on, but the model ... does not support it" and runs eager
+  (job 23653728: no change). `COMPILE=1` now sets `VLLM_USE_BREAKABLE_CUDAGRAPH=1`. The first
+  graph run then died at 15 concurrent requests (job 23666313): 0.26's runner pads the
+  token count to the graph size but not the request count, so upstream's indexer stored 15
+  unpacked top-k rows into a 16-row slice. `_indexer_graph_pad` stores the real rows and
+  marks pad tokens -1.
+- **mHC** (`lumi_dsv41/mhc_triton.py`): with TileLang off on gfx90a and no aiter, V4.1's
+  delayed pre and post ran as upstream's torch references, ~40 small kernels per call and
+  ~80 calls per step. Now the fp32 prenorm GEMM in torch, then one Triton kernel for the
+  gates, Sinkhorn and the collapse with the carried pre-mix (V4's big-fuse kernel, delayed),
+  and one for the post. `test_mhc_triton.py` (job 23667193): gates within 1e-7, layer input
+  within 1e-5 of the references, 1.12 → 0.18 ms per pre and 0.14 → 0.04 ms per post.
+
 ## Reproduce
 
 ```bash
@@ -237,6 +279,10 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 DIAG=1 PROBE_GSM8K_N=100 READY_TIMEOUT=5400 \
-  sbatch --time=02:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 NO_ASYNC=1 \
+  DIAG=1 PROBE_GSM8K_N=100 BENCH=1 READY_TIMEOUT=5400 \
+  sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
+# one-GCD kernel tests for the two Triton replacements
+sbatch repro/deepseek_v41_gfx90a/run_paged_logits_test.sh
+sbatch repro/deepseek_v41_gfx90a/run_mhc_triton_test.sh
 ```
