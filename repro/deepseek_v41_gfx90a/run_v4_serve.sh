@@ -92,6 +92,8 @@ if [ "${V41:-0}" = 1 ]; then
   # TRITON_LOGITS=1: lumi_dsv41's tiled-cache decode logits kernel (paged_logits.py)
   # instead of upstream's per-sequence torch loop. LOGITS_CHECK=N compares N calls.
   export DSV41_TRITON_LOGITS="${TRITON_LOGITS:-0}" DSV41_LOGITS_CHECK="${LOGITS_CHECK:-0}"
+  # MHC_TRITON=1: mHC delayed pre and post in Triton (lumi_dsv41/mhc_triton.py), not torch
+  export DSV41_MHC_TRITON="${MHC_TRITON:-0}"
   TRITON_LOGITS=0  # not the V4 plugin's kernel (row-major cache)
   # COMPILE=1: 0.26 auto-enables breakable CUDA graphs (PIECEWISE without torch.compile)
   # only for its own model names; for V4.1 it falls back to eager without saying so

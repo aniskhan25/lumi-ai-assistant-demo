@@ -223,6 +223,34 @@ def _mhc_no_tilelang(module) -> None:
         module.HAS_TILELANG_MHC = False
 
 
+def _mhc_triton(module) -> None:
+    """DSV41_MHC_TRITON=1: the delayed pre and the post in Triton (mhc_triton.py) where
+    neither aiter nor TileLang serves them, instead of the torch references."""
+    import os
+
+    if (os.environ.get("DSV41_MHC_TRITON") != "1" or module.HAS_AITER_MHC
+            or module.HAS_TILELANG_MHC):
+        return
+    from .mhc_triton import mhc_post_triton, mhc_pre_delayed_triton
+
+    def pre_forward_hip(self, residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
+                        hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, pre_mix=None,
+                        x=None, norm_weight=None, norm_eps=1e-6, sublayer_out=None,
+                        post_layer_mix=None, comb_res_mix=None):
+        residual = self._maybe_post(residual, sublayer_out, post_layer_mix, comb_res_mix)
+        post, comb, layer_input, next_pre = mhc_pre_delayed_triton(
+            residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps,
+            hc_post_mult_value, sinkhorn_repeat, pre_mix=pre_mix, x=x)
+        return (residual, post, comb, module._apply_mhc_norm(layer_input, norm_weight, norm_eps),
+                next_pre)
+
+    def post_forward_hip(self, x, residual, post_layer_mix, comb_res_mix):
+        return mhc_post_triton(x, residual, post_layer_mix, comb_res_mix)
+
+    module.MHCPreDelayedOp.forward_hip = pre_forward_hip
+    module.MHCPostOp.forward_hip = post_forward_hip
+
+
 def _mhc_kernels(module) -> None:
     """0.26's kernels/mhc package re-exports its own torch fallbacks; upstream's adds the
     delayed pre (kernels/mhc/torch.py, vendored)."""
@@ -745,7 +773,7 @@ def _debug_engram(module) -> None:
 
 VENDORED_HOOKS = {
     "vllm.models.deepseek_v41.common.engram": [_debug_engram],
-    "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
+    "vllm.model_executor.layers.mhc": [_mhc_no_tilelang, _mhc_triton],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
         _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
         _paged_logits_unshuffle, _paged_logits_triton],
