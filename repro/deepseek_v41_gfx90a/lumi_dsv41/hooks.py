@@ -445,6 +445,24 @@ HOOKS["vllm.distributed.parallel_state"] = [_engram_dp]
 HOOKS["vllm.distributed"] = [_engram_dp]
 HOOKS["vllm.v1.kv_cache_interface"] = [_kv_cache_interface]
 
+def _indexer_graph_pad(module) -> None:
+    """Under PIECEWISE graphs 0.26's Model Runner V2 pads the token count to the graph
+    size but not the request count (upstream pads requests too). The decode indexer then
+    unpacks top-k rows for the real requests only (15) and stores them into the padded
+    token slice (16): shape error, engine dead (job 23666313). Store the real rows and
+    mark the pad tokens' rows invalid (-1). Must run before _indexer_op registers it."""
+    _source_patch(
+        module, "rocm_aiter_sparse_attn_indexer",
+        "            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (\n"
+        "                topk_indices\n"
+        "            )\n",
+        "            topk_indices_buffer[: topk_indices.shape[0], : topk_indices.shape[-1]] = (\n"
+        "                topk_indices\n"
+        "            )\n"
+        "            topk_indices_buffer[topk_indices.shape[0] : num_decode_tokens] = -1\n",
+    )
+
+
 def _indexer_op(module) -> None:
     """Register the ROCm sparse indexer op without aiter, as upstream does on gfx950:
     every step inside it has a non-aiter path (Triton cache insert and gather, compiled
@@ -729,7 +747,7 @@ VENDORED_HOOKS = {
     "vllm.models.deepseek_v41.common.engram": [_debug_engram],
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
-        _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
+        _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
         _paged_logits_unshuffle, _paged_logits_triton],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
