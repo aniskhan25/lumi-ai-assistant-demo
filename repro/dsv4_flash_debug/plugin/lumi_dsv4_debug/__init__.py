@@ -29,6 +29,10 @@ DSV4_ROUTER_GUARD=1  nan_to_num the MoE gate logits before ROCm's top-k (router_
                      corrupt the MoE routing of real tokens. =count also logs how many.
 DSV4_SPARSE_SPLIT=1  Decode sparse attention with vLLM's split-K kernels, gated to gfx942/950,
                      instead of the one-workgroup-per-query fallback (sparse_split.py).
+DSV4_CUSTOM_AR=1     Use vLLM's custom all-reduce for TP, which 0.26 enables on ROCm only for
+                     gfx94x/95x. Its kernels are built into the gfx90a container, LUMI's 8 GCDs
+                     are all one XGMI hop apart (vLLM's own topology check passes), and it is
+                     3-4.7x faster than RCCL at decode sizes in CUDA graphs (test_allreduce.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
                      layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
@@ -164,6 +168,14 @@ def _indexer_gate() -> None:
 
 _STACK_FILE = None
 
+def _custom_ar() -> None:
+    from vllm.platforms.rocm import RocmPlatform
+
+    # Read by ParallelConfig.__post_init__, after EngineArgs has loaded the plugins.
+    RocmPlatform.use_custom_allreduce = classmethod(lambda cls: True)
+    _log("DSV4_CUSTOM_AR: vLLM custom all-reduce allowed on this GPU (gfx94x/95x only upstream)")
+
+
 def register() -> None:
     import faulthandler
     import signal
@@ -183,6 +195,8 @@ def register() -> None:
 
     if not current_platform.is_rocm():
         return
+    if os.environ.get("DSV4_CUSTOM_AR") == "1":
+        _custom_ar()
     mhc_mode = os.environ.get("DSV4_MHC_FIX", "")
     if os.environ.get("DSV4_TORCH_MHC") == "1":
         if mhc_mode:
