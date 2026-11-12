@@ -93,6 +93,10 @@ if [ "${V41:-0}" = 1 ]; then
   # instead of upstream's per-sequence torch loop. LOGITS_CHECK=N compares N calls.
   export DSV41_TRITON_LOGITS="${TRITON_LOGITS:-0}" DSV41_LOGITS_CHECK="${LOGITS_CHECK:-0}"
   TRITON_LOGITS=0  # not the V4 plugin's kernel (row-major cache)
+  # COMPILE=1: 0.26 auto-enables breakable CUDA graphs (PIECEWISE without torch.compile)
+  # only for its own model names; for V4.1 it falls back to eager without saying so
+  # (job 23653728: "torch.compile is turned on, but the model ... does not support it").
+  [ "${COMPILE:-0}" = 1 ] && export VLLM_USE_BREAKABLE_CUDAGRAPH=1
   PLUGIN=1; export VLLM_USE_V2_MODEL_RUNNER=1
 fi
 if [ "${PLUGIN}" = 1 ]; then
