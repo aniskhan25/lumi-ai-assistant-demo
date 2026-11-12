@@ -16,13 +16,16 @@ per call on one GCD (test_sparse_split.py, graph replay, job 23638388), fallback
     ratio 128         100 -> 58-60   102 -> 79   106 -> 212  212 -> 364
     SWA only           88 -> 26-28    92 -> 47    94 -> 78   188 -> 154
 
-So the split path is taken for batches of at most MAX_QUERIES queries. Batch size is fixed
+In serving (recipe + SPARSE_SPLIT=1, 500 GSM8K unchanged) a cutoff of 32 cut median TPOT
+at 1/4/16 users (64.1 -> 60.1, 69.0 -> 65.8, 77.0 -> 74.5 ms) but raised it at 32 users
+(96.8 -> 107.1 ms, jobs 23638474/5 vs 23591543/4) despite the kernel-level win above, so
+the split path is taken for batches of at most MAX_QUERIES = 16 queries. Batch size is fixed
 per CUDA graph, so the choice is made at capture. The gate is one module-level flag that the
 decode wrapper reads at call time; two indexer paths also read it, so it is set only for the
 duration of the decode call.
 """
 
-MAX_QUERIES = 32
+MAX_QUERIES = 16
 
 
 def install() -> None:
