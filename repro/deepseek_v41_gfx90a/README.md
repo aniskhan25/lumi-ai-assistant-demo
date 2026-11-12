@@ -4,9 +4,9 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 13.5 /
-> 52.6 / 169 / 261 tok/s at 1 / 4 / 16 / 32 users, GSM8K 99/100 (job 23667236). See
-> "Phase 4: speed" below.**
+> **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
+> 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
+> needles, decode = prefill to 19.7k tokens (job 23668248). See "Phase 4: speed" below.**
 >
 > **Status (2026-11-11): V4.1-Flash serves correctly on one node through a plugin on vLLM
 > 0.26: GSM8K 99/100, no garbage, needles at 2.1k and 16.8k tokens right, decode agrees with
@@ -240,7 +240,8 @@ GSM8K (99–100/100).
 | eager | 23653727 | 3.5 / 13.6 / 45.8 / 81.7 | 284 / 367 ms |
 | + batched Triton indexer logits (`TRITON_LOGITS=1`) | 23658965 | 3.6 / 14.1 / 51.1 / 97.0 | 278 / 306 ms |
 | + CUDA graphs (`COMPILE=1`, `NO_ASYNC=1`) | 23666441 | 9.4 / 35.9 / 117.7 / 183.7 | 106 / 157 ms |
-| + mHC in Triton (`MHC_TRITON=1`) | 23667236 | **13.5 / 52.6 / 169.0 / 260.9** | **74 / 110 ms** |
+| + mHC in Triton (`MHC_TRITON=1`) | 23667236 | 13.5 / 52.6 / 169.0 / 260.9 | 74 / 110 ms |
+| + split-K prenorm GEMM in Triton, `--max-num-seqs 64` | 23668248 | **14.0 / – / – / 263.9**, **400.0 at 64** | **71 / 108 ms**, 146 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -266,6 +267,15 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   gates, Sinkhorn and the collapse with the carried pre-mix (V4's big-fuse kernel, delayed),
   and one for the post. `test_mhc_triton.py` (job 23667193): gates within 1e-7, layer input
   within 1e-5 of the references, 1.12 → 0.18 ms per pre and 0.14 → 0.04 ms per post.
+  For up to 64 tokens the prenorm GEMM and squared sum are one split-K Triton kernel too
+  (job 23667826: gates within 3e-6, 0.18 → 0.10 ms per pre).
+- **64 sequences** (job 23668248): GSM8K 98.5 % of 200, no garbage, both needles; V4's
+  pad-row bug at 64 does not show (ROUTER_GUARD=1 is on by default). With
+  `--no-async-scheduling` vLLM reports 1.35M tokens of KV cache (41 concurrent 32k requests).
+
+Open: async scheduling (V4: +4 %, but it halves the KV capacity estimate and once raced with
+the Triton logits); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce
 
@@ -280,7 +290,8 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
 V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 NO_ASYNC=1 \
-  DIAG=1 PROBE_GSM8K_N=100 BENCH=1 READY_TIMEOUT=5400 \
+  MORE_VLLM_ARGS="--max-num-seqs 64" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
+  READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # one-GCD kernel tests for the two Triton replacements
 sbatch repro/deepseek_v41_gfx90a/run_paged_logits_test.sh
