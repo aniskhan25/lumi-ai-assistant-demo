@@ -583,6 +583,38 @@ def _decode_inv_rope(module) -> None:
     module.rocm_sparse_attn_decode = rocm_sparse_attn_decode
 
 
+SPARSE_SPLIT_MAX_QUERIES = 16
+
+
+def _sparse_split(module) -> None:
+    """DSV41_SPARSE_SPLIT=1: decode sparse attention with the split-K kernels (partial +
+    reduce) for batches of at most 16 queries. Off gfx942/950 upstream takes a one-pass
+    fallback with one workgroup per query and head block, which leaves most of a GCD idle
+    at low concurrency (V4: 409 -> 61 us per ratio-4 layer at 1 query, 1.3x slower from 64,
+    and +3 ms TPOT at 16-32 users in serving with a cutoff of 32;
+    ../dsv4_flash_debug/plugin/lumi_dsv4_debug/sparse_split.py). Taken as gfx942: the
+    generic partial kernel and the CU-count split heuristic; gfx950 would select its own
+    kernels, adaptive splits and MXFP8 epilogue. Inverse RoPE is unaffected: _decode_inv_rope
+    withholds its positions, so the split reduce does not apply it either."""
+    import os
+
+    if module._ON_GFX942 or module._ON_GFX950 or os.environ.get("DSV41_SPARSE_SPLIT") != "1":
+        return
+    stock = module._rocm_sparse_attn_decode_ragged_triton
+
+    def split_decode(*args, **kwargs):
+        q = args[0] if args else kwargs["q"]
+        if q.shape[0] > SPARSE_SPLIT_MAX_QUERIES:
+            return stock(*args, **kwargs)
+        module._ON_GFX942 = True
+        try:
+            return stock(*args, **kwargs)
+        finally:
+            module._ON_GFX942 = False
+
+    module._rocm_sparse_attn_decode_ragged_triton = split_decode
+
+
 def _paged_logits_unshuffle(module) -> None:
     """V4.1's indexer K writer (indexer_k_store.py) stores values on ROCm in the 16x16-tiled
     ("SHUFFLE") layout, which prefill's gather and aiter's Preshuffle decode kernel read.
@@ -776,7 +808,7 @@ VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang, _mhc_triton],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
         _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
-        _paged_logits_unshuffle, _paged_logits_triton],
+        _paged_logits_unshuffle, _paged_logits_triton, _sparse_split],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }
