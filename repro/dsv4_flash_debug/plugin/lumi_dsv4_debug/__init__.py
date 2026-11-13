@@ -33,6 +33,8 @@ DSV4_CUSTOM_AR=copy|fence (1 = copy)
                      Use vLLM's custom all-reduce for TP (0.26 enables it on ROCm only for
                      gfx94x/95x), made coherent on gfx90a: as is, ranks read stale peer data
                      from their L2 (custom_ar.py).
+DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel with bf16 MFMA;
+                     hipBLASLt picks an fp32-MFMA kernel for them on gfx90a (score_gemm.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
                      layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
