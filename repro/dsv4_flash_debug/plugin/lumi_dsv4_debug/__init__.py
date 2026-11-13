@@ -243,6 +243,11 @@ def register() -> None:
 
         graph_diff.install()
         _log("DSV4_GRAPH_DIFF: every graph replay rerun eagerly and compared per layer")
+    if os.environ.get("DSV4_SCORE_GEMM") == "1":
+        from . import score_gemm
+
+        score_gemm.install()
+        _log("DSV4_SCORE_GEMM=1: compressor score GEMMs in Triton (bf16 MFMA, fp32 out)")
     if os.environ.get("DSV4_BF16_LINEAR") == "1":
         from . import bf16_linear
 

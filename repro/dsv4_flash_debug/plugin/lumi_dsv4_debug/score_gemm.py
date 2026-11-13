@@ -8,7 +8,10 @@ indexer), 60 calls per decode step. For an fp32 output hipBLASLt on gfx90a picks
 users and 111 us at 64 (profile job 23631328), 4-7 ms per step, where reading the weight
 takes ~10 us. This kernel uses bf16 MFMA with fp32 accumulation (bf16 products are exact in
 fp32, so the result matches to fp32 rounding) and splits K so that the narrow N still
-fills the GCD. Tiles come from test_score_gemm.py.
+fills the GCD. Tiles come from test_score_gemm.py (job 23706116, graph replay, weights
+not in L2): 3.6-6.4x faster per call, half the error of torch.mm against fp64, and
+per decode step 3.96 -> 1.11 ms at 32 tokens, 6.54 -> 1.45 ms at 64. Split-K partials are
+summed by a second kernel rather than atomics (deterministic; atomics saved only 1-2 us).
 """
 
 import torch
@@ -46,8 +49,14 @@ def _score_mm_kernel(x_ptr, w_ptr, o_ptr, M, N, K, sxm, swn, som,
 
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps) per N and largest M; from the sweep.
-CONFIGS: dict[int, list[tuple[int, tuple[int, int, int, int, int]]]] = {}
-MAX_M = 128  # larger batches (prefill) stay on torch.mm
+CONFIGS: dict[int, list[tuple[int, tuple[int, int, int, int, int]]]] = {
+    2048: [(16, (16, 64, 128, 4, 4)), (48, (16, 64, 128, 2, 4)), (64, (64, 64, 128, 2, 4)),
+           (96, (16, 64, 128, 1, 4)), (128, (64, 64, 64, 2, 4))],
+    1024: [(32, (16, 64, 128, 8, 4)), (64, (16, 64, 128, 4, 4)), (96, (16, 64, 128, 2, 4)),
+           (128, (64, 64, 128, 4, 4))],
+    512: [(8, (16, 16, 256, 8, 4)), (16, (16, 16, 128, 8, 4)), (24, (16, 64, 128, 8, 4)),
+          (32, (32, 16, 128, 8, 4)), (64, (16, 64, 128, 8, 4)), (128, (16, 64, 128, 4, 4))],
+}
 
 
 def pick(M: int, N: int):
