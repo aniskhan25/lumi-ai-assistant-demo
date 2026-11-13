@@ -255,6 +255,7 @@ GSM8K (99–100/100).
 | both (`CUSTOM_AR=1 SPARSE_SPLIT=1`) | 23700637 | 17.8 / 69.2 / 199.5 / 282.5, 422.2 at 64 | 55 / 100 ms, 138 at 64 |
 | split-K up to 32 queries (`SPARSE_SPLIT=32`) | 23706326 | 17.9 / – / 200.2 / 299.4, 422.2 at 64 | 55 / 95 ms, 138 at 64 |
 | **+ query RoPE in one Triton kernel** (always on): the recipe | 23706895 | **18.7 / – / 207.1 / 308.9**, **429.9 at 64** | **53 / 91 ms**, 135 at 64 |
+| same, async scheduling (no `NO_ASYNC=1`) | 23707780 | 20.9 / – / 225.3 / 332.4, 460.0 at 64 | 47 / 78 ms, 120 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -354,6 +355,11 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   23706895): **+4.5 % at 1 user, +3.4 % at 16, +3.2 % at 32, +1.8 % at 64**, more than the
   1.5 ms of kernel time (fewer launches between graph pieces), GSM8K 99.0 % (misses 119
   and 184, both seen before), needles, decode = prefill.
+- **Async scheduling on this recipe** (job 23707780): GSM8K 98.5 % (misses 93, 119, 161, all
+  seen before), needles, decode = prefill; **+11.7 % at 1 user, +8.8 % at 16, +7.6 % at 32,
+  +7.0 % at 64**, a little more than on the older recipe (+7–9 %). KV cache 0.77M tokens
+  instead of 1.35M, as before: the choice stays by workload (async for many short requests,
+  `NO_ASYNC=1` when many long contexts must fit).
 
 Open: a gfx90a sparse-decode kernel for 32–64 queries (V4.1's largest cost, 28 % of a
 32-user step); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
