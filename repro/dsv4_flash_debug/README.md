@@ -77,10 +77,11 @@ replace `TORCH_MHC=1` with `MHC_FIX=triton`, vLLM's fused TileLang hyper-connect
 my Triton kernel in place of the broken TileLang pre stage. `ROUTER_GUARD=1` is the default and must stay on: under CUDA graphs it is
 what keeps NaN in pad rows out of the MoE router (see "A layout-sensitive bug under CUDA
 graphs" below). `CUSTOM_AR=1` replaces RCCL with vLLM's custom all-reduce, made coherent on
-gfx90a, for 1.03–1.11× (see "All-reduce" below).
+gfx90a, for 1.03–1.11× (see "All-reduce" below). `SCORE_GEMM=1` runs the compressors'
+fp32-output score GEMMs in a Triton kernel, 1.01–1.08× more (see "Compressor score GEMMs").
 
 ```bash
-AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 \
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
   TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -91,8 +92,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **`MHC_FIX=triton` + `CUSTOM_AR=1`** | 32 | 23696592 | 97.6 % | 16.3 / 62.7 / 192.4 / 319.5 / – | 61 / 90 / – ms |
-| **`MHC_FIX=triton` + `CUSTOM_AR=1`** | 64 | 23696593 | 97.6 % | 16.3 / – / 192.5 / 318.2 / **466.8** | 61 / 90 / 126 ms |
+| **`MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1`** | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
+| **`MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1`** | 64 | 23706309 | 97.2 % | 17.7 / – / 198.1 / 325.1 / **481.8** | 56 / 88 / 122 ms |
+| `MHC_FIX=triton` + `CUSTOM_AR=1` | 32 | 23696592 | 97.6 % | 16.3 / 62.7 / 192.4 / 319.5 / – | 61 / 90 / – ms |
+| `MHC_FIX=triton` + `CUSTOM_AR=1` | 64 | 23696593 | 97.6 % | 16.3 / – / 192.5 / 318.2 / 466.8 | 61 / 90 / 126 ms |
 | `MHC_FIX=triton` | 32 (default) | 23591543 | 97.4 % | 15.5 / 56.1 / 187.0 / 296.1 / – | 64 / 97 / – ms |
 | `MHC_FIX=triton` | 64 | 23591544 | 97.8 % | 15.5 / 56.2 / 187.9 / **298.0** / **436.6** | 64 / 97 / 136 ms |
 | `MHC_FIX=direct` | 32 | 23572794 | 97.4 % | 14.3 / 51.1 / 168.5 / 263.2 / – | 69 / 107 / – ms |
@@ -601,6 +604,31 @@ TP8 gains 4 % at 128 users over RCCL (604 → 627 tok/s), but DP2×TP4 barely mo
 DP's MoE layers reduce over all 8 GCDs through the `ep` group, which keeps RCCL. TP8 stays the
 recipe; DP2 is within 3 % at 64–128 users and not worth its latency.
 
+### Compressor score GEMMs (Nov 13)
+
+Each compressor layer computes `torch.mm(hidden, fused_wkv_wgate.weight.T,
+out_dtype=torch.float32)`: bf16 [T, 4096] times a replicated bf16 [N, 4096] weight, N = 2048
+(ratio-4), 1024 (ratio-128) or 512 (ratio-4 indexer), 60 calls per decode step. For an fp32
+output hipBLASLt picks `Cijk_..._BSS_..._MT64x16x16_MI16x16x1`, i.e. fp32 MFMA on bf16
+inputs: 66 µs per call at 32 users, 111 µs at 64, where the weight read takes ~10 µs.
+`SCORE_GEMM=1` (`score_gemm.py`) replaces `attn_gemm_parallel_execute` (serial on ROCm
+anyway) with a Triton kernel: bf16 MFMA, fp32 accumulation (bf16 products are exact in
+fp32), split-K with a deterministic partial sum, tiles swept per N and batch; batches over
+128 tokens (prefill) stay on `torch.mm`.
+
+One GCD, graph replay, each call on a different weight copy (job 23706116); per decode step
+(20 calls of each N):
+
+| batch | 1 | 4 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|
+| `torch.mm` (ms) | 5.85 | 3.77 | 3.80 | 3.96 | 6.54 | 8.54 |
+| Triton (ms) | 0.91 | 0.91 | 0.99 | 1.11 | 1.45 | 2.03 |
+
+Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving (jobs
+23706308/9, against 23696592/3): TPOT at 1 user 61 → 56 ms (16.3 → 17.7 tok/s, +8 %),
+192.5 → 198.2 tok/s at 16 users, 319 → 324 at 32 and 466.8 → 481.8 at 64 (+3 %; TPOT 126 →
+122 ms). GSM8K 97.0 / 97.2 % (97.0–97.8 % across all recipe runs).
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -639,9 +667,8 @@ recipe; DP2 is within 3 % at 64–128 users and not worth its latency.
   7. Fuse the FP8 activation rounding into one kernel (~6 ms per step now, quant + dequant).
   8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
-  10. The compressors' `torch.mm(..., out_dtype=float32)` score GEMMs (hipBLASLt general
-      tile, 4–8 ms per step). (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128
-      users, above.)
+  10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
+      (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
@@ -688,6 +715,8 @@ recipe; DP2 is within 3 % at 64–128 users and not worth its latency.
 | `test_moe_pad_rows.py`, `run_moe_pad_test.sh` | `triton_unfused` experts with duplicate-id pad rows; sweep over capture sizes |
 | `plugin/lumi_dsv4_debug/custom_ar.py` | vLLM custom all-reduce on gfx90a, coherent via the uncached buffer or an L2 fence (`DSV4_CUSTOM_AR`) |
 | `test_allreduce.py`, `run_allreduce_test.sh` | custom all-reduce vs RCCL on 8 GCDs, on changing data, graph timing |
+| `plugin/lumi_dsv4_debug/score_gemm.py` | compressor score GEMMs in Triton, bf16 MFMA with fp32 output (`DSV4_SCORE_GEMM`) |
+| `test_score_gemm.py`, `run_score_gemm_test.sh` | that kernel vs `torch.mm`: error vs fp64, tile sweep, per-step totals |
 | `plugin/lumi_dsv4_debug/sparse_split.py` | split-K sparse attention decode for batches ≤ 16 (`DSV4_SPARSE_SPLIT`) |
 | `test_sparse_split.py`, `run_sparse_split_test.sh` | split-K vs fallback decode per layer type and batch, split-count sweep |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
