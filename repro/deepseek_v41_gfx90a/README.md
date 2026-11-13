@@ -6,7 +6,9 @@ port work and before downloading its 475 GiB.
 
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
-> needles, decode = prefill to 19.7k tokens (job 23668248). See "Phase 4: speed" below.**
+> needles, decode = prefill to 19.7k tokens (job 23668248). See "Phase 4: speed" below.
+> Async scheduling (drop `NO_ASYNC=1`) is correct too and gives 15.2 / 282 / 428 tok/s, at
+> the cost of ~43 % less KV cache (23 instead of 41 concurrent 32k requests, job 23696171).**
 >
 > **Status (2026-11-11): V4.1-Flash serves correctly on one node through a plugin on vLLM
 > 0.26: GSM8K 99/100, no garbage, needles at 2.1k and 16.8k tokens right, decode agrees with
@@ -242,6 +244,7 @@ GSM8K (99–100/100).
 | + CUDA graphs (`COMPILE=1`, `NO_ASYNC=1`) | 23666441 | 9.4 / 35.9 / 117.7 / 183.7 | 106 / 157 ms |
 | + mHC in Triton (`MHC_TRITON=1`) | 23667236 | 13.5 / 52.6 / 169.0 / 260.9 | 74 / 110 ms |
 | + split-K prenorm GEMM in Triton, `--max-num-seqs 64` | 23668248 | **14.0 / – / – / 263.9**, **400.0 at 64** | **71 / 108 ms**, 146 at 64 |
+| same, async scheduling (no `NO_ASYNC=1`) | 23696171 | 15.2 / – / – / 282.0, 427.8 at 64 | 65 / 95 ms, 130 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -272,9 +275,18 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
 - **64 sequences** (job 23668248): GSM8K 98.5 % of 200, no garbage, both needles; V4's
   pad-row bug at 64 does not show (ROUTER_GUARD=1 is on by default). With
   `--no-async-scheduling` vLLM reports 1.35M tokens of KV cache (41 concurrent 32k requests).
+- **Async scheduling** (job 23696171, the recipe without `NO_ASYNC=1`, same code): no hang
+  in a 21-minute probe + sweep, GSM8K 98.0 % of 200 (4 misses vs 3: 2 shared, 2 only
+  with async, 1 only without; noise), both needles, decode = prefill to 19.7k (the first three diag prompts
+  identical to the last digit). **+8.5 % at 1 user, +6.9 % at 32, +7.0 % at 64** (TPOT
+  71 → 65, 108 → 95, 146 → 130 ms): the host's batch preparation now overlaps the GPU step.
+  The cost, as on V4: the KV cache estimate falls from 1.35M to 0.77M tokens (41 → 23
+  concurrent 32k requests), because each sliding-window layer reserves its window plus the
+  tokens of every batch in flight, and async keeps two batches in flight. Choose by
+  workload: async for short prompts at up to 64 users, `NO_ASYNC=1` when many long
+  contexts must fit at once.
 
-Open: async scheduling (V4: +4 %, but it halves the KV capacity estimate and once raced with
-the Triton logits); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+Open: FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce
