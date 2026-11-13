@@ -12,8 +12,11 @@ V4.1's per-rank decode shapes at TP=8: 8 heads, head dim 512 (448 FP8 + 64 bf16 
 """
 
 import itertools
+import os
 
-import torch
+os.environ["DSV41_SPARSE_DECODE"] = "1"  # before the vendored module (and its hooks) loads
+
+import torch  # noqa: E402
 
 import vllm.v1.attention.ops.rocm_aiter_mla_sparse as m  # noqa: E402 (vendored, via sitecustomize)
 from lumi_dsv41.sparse_decode import num_splits, sparse_decode  # noqa: E402
@@ -23,7 +26,10 @@ dev = "cuda"
 H, NOPE, ROPE, BS = 8, 448, 64, 64
 HD = NOPE + ROPE
 SCALE = HD**-0.5
-stock = m._rocm_sparse_attn_decode_ragged_triton
+shim = m._rocm_sparse_attn_decode_ragged_triton
+assert shim.__name__ == "decode", "DSV41_SPARSE_DECODE hook not installed"
+stock = next(c.cell_contents for c in shim.__closure__
+             if getattr(c.cell_contents, "__name__", "") == "_rocm_sparse_attn_decode_ragged_triton")
 print(f"device {torch.cuda.get_device_properties(0).gcnArchName}, CUs {m._decode_cu_count()}")
 
 
@@ -97,6 +103,12 @@ for B, extra, vary, use_sink in itertools.product((1, 7, 32, 128), (0, 512), (Fa
         args += [comp, ei, ep]
         kw = dict(extra_cache=comp, extra_indices=ei, extra_indptr=ep)
     r = ref(*args).float()
+    names = ["q", "main_cache", "main_indices", "main_indptr", "scale", "attn_sink",
+             "nope_head_dim", "rope_head_dim", "extra_cache", "extra_indices", "extra_indptr"]
+    via_hook = shim(**dict(zip(names, args))).float()  # keywords, as vLLM's caller passes
+    direct = sparse_decode(q, swa, mi, mp, SCALE, sink if use_sink else None, **kw).float()
+    if not torch.equal(via_hook, direct):
+        bad.append((B, extra, vary, use_sink, "hook != direct"))
     for S in (1, 3, 8):
         o = sparse_decode(q, swa, mi, mp, SCALE, sink if use_sink else None, splits=S, **kw).float()
         err = ((o - r).abs().max() / r.abs().max().clamp_min(1e-6)).item()
@@ -105,7 +117,7 @@ for B, extra, vary, use_sink in itertools.product((1, 7, 32, 128), (0, 512), (Fa
     print(f"  B={B:3d} extra={extra:3d} ragged={vary:d} sink={use_sink:d}: last err {err:.1e}")
 
 print("2. GPU us per call (graph replay); config = (splits, BLOCK_K, warps, stages)")
-CONFIGS = list(itertools.product((1, 2, 4, 8, 16), (16, 32), (4, 8), (1, 2)))
+CONFIGS = list(itertools.product((1, 2, 4, 8, 16), (16,), (4,), (1,)))
 results = {}
 for layer, extra in (("SWA", 0), ("top-k", 512)):
     for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
@@ -119,6 +131,7 @@ for layer, extra in (("SWA", 0), ("top-k", 512)):
             kw = dict(extra_cache=comp, extra_indices=ei, extra_indptr=ep)
         t_ref = timed(lambda: ref(*args))
         t_split = timed(lambda: split_k(*args))
+        t_auto = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, **kw))
         times = {}
         for S, bk, nw, st in CONFIGS:
             try:
@@ -130,7 +143,8 @@ for layer, extra in (("SWA", 0), ("top-k", 512)):
         results[(layer, B)] = times
         cfg = min(times, key=times.get)
         top = sorted(times, key=times.get)[:4]
-        print(f"{layer:<6} B={B:>4} fallback {t_ref:6.1f} split-K {t_split:6.1f} best {times[cfg]:6.1f} "
+        print(f"{layer:<6} B={B:>4} fallback {t_ref:6.1f} split-K {t_split:6.1f} auto {t_auto:6.1f}"
+              f" (S{num_splits(B, bool(extra))}) best {times[cfg]:6.1f} "
               + " ".join(f"{c}:{times[c]:.0f}" for c in top))
         if layer == "top-k" and B in (32, 64):
             c = cfg

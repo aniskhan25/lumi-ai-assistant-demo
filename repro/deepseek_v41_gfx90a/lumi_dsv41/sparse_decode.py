@@ -9,7 +9,9 @@ That loop walks 16 entries per iteration, gathers the UE8M0 scale byte once per 
 (16 x 512 loads), and does the 448 FP8 dims (padded to 512) and the 64 bf16 RoPE dims as
 two dot pairs.
 
-Here, per program (query, split): BLOCK_K entries per iteration, scales loaded once per
+Here (GPU time per top-k layer call vs the fallback, job 23707915: 409 -> 30 us at 1 query,
+434 -> 108 at 32, 445 -> 188 at 64, 888 -> 336 at 128; the split-K path 62 / 278 / 584 /
+1249), per program (query, split): BLOCK_K entries per iteration, scales loaded once per
 token and broadcast over their 64 dims, NoPE and RoPE assembled into one [BLOCK_K, 512]
 bf16 tile so that each step is one QK^T and one PV dot over the 8 (padded to 16) heads;
 main and extra are walked as one concatenated list, split evenly across NUM_SPLITS
@@ -153,14 +155,18 @@ def _reduce_kernel(pm_ptr, pl_ptr, pacc_ptr, sink_ptr, out_ptr, out_s0, out_s1, 
     tl.store(out_ptr + b * out_s0 + hb * out_s1 + d, o.to(out_ptr.dtype.element_ty))
 
 
-def num_splits(num_queries: int, cus: int = 110) -> int:
-    """KV splits per query: about two workgroups per CU (set from test_sparse_decode.py)."""
-    return max(1, min(8, (2 * cus) // max(1, num_queries)))
+def num_splits(num_queries: int, has_extra: bool) -> int:
+    """KV splits per query: ~512 workgroups for top-k layers (128 + 512 entries), ~256 for
+    SWA-only layers (128), as a power of two. From test_sparse_decode.py's sweep (job
+    23707915, BLOCK_K 16, 4 warps); within 10 % of the best split count at 1-128 queries."""
+    target, cap = (512, 16) if has_extra else (256, 8)
+    s = max(1, min(cap, target // max(1, num_queries)))
+    return 1 << (s.bit_length() - 1)
 
 
 def sparse_decode(q, main_cache, main_indices, main_indptr, scale, attn_sink,
                   extra_cache=None, extra_indices=None, extra_indptr=None, out=None,
-                  is_fnuz=False, splits=None, block_k=32, num_warps=4, num_stages=1, deq=0):
+                  is_fnuz=False, splits=None, block_k=16, num_warps=4, num_stages=1, deq=0):
     """Decode attention like rocm_aiter_mla_sparse._rocm_sparse_attn_decode_ragged_triton
     for V4/V4.1's fp8_ds_mla record (448 FP8 NoPE + 64 bf16 RoPE, head dim 512) and up
     to 16 heads per rank. q [B, H, 512] bf16; indices/indptr int32 ragged lists."""
@@ -173,7 +179,7 @@ def sparse_decode(q, main_cache, main_indices, main_indptr, scale, attn_sink,
     has_extra = extra_cache is not None and extra_indices is not None and extra_indptr is not None
     if not has_extra:
         extra_cache, extra_indices, extra_indptr = main_cache, main_indices, main_indptr
-    S = splits or num_splits(B)
+    S = splits or num_splits(B, has_extra)
     BH = 16
     pm = torch.empty(B * S * BH, device=q.device, dtype=torch.float32)
     pl = torch.empty_like(pm)

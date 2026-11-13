@@ -618,6 +618,45 @@ def _sparse_split(module) -> None:
     module._rocm_sparse_attn_decode_ragged_triton = split_decode
 
 
+def _sparse_decode(module) -> None:
+    """DSV41_SPARSE_DECODE=1: decode sparse attention with lumi_dsv41/sparse_decode.py on
+    gfx90a, at every batch size (2.1-14x the one-pass fallback, 1.6-6x upstream's split-K
+    path at 1-128 queries; job 23707915). Supersedes DSV41_SPARSE_SPLIT. Calls the stock
+    function for what it does not cover: FNUZ caches, MXFP8 output, fused inverse RoPE
+    (withheld on gfx90a by _decode_inv_rope anyway), more than 16 heads, other dims."""
+    import os
+
+    if module._ON_GFX942 or module._ON_GFX950 or os.environ.get("DSV41_SPARSE_DECODE") != "1":
+        return
+    from .sparse_decode import sparse_decode
+
+    stock = module._rocm_sparse_attn_decode_ragged_triton
+    names = ("q", "main_cache", "main_indices", "main_indptr", "scale", "attn_sink",
+             "nope_head_dim", "rope_head_dim", "extra_cache", "extra_indices", "extra_indptr",
+             "out")
+
+    def decode(*args, **kwargs):
+        a = dict(zip(names, args))
+        a.update(kwargs)
+        q, out = a["q"], a.get("out")
+        if (module.current_platform.is_fp8_fnuz() or a.get("out_mxfp8") is not None
+                or a.get("inv_rope_positions") is not None or a.get("extra_cache_nan_free")
+                or a["nope_head_dim"] != 448 or a["rope_head_dim"] != 64 or q.shape[1] > 16
+                or q.stride(-1) != 1 or (out is not None and out.stride(-1) != 1)):
+            return stock(*args, **kwargs)
+        ei, ep = a.get("extra_indices"), a.get("extra_indptr")
+        return sparse_decode(
+            q, a["main_cache"], module._as_int32_contiguous_1d(a["main_indices"]),
+            module._as_int32_contiguous_1d(a["main_indptr"]), a["scale"], a["attn_sink"],
+            extra_cache=a.get("extra_cache"),
+            extra_indices=None if ei is None else module._as_int32_contiguous_1d(ei),
+            extra_indptr=None if ep is None else module._as_int32_contiguous_1d(ep),
+            out=out,
+        )
+
+    module._rocm_sparse_attn_decode_ragged_triton = decode
+
+
 def _paged_logits_unshuffle(module) -> None:
     """V4.1's indexer K writer (indexer_k_store.py) stores values on ROCm in the 16x16-tiled
     ("SHUFFLE") layout, which prefill's gather and aiter's Preshuffle decode kernel read.
@@ -811,7 +850,7 @@ VENDORED_HOOKS = {
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang, _mhc_triton],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
         _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
-        _paged_logits_unshuffle, _paged_logits_triton, _sparse_split],
+        _paged_logits_unshuffle, _paged_logits_triton, _sparse_split, _sparse_decode],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
 }

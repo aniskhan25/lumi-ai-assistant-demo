@@ -102,6 +102,9 @@ if [ "${V41:-0}" = 1 ]; then
   # SPARSE_SPLIT=1: lumi_dsv41's split-K decode gate for V4.1's vendored attention ops; the
   # V4 plugin's would patch 0.26's module and select gfx950-only kernels there.
   export DSV41_SPARSE_SPLIT="${SPARSE_SPLIT:-0}"; SPARSE_SPLIT=0
+  # SPARSE_DECODE=1: lumi_dsv41/sparse_decode.py for all decode batch sizes (wraps the
+  # SPARSE_SPLIT gate when both are set, so it wins)
+  export DSV41_SPARSE_DECODE="${SPARSE_DECODE:-0}"
   # CUSTOM_AR=1 comes from the V4 plugin (custom_ar.py): model-independent.
   # SCORE_GEMM patches V4's attention class; V4.1 runs only 4 fp32 score GEMMs per step
   # (0.3 ms at 32 users, graph profile job 23701511, vs 62 / 4 ms on V4).
