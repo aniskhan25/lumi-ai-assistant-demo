@@ -587,6 +587,20 @@ Two fixes (`custom_ar.py`), both exact:
 hidden states the MoE routing degenerates. The gain matches the kernel numbers: ~58 µs less
 per all-reduce at 32 tokens, ~86 per step.
 
+With the custom all-reduce, at 128 users (500 GSM8K each; the server logs list `CUSTOM` for
+the TP groups, while the job `.out` filters those lines out):
+
+| layout | `--max-num-seqs` | job | GSM8K | tok/s at 1 / 16 / 32 / 64 / 128 users | TPOT at 1 / 32 / 64 / 128 |
+|---|---|---|---|---|---|
+| TP8 | 128 | 23700246 | 97.6 % | 16.3 / – / 315.6 / 465.2 / **626.8** | 61 / 90 / 126 / 191 ms |
+| DP2×TP4 | 64 per replica | 23700244 | 97.0 % | 14.3 / – / 295.6 / **478.8** / **631.0** | 69 / 97 / 116 / 153 ms |
+| DP2×TP4 | 32 per replica | 23700245 | 97.2 % | 14.2 / 172.3 / 312.6 / 384.9 / – | 70 / 87 / 115 / – ms |
+
+TP8 gains 4 % at 128 users over RCCL (604 → 627 tok/s), but DP2×TP4 barely moves (476.5 →
+478.8 at 64, 600 → 631 at 128) and stays slower per user (69 vs 61 ms at 1 user): without EP,
+DP's MoE layers reduce over all 8 GCDs through the `ep` group, which keeps RCCL. TP8 stays the
+recipe; DP2 is within 3 % at 64–128 users and not worth its latency.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -626,7 +640,8 @@ per all-reduce at 32 tokens, ~86 per step.
   8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
   10. The compressors' `torch.mm(..., out_dtype=float32)` score GEMMs (hipBLASLt general
-      tile, 4–8 ms per step), and DP2×TP4 combined with the custom all-reduce.
+      tile, 4–8 ms per step). (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128
+      users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
