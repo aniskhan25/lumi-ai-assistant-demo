@@ -1,8 +1,9 @@
-"""vLLM's custom all-reduce on gfx90a, with an L2 fence (DSV4_CUSTOM_AR=1).
+"""vLLM's custom all-reduce on gfx90a, made coherent (DSV4_CUSTOM_AR=copy|fence, 1 = copy).
 
 vLLM 0.26 enables its custom all-reduce on ROCm only for gfx94x/95x. On gfx90a its kernels
 are built and LUMI's 8 GCDs are all one XGMI hop apart, so lifting that gate makes TP
-all-reduces 3-4.7x faster than RCCL at decode sizes (test_allreduce.py). But on its own it
+all-reduces 1.4-3.4x faster than RCCL at decode sizes (test_allreduce.py, job 23696578;
+copy mode 12-54 us vs 37-123 us). But on its own it
 gives garbage in serving (GSM8K 0 %, jobs 23671136/7): the one-stage kernel reads every
 peer's input buffer over XGMI after a relaxed start barrier, and on gfx90a the L2 is per
 GCD and not coherent across XGMI. The peer's input can still sit dirty in the peer's L2,
