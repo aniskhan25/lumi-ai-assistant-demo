@@ -4,10 +4,10 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-13): 17.9 / 200.2 / 299.4 / 422.2 tok/s at 1 / 16 / 32 / 64 users,
-> GSM8K 99.0 % (200), needles, decode = prefill (job 23706326), after merging V4's custom
-> all-reduce (`CUSTOM_AR=1`) and porting its split-K sparse decode up to 32 queries
-> (`SPARSE_SPLIT=32`). Sparse attention is now the largest cost (graph profile below).**
+> **Status (2026-11-13): 18.7 / 207.1 / 308.9 / 429.9 tok/s at 1 / 16 / 32 / 64 users,
+> GSM8K 99.0 % (200), needles, decode = prefill (job 23706895), after merging V4's custom
+> all-reduce (`CUSTOM_AR=1`), porting its split-K sparse decode up to 32 queries
+> (`SPARSE_SPLIT=32`) and moving V4.1's query RoPE to Triton. Sparse attention is now the largest cost (graph profile below).**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -253,7 +253,8 @@ GSM8K (99–100/100).
 | + custom all-reduce (`CUSTOM_AR=1`), `NO_ASYNC=1` | 23698376 | **14.8 / – / – / 279.8**, **423.5 at 64** | **67 / 102 ms**, 138 at 64 |
 | split-K sparse decode instead (`SPARSE_SPLIT=1`, no `CUSTOM_AR`) | 23698452 | **16.9** / – / 194.3 / 264.5, 402.2 at 64 | **59** / 108 ms, 146 at 64 |
 | both (`CUSTOM_AR=1 SPARSE_SPLIT=1`) | 23700637 | 17.8 / 69.2 / 199.5 / 282.5, 422.2 at 64 | 55 / 100 ms, 138 at 64 |
-| **split-K up to 32 queries** (`SPARSE_SPLIT=32`): the recipe | 23706326 | **17.9 / – / 200.2 / 299.4**, **422.2 at 64** | **55 / 95 ms**, 138 at 64 |
+| split-K up to 32 queries (`SPARSE_SPLIT=32`) | 23706326 | 17.9 / – / 200.2 / 299.4, 422.2 at 64 | 55 / 95 ms, 138 at 64 |
+| **+ query RoPE in one Triton kernel** (always on): the recipe | 23706895 | **18.7 / – / 207.1 / 308.9**, **429.9 at 64** | **53 / 91 ms**, 135 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -346,9 +347,16 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   decode = prefill. V4 lost 10 ms at 32 users with the same cutoff (unexplained); V4.1,
   with almost twice the top-k layers, gains. Above 32 queries the split path is slower
   than the fallback (611 vs 447 µs at 64), so 64 users need a better kernel.
+- **Query in Triton** (`lumi_dsv41/ops.py:_query_kernel`, always on): V4.1's query (head
+  padding, optional norm, GPT-J RoPE on the last 64 dims) was ~10 strided torch kernels per
+  layer around 0.26's fused KV kernel. `test_ops.py` (job 23706874): equal to the torch
+  reference or within one bf16 step, 36.9 → 2.1 µs per call at 32 tokens. Serving (job
+  23706895): **+4.5 % at 1 user, +3.4 % at 16, +3.2 % at 32, +1.8 % at 64**, more than the
+  1.5 ms of kernel time (fewer launches between graph pieces), GSM8K 99.0 % (misses 119
+  and 184, both seen before), needles, decode = prefill.
 
 Open: a gfx90a sparse-decode kernel for 32–64 queries (V4.1's largest cost, 28 % of a
-32-user step); the query RoPE in Triton; FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+32-user step); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce
