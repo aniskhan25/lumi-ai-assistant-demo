@@ -9,11 +9,16 @@ GCD and not coherent across XGMI. The peer's input can still sit dirty in the pe
 and the reader's L2 keeps remote lines from the previous step (graph buffers reuse the same
 addresses). MI300 differs in its cache coherence design.
 
-The fix: a one-thread kernel right before each graph-captured custom all-reduce, doing a
-system-scope acq_rel atomic. On gfx90a that compiles to buffer_wbl2 (write back dirty L2
-lines, so peers read this rank's input from memory) and buffer_invl2 (drop cached remote
-lines). Eager calls go to RCCL instead: there the C++ op copies the input into its IPC
-buffer and launches the kernel in one call, leaving no point for the fence.
+Two fixes (DSV4_CUSTOM_AR=copy|fence):
+
+copy   Always take the kernel's eager path, also in graphs: copy the input into vLLM's IPC
+       buffer, which ROCm builds allocate uncached ("for signal on MI200"), so neither the
+       writer's nor the reader's L2 holds it. Costs a device copy of at most max_size.
+fence  Keep reading the caller's (cached) tensor in graphs, behind a one-thread kernel doing
+       a system-scope acq_rel atomic, which on gfx90a compiles to buffer_wbl2 (write back
+       dirty L2 lines) and buffer_invl2 (drop cached remote lines). Eager calls go to RCCL.
+       Correct (GSM8K 97.2 %, jobs 23696206/7), but writing back a serving L2 full of
+       fresh activations costs about half of the gain.
 """
 
 import torch
@@ -35,7 +40,9 @@ def fence_asm(buf: torch.Tensor) -> str:
     return _xgmi_fence_kernel[(1,)](buf, num_warps=1).asm["amdgcn"]
 
 
-def install() -> None:
+def install(mode: str = "copy") -> None:
+    if mode not in ("copy", "fence"):
+        raise ValueError(f"DSV4_CUSTOM_AR={mode!r}: expected copy or fence")
     from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
     from vllm.platforms.rocm import RocmPlatform
 
@@ -44,6 +51,13 @@ def install() -> None:
 
     should = CustomAllreduce.should_custom_ar
     reduce = CustomAllreduce.all_reduce
+
+    if mode == "copy":
+        def copy_all_reduce(self, inp, *, out=None, registered=False):
+            return reduce(self, inp, out=out, registered=False)  # via the uncached buffer
+
+        CustomAllreduce.all_reduce = copy_all_reduce
+        return
 
     def should_custom_ar(self, inp):
         return self._IS_CAPTURING and should(self, inp)  # eager -> RCCL

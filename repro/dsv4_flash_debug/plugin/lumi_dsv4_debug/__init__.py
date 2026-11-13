@@ -29,9 +29,10 @@ DSV4_ROUTER_GUARD=1  nan_to_num the MoE gate logits before ROCm's top-k (router_
                      corrupt the MoE routing of real tokens. =count also logs how many.
 DSV4_SPARSE_SPLIT=1  Decode sparse attention with vLLM's split-K kernels, gated to gfx942/950,
                      instead of the one-workgroup-per-query fallback (sparse_split.py).
-DSV4_CUSTOM_AR=1     Use vLLM's custom all-reduce for graph-captured TP all-reduces (0.26 enables
-                     it on ROCm only for gfx94x/95x), with an L2 writeback/invalidate fence
-                     before each: without it, ranks read stale peer data (custom_ar.py).
+DSV4_CUSTOM_AR=copy|fence (1 = copy)
+                     Use vLLM's custom all-reduce for TP (0.26 enables it on ROCm only for
+                     gfx94x/95x), made coherent on gfx90a: as is, ranks read stale peer data
+                     from their L2 (custom_ar.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
                      layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
@@ -186,11 +187,12 @@ def register() -> None:
 
     if not current_platform.is_rocm():
         return
-    if os.environ.get("DSV4_CUSTOM_AR") == "1":
+    car = os.environ.get("DSV4_CUSTOM_AR", "0")
+    if car != "0":
         from . import custom_ar
 
-        custom_ar.install()
-        _log("DSV4_CUSTOM_AR: vLLM custom all-reduce in CUDA graphs, behind an L2 fence")
+        custom_ar.install("copy" if car == "1" else car)
+        _log(f"DSV4_CUSTOM_AR={car}: vLLM custom all-reduce on gfx90a (custom_ar.py)")
     mhc_mode = os.environ.get("DSV4_MHC_FIX", "")
     if os.environ.get("DSV4_TORCH_MHC") == "1":
         if mhc_mode:

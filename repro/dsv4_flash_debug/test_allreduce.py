@@ -5,13 +5,16 @@ into the gfx90a container and LUMI's 8 GCDs are all one XGMI hop apart. Forced o
 garbage in serving although a test that reduced the same input every time passed: on
 gfx90a the L2 is per GCD and not coherent across XGMI, so stale data looks right when the
 data never changes. Here every replay first writes new data into the input with a kernel,
-as a model layer does, and three variants are checked against the exact sum:
+as a model layer does, and four variants are checked against the exact sum:
 
-    RCCL          vLLM's PyNccl, as served today
-    custom        the custom all-reduce kernel alone
-    custom+fence  with custom_ar.py's L2 writeback/invalidate fence before it (DSV4_CUSTOM_AR)
+    RCCL     vLLM's PyNccl, as served today
+    custom   the custom all-reduce reading the caller's tensor, as vLLM does in graphs
+    fence    custom_ar.py's L2 writeback/invalidate fence first (DSV4_CUSTOM_AR=fence)
+    copy     input copied into vLLM's uncached IPC buffer first (DSV4_CUSTOM_AR=copy)
 
-then timed as served: CUDA-graph replays of bf16 all-reduces of [tokens, 4096].
+then timed as served: CUDA-graph replays of bf16 all-reduces of [tokens, 4096], each after
+a kernel that writes 16 MB (2x the L2), since the fence's write-back cost depends on how
+much dirty data the L2 holds; the time of that kernel alone is subtracted.
 
     torchrun --nproc-per-node 8 test_allreduce.py
 """
@@ -67,7 +70,16 @@ def fenced(x):
     return ca.all_reduce(x, registered=True)
 
 
-VARIANTS = {"RCCL": rccl, "custom": custom, "custom+fence": fenced}
+def copied(x):
+    return ca.all_reduce(x, registered=False)
+
+
+VARIANTS = {"RCCL": rccl, "custom": custom, "fence": fenced, "copy": copied}
+junk = torch.zeros(8 << 20, device=dev, dtype=torch.bfloat16)  # 16 MB
+
+
+def none(x):
+    return x
 
 
 def capture(calls):
@@ -105,7 +117,7 @@ def max_err(fn, t):
 def graph_time(fn, t):
     """us per call: replays of a graph holding ITERS calls (as served)."""
     x = torch.randn(t, HIDDEN, device=dev).bfloat16()
-    g, _ = capture(lambda: [fn(x) for _ in range(ITERS)][-1])
+    g, _ = capture(lambda: [(junk.add_(1), fn(x))[1] for _ in range(ITERS)][-1])
     times = []
     for _ in range(3):
         dist.barrier(group=cpu_group)
@@ -125,20 +137,22 @@ nccl.all_reduce(torch.zeros(8, HIDDEN, device=dev, dtype=torch.bfloat16))
 torch.cuda.synchronize()
 
 if rank == 0:
-    print(f"\nmax |error| vs exact fp32 sum over {STEPS} replays on new data; GPU us per call")
-    print(f"{'tokens':>6} {'KiB':>5}" + "".join(f"{n + ' err':>17}" for n in VARIANTS)
-          + "".join(f"{n + ' us':>16}" for n in VARIANTS))
+    print(f"\nmax |error| vs exact fp32 sum over {STEPS} replays on new data; "
+          "GPU us per call after a 16 MB write")
+    print(f"{'tokens':>6} {'KiB':>5}" + "".join(f"{n + ' err':>14}" for n in VARIANTS)
+          + "".join(f"{n + ' us':>10}" for n in VARIANTS))
 ok = True
 for t in SIZES:
     errs = {n: max_err(fn, t) for n, fn in VARIANTS.items()}
-    times = {n: graph_time(fn, t) for n, fn in VARIANTS.items()}
+    base = graph_time(none, t)
+    times = {n: graph_time(fn, t) - base for n, fn in VARIANTS.items()}
     tol = max(2 * errs["RCCL"], 0.125)
-    ok &= errs["custom+fence"] <= tol
+    ok &= errs["fence"] <= tol and errs["copy"] <= tol
     if rank == 0:
         print(f"{t:>6} {t * HIDDEN * 2 // 1024:>5}"
-              + "".join(f"{errs[n]:>13.3f}{'' if errs[n] <= tol else ' BAD':>4}" for n in VARIANTS)
-              + "".join(f"{times[n]:>16.1f}" for n in VARIANTS))
+              + "".join(f"{errs[n]:>10.3f}{'' if errs[n] <= tol else ' BAD':>4}" for n in VARIANTS)
+              + "".join(f"{times[n]:>10.1f}" for n in VARIANTS))
 if rank == 0:
-    print("PASS (custom+fence matches the exact sum)" if ok else "FAIL")
+    print("PASS (fence and copy match the exact sum)" if ok else "FAIL")
 ca.close()
 dist.destroy_process_group()
