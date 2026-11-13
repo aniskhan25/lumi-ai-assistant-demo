@@ -245,6 +245,7 @@ GSM8K (99–100/100).
 | + mHC in Triton (`MHC_TRITON=1`) | 23667236 | 13.5 / 52.6 / 169.0 / 260.9 | 74 / 110 ms |
 | + split-K prenorm GEMM in Triton, `--max-num-seqs 64` | 23668248 | **14.0 / – / – / 263.9**, **400.0 at 64** | **71 / 108 ms**, 146 at 64 |
 | same, async scheduling (no `NO_ASYNC=1`) | 23696171 | 15.2 / – / – / 282.0, 427.8 at 64 | 65 / 95 ms, 130 at 64 |
+| + custom all-reduce (`CUSTOM_AR=1`), `NO_ASYNC=1` | 23698376 | **14.8 / – / – / 279.8**, **423.5 at 64** | **67 / 102 ms**, 138 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -285,6 +286,15 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   tokens of every batch in flight, and async keeps two batches in flight. Choose by
   workload: async for short prompts at up to 64 users, `NO_ASYNC=1` when many long
   contexts must fit at once.
+- **Custom all-reduce** (job 23698376, `CUSTOM_AR=1` from the V4 plugin's `custom_ar.py`,
+  merged from `perf/dsv4-flash-gfx90a-compile`): vLLM's one-shot all-reduce instead of RCCL
+  for the TP group, with the input always copied into the uncached IPC buffer, which keeps it
+  coherent across the GCDs' L2 caches (the stock kernel read stale peer data on V4, GSM8K 0 %).
+  V4.1's AMD model keeps sequence parallelism off, so attention and MoE outputs are TP
+  all-reduces, and the log shows `['CUSTOM', 'PYNCCL']` for `tp:0` (0.26 enables it for TP
+  groups only). GSM8K 98.5 % of 200 (3 misses, 2 shared with the baseline), both needles,
+  decode = prefill to 19.7k, KV unchanged (1.35M tokens). **+5.5 % at 1 user, +6.0 % at 32,
+  +5.9 % at 64.**
 
 Open: FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
@@ -301,7 +311,7 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 NO_ASYNC=1 \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 NO_ASYNC=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
