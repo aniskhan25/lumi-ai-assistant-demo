@@ -52,6 +52,7 @@
 #   SPARSE_SPLIT=1           split-K sparse attention decode (vLLM gates it to gfx942/950; plugin sparse_split.py;
 #                            V41: =N sets the query cutoff, default 16)
 #   CUSTOM_AR=copy|fence     vLLM custom all-reduce instead of RCCL (vLLM gates it to gfx94x/95x; 1 = copy)
+#   SCORE_GEMM=1             compressor score GEMMs in Triton instead of hipBLASLt's fp32-MFMA kernel (plugin score_gemm.py)
 #   NANFILL=1                fill fresh float allocations with NaN (exposes reads of unwritten memory)
 #
 # DeepSeek-V4.1-Flash (V41=1): the lumi_dsv41 plugin (this directory) on Model Runner V2.
@@ -102,6 +103,9 @@ if [ "${V41:-0}" = 1 ]; then
   # V4 plugin's would patch 0.26's module and select gfx950-only kernels there.
   export DSV41_SPARSE_SPLIT="${SPARSE_SPLIT:-0}"; SPARSE_SPLIT=0
   # CUSTOM_AR=1 comes from the V4 plugin (custom_ar.py): model-independent.
+  # SCORE_GEMM patches V4's attention class; V4.1 runs only 4 fp32 score GEMMs per step
+  # (0.3 ms at 32 users, graph profile job 23701511, vs 62 / 4 ms on V4).
+  if [ "${SCORE_GEMM:-0}" != 0 ]; then echo "V41=1: SCORE_GEMM targets V4's attention class"; exit 2; fi
   # COMPILE=1: 0.26 auto-enables breakable CUDA graphs (PIECEWISE without torch.compile)
   # only for its own model names; for V4.1 it falls back to eager without saying so
   # (job 23653728: "torch.compile is turned on, but the model ... does not support it").
@@ -111,7 +115,7 @@ fi
 if [ "${PLUGIN}" = 1 ]; then
   export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
-  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}"
+  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}"
   PP_DIRS="${REPO}/repro/dsv4_flash_debug/plugin"
   [ "${V41:-0}" = 1 ] && PP_DIRS="${REPO}/repro/deepseek_v41_gfx90a:${PP_DIRS}"
   RUN+=(--env "PYTHONPATH=${PP_DIRS}:/opt/venv/lib/python3.12/site-packages")
@@ -119,7 +123,7 @@ elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0} CUSTOM_AR=${CUSTOM_AR:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
