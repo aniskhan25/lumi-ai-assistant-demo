@@ -76,10 +76,11 @@ the batched indexer kernel, bf16 dense linears with fused FP8 activation roundin
 replace `TORCH_MHC=1` with `MHC_FIX=triton`, vLLM's fused TileLang hyper-connections with
 my Triton kernel in place of the broken TileLang pre stage. `ROUTER_GUARD=1` is the default and must stay on: under CUDA graphs it is
 what keeps NaN in pad rows out of the MoE router (see "A layout-sensitive bug under CUDA
-graphs" below).
+graphs" below). `CUSTOM_AR=1` replaces RCCL with vLLM's custom all-reduce, made coherent on
+gfx90a, for 1.03–1.11× (see "All-reduce" below).
 
 ```bash
-AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton \
+AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 \
   TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -90,6 +91,8 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
+| **`MHC_FIX=triton` + `CUSTOM_AR=1`** | 32 | 23696592 | 97.6 % | 16.3 / 62.7 / 192.4 / 319.5 / – | 61 / 90 / – ms |
+| **`MHC_FIX=triton` + `CUSTOM_AR=1`** | 64 | 23696593 | 97.6 % | 16.3 / – / 192.5 / 318.2 / **466.8** | 61 / 90 / 126 ms |
 | `MHC_FIX=triton` | 32 (default) | 23591543 | 97.4 % | 15.5 / 56.1 / 187.0 / 296.1 / – | 64 / 97 / – ms |
 | `MHC_FIX=triton` | 64 | 23591544 | 97.8 % | 15.5 / 56.2 / 187.9 / **298.0** / **436.6** | 64 / 97 / 136 ms |
 | `MHC_FIX=direct` | 32 | 23572794 | 97.4 % | 14.3 / 51.1 / 168.5 / 263.2 / – | 69 / 107 / – ms |
@@ -540,6 +543,68 @@ The fast path loses questions 93, 106 and 187 in both runs. In the probe these a
 misses, and the torch recipe at 64 sequences lost 93 as well. With the guard, the fast path
 is 1.35–1.46× the torch recipe at 1–64 users and costs at most 0.6 GSM8K points.
 
+### All-reduce: vLLM's custom kernel, made coherent on gfx90a (Nov 12–13)
+
+A decode profile at 32 and 64 users (job 23631328, eager) adds up to ~60 and ~71 ms of
+kernel time per step against 97 and 136 ms TPOT in graph mode; RCCL all-reduce is the
+largest suspect for the gap (the eager trace can't measure it: ranks wait on each other).
+vLLM's server log shows `Using ['PYNCCL'] all-reduce backends`: 0.26 enables its custom
+all-reduce on ROCm only for gfx94x/95x (`RocmPlatform.use_custom_allreduce`). Its kernels
+are in the gfx90a container, and amdsmi reports all 8 GCDs of a LUMI-G node one XGMI hop
+apart, so vLLM's own topology check passes.
+
+Forced on, it was 3–4.7× faster than RCCL in CUDA graphs, and the server reached 352 tok/s
+at 32 users, but answered garbage (GSM8K 0 %, jobs 23671136/7). In graphs the one-stage
+kernel reads each peer's input tensor over XGMI after a relaxed start barrier, and the
+gfx90a L2 is per GCD and not coherent across XGMI. The peer's fresh input can still be
+dirty in the peer's L2, and the reader keeps stale remote lines from the last step (graph
+buffers reuse their addresses). My first test reduced the same input every time, so stale
+data looked right. `test_allreduce.py` now writes new data before every replay
+(job 23696578, 8 GCDs, bf16 [tokens, 4096], after a 16 MB write):
+
+| tokens | RCCL | custom (stock) | + fence | + copy | max error: RCCL / stock / fence / copy |
+|---|---|---|---|---|---|
+| 1 | 37.0 µs | 9.9 µs | 12.7 µs | 12.2 µs | 0.09 / **17.3** / 0.03 / 0.03 |
+| 32 | 82.9 | 24.5 | 26.7 | 25.2 | 0.11 / **13.6** / 0.03 / 0.03 |
+| 64 | 110.7 | 31.5 | 33.6 | 32.7 | 0.12 / **14.7** / 0.03 / 0.03 |
+| 128 | 122.5 | 51.1 | 53.6 | 53.8 | 0.15 / **18.9** / 0.03 / 0.03 |
+
+Two fixes (`custom_ar.py`), both exact:
+
+- `CUSTOM_AR=fence`: a one-thread kernel before each graph-captured call, with a
+  system-scope acq_rel atomic, which compiles to `buffer_wbl2` + `buffer_invl2` on gfx90a.
+- `CUSTOM_AR=copy` (= `1`): always copy the input into vLLM's IPC buffer, which ROCm builds
+  already allocate uncached ("for signal on MI200"); vLLM skips that copy only in graphs.
+  Simpler, and eager prefill can use it too, so it is the one in the recipe.
+
+| | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 4 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| RCCL (recipe before) | 23591543/4 | 97.4 / 97.8 % | 15.5 / 56.1 / 187.5 / 297 / 436.6 | 64 / 69 / 77 / 97 / 136 ms |
+| `CUSTOM_AR=fence` | 23696206/7 | 97.2 / 97.2 % | 16.3 / 62.3 / 192.4 / 318.3 / 465.4 | 61 / 62 / 75 / 90 / 127 ms |
+| **`CUSTOM_AR=copy`** | 23696592/3 | **97.6 / 97.6 %** | 16.3 / 62.7 / 192.5 / **318.9** / **466.8** | 61 / 62 / 75 / 90 / 126 ms |
+
+1.03–1.11× at every load (1.07–1.08× at 32–64 users). The stock kernel's 352/530 tok/s is not a ceiling: with garbage
+hidden states the MoE routing degenerates. The gain matches the kernel numbers: ~58 µs less
+per all-reduce at 32 tokens, ~86 per step.
+
+### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
+
+- **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
+  gfx942/950; gfx90a gets one workgroup per query. On one GCD (graph replay, job 23638388)
+  split-K is 2–6.7× faster for ratio-4 layers at 1–16 queries (409 → 61 µs at 1) but 1.3×
+  slower at 64+, so the plugin splits only batches of at most 16. In serving it cuts TPOT at
+  1 user from 64 to 60 ms in every comparison, but same-day A/B runs (23670794/5) show
+  +3 ms at 16 and 32 users, and a cutoff of 32 lost 10 ms at 32 users (23638474/5).
+  Off by default; unexplained.
+- **DP2×TP4** (64 sequences per replica, 200 GSM8K: 96.5 %, job 23598815): 14.5 / 309.5 /
+  476.5 / 600.1 tok/s at 1 / 32 / 64 / 128 users, TPOT 69 / 89 / 114 / 158 ms. Without EP,
+  vLLM shards the experts across all 8 GCDs, so it fits; 165k KV tokens per replica.
+- **128 sequences** (TP=8, job 23598814, 97.0 %): 604.4 tok/s at 128 users, TPOT 199 ms.
+- **Decode profile at 32 / 64 users** (eager, ms per step; job 23631328): MoE 18.4 / 21.2
+  (`matmul_ogs` ~50 %, `pack_bitmatrix` ~20 %), sparse attention 9.7 / 9.9, bf16 GEMM
+  6.7 / 7.6, attention other 5.6 / 8.3 (mostly the compressors' fp32-output score GEMM,
+  hipBLASLt `MT64x16x16`), mHC 5.3 / 7.2, compressor 4.5 / 6.8.
+
 ## Open
 
 - **Speed**, in likely order of payoff:
@@ -559,6 +624,9 @@ is 1.35–1.46× the torch recipe at 1–64 users and costs at most 0.6 GSM8K po
      the race behind `NO_ASYNC=1` is now the largest single lever.
   7. Fuse the FP8 activation rounding into one kernel (~6 ms per step now, quant + dequant).
   8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
+  9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
+  10. The compressors' `torch.mm(..., out_dtype=float32)` score GEMMs (hipBLASLt general
+      tile, 4–8 ms per step), and DP2×TP4 combined with the custom all-reduce.
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
 - **To report** (laifs-container-recipes and upstream vLLM):
@@ -572,6 +640,9 @@ is 1.35–1.46× the torch recipe at 1–64 users and costs at most 0.6 GSM8K po
   5. Graph pad rows are not sanitised: ROCm's `topk_hash_softplus_sqrt` returns duplicate
      ids for NaN rows, and the `triton_unfused` bitmatrix routing then corrupts *other*
      rows. Each would be a bug alone. Attach `test_topk_nan.py` and `test_moe_pad_rows.py`.
+  6. The custom all-reduce works on MI250X (all GCD pairs 1 XGMI hop) if graph mode copies
+     into the uncached IPC buffer as eager mode does; reading the caller's tensor directly
+     returns stale data on gfx90a. Attach `test_allreduce.py`.
 - **DeepSeek-V4.1-Flash:** its blocker on gfx90a was that the shared V4 attention stack gave
   wrong output. That is now explained and worked around, so the stack is viable on gfx90a.
   The port itself is still large and the model needs two nodes (see
@@ -600,4 +671,8 @@ is 1.35–1.46× the torch recipe at 1–64 users and costs at most 0.6 GSM8K po
 | `plugin/lumi_dsv4_debug/graph_diff.py` | per-layer graph-vs-eager rerun of each replayed step; first diverging site and where pad rows go non-finite (`DSV4_GRAPH_DIFF`) |
 | `test_topk_nan.py`, `run_topk_nan_test.sh` | V4 router on NaN / Inf rows vs the torch reference |
 | `test_moe_pad_rows.py`, `run_moe_pad_test.sh` | `triton_unfused` experts with duplicate-id pad rows; sweep over capture sizes |
+| `plugin/lumi_dsv4_debug/custom_ar.py` | vLLM custom all-reduce on gfx90a, coherent via the uncached buffer or an L2 fence (`DSV4_CUSTOM_AR`) |
+| `test_allreduce.py`, `run_allreduce_test.sh` | custom all-reduce vs RCCL on 8 GCDs, on changing data, graph timing |
+| `plugin/lumi_dsv4_debug/sparse_split.py` | split-K sparse attention decode for batches ≤ 16 (`DSV4_SPARSE_SPLIT`) |
+| `test_sparse_split.py`, `run_sparse_split_test.sh` | split-K vs fallback decode per layer type and batch, split-count sweep |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
