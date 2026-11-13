@@ -49,7 +49,8 @@
 #   MHC_META=1 / MHC_NANTRACE=1   log mHC argument layouts / where a NaN first appears (graph-safe)
 #   ROUTER_GUARD=1|0|count   nan_to_num MoE gate logits before ROCm top-k (default 1; plugin router_guard.py)
 #   GRAPH_DIFF=1             rerun each graph step eagerly, log first diverging layer site
-#   SPARSE_SPLIT=1           split-K sparse attention decode (vLLM gates it to gfx942/950; plugin sparse_split.py)
+#   SPARSE_SPLIT=1           split-K sparse attention decode (vLLM gates it to gfx942/950; plugin sparse_split.py;
+#                            V41: =N sets the query cutoff, default 16)
 #   CUSTOM_AR=copy|fence     vLLM custom all-reduce instead of RCCL (vLLM gates it to gfx94x/95x; 1 = copy)
 #   NANFILL=1                fill fresh float allocations with NaN (exposes reads of unwritten memory)
 #

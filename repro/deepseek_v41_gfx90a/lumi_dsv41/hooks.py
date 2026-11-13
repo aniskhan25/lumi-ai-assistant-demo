@@ -587,8 +587,8 @@ SPARSE_SPLIT_MAX_QUERIES = 16
 
 
 def _sparse_split(module) -> None:
-    """DSV41_SPARSE_SPLIT=1: decode sparse attention with the split-K kernels (partial +
-    reduce) for batches of at most 16 queries. Off gfx942/950 upstream takes a one-pass
+    """DSV41_SPARSE_SPLIT=1 (or =N): decode sparse attention with the split-K kernels
+    (partial + reduce) for batches of at most 16 (or N) queries. Off gfx942/950 upstream takes a one-pass
     fallback with one workgroup per query and head block, which leaves most of a GCD idle
     at low concurrency (V4: 409 -> 61 us per ratio-4 layer at 1 query, 1.3x slower from 64,
     and +3 ms TPOT at 16-32 users in serving with a cutoff of 32;
@@ -598,13 +598,16 @@ def _sparse_split(module) -> None:
     withholds its positions, so the split reduce does not apply it either."""
     import os
 
-    if module._ON_GFX942 or module._ON_GFX950 or os.environ.get("DSV41_SPARSE_SPLIT") != "1":
+    mode = os.environ.get("DSV41_SPARSE_SPLIT", "0")
+    if module._ON_GFX942 or module._ON_GFX950 or mode == "0":
         return
+    # 1 = the default cutoff; a larger integer sets it (V4.1 has 38 top-k layers, V4 21)
+    cutoff = SPARSE_SPLIT_MAX_QUERIES if mode == "1" else int(mode)
     stock = module._rocm_sparse_attn_decode_ragged_triton
 
     def split_decode(*args, **kwargs):
         q = args[0] if args else kwargs["q"]
-        if q.shape[0] > SPARSE_SPLIT_MAX_QUERIES:
+        if q.shape[0] > cutoff:
             return stock(*args, **kwargs)
         module._ON_GFX942 = True
         try:
