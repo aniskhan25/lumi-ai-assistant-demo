@@ -4,6 +4,10 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-13): 17.8 / 69.2 / 199.5 / 282.5 / 422.2 tok/s at 1 / 4 / 16 / 32 / 64
+> users, GSM8K 99.0 % (200), needles, decode = prefill (job 23700637), after merging V4's
+> custom all-reduce (`CUSTOM_AR=1`) and porting its split-K sparse decode (`SPARSE_SPLIT=1`).**
+>
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
 > needles, decode = prefill to 19.7k tokens (job 23668248). See "Phase 4: speed" below.
@@ -247,6 +251,7 @@ GSM8K (99–100/100).
 | same, async scheduling (no `NO_ASYNC=1`) | 23696171 | 15.2 / – / – / 282.0, 427.8 at 64 | 65 / 95 ms, 130 at 64 |
 | + custom all-reduce (`CUSTOM_AR=1`), `NO_ASYNC=1` | 23698376 | **14.8 / – / – / 279.8**, **423.5 at 64** | **67 / 102 ms**, 138 at 64 |
 | split-K sparse decode instead (`SPARSE_SPLIT=1`, no `CUSTOM_AR`) | 23698452 | **16.9** / – / 194.3 / 264.5, 402.2 at 64 | **59** / 108 ms, 146 at 64 |
+| **both** (`CUSTOM_AR=1 SPARSE_SPLIT=1`): the recipe | 23700637 | **17.8 / 69.2 / 199.5 / 282.5**, **422.2 at 64** | **55 / 100 ms**, 138 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -306,6 +311,11 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   users unchanged (V4 lost 3 ms at 16–32; V4.1 does not). GSM8K 97.5 % of 200, but all five
   misses also occur in one of the other three runs (93, 100, 119, 161, 184): noise. Needles,
   decode = prefill as before.
+- **Both together** (job 23700637): GSM8K **99.0 %** of 200 (misses 93 and 119, both seen
+  before), both needles, decode = prefill to 19.7k, KV 1.35M tokens. 1.27× the previous
+  recipe at 1 user, 1.07× at 32, 1.06× at 64. V4's recipe on the same node: 16.3 / 62.7 /
+  192.4 / 319.5 / 466.8 tok/s at 1 / 4 / 16 / 32 / 64, so V4.1 is now ahead up to 16 users
+  and 12 % / 10 % behind at 32 / 64.
 
 Open: FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
