@@ -28,7 +28,8 @@ NOPE, ROPE, HEAD_DIM, TOKEN_BYTES, SCALE_BYTES = 448, 64, 512, 576, 8
 @triton.jit
 def _load_k(main_cache_ptr, extra_cache_ptr, main_idx_ptr, extra_idx_ptr, main_start,
             extra_start, main_len, total, pos, main_rows, extra_rows, main_bs, extra_bs,
-            main_stride, extra_stride, IS_FNUZ: tl.constexpr, BLOCK_K: tl.constexpr):
+            main_stride, extra_stride, IS_FNUZ: tl.constexpr, BLOCK_K: tl.constexpr,
+            DEQ: tl.constexpr = 0):
     """K rows for list positions `pos` of the concatenated (main, extra) list:
     [BLOCK_K, 512] bf16 (448 dequantised FP8 NoPE dims, then 64 bf16 RoPE dims), and the
     validity mask."""
@@ -53,7 +54,9 @@ def _load_k(main_cache_ptr, extra_cache_ptr, main_idx_ptr, extra_idx_ptr, main_s
     d = tl.arange(0, 512)
     is_nope = d < 448
     x = tl.load(data[:, None] + d[None, :], mask=valid[:, None] & is_nope[None, :], other=0)
-    if IS_FNUZ:
+    if DEQ == 1:  # ablation only: skip the FP8 decode (wrong values)
+        xf = x.to(tl.float32)
+    elif IS_FNUZ:
         xf = x.to(tl.float8e4b8, bitcast=True).to(tl.float32)
     else:
         xf = x.to(tl.float8e4nv, bitcast=True).to(tl.float32)
@@ -74,7 +77,8 @@ def _partial_kernel(q_ptr, main_cache_ptr, main_idx_ptr, main_indptr_ptr,
                     q_s0, q_s1, main_rows, extra_rows, main_bs, extra_bs,
                     main_stride, extra_stride, scale, num_heads,
                     NUM_SPLITS: tl.constexpr, BLOCK_H: tl.constexpr, BLOCK_K: tl.constexpr,
-                    HAS_EXTRA: tl.constexpr, IS_FNUZ: tl.constexpr):
+                    HAS_EXTRA: tl.constexpr, IS_FNUZ: tl.constexpr,
+                    NUM_STAGES: tl.constexpr = 1, DEQ: tl.constexpr = 0):
     b = tl.program_id(0)
     sp = tl.program_id(1)
     h = tl.arange(0, BLOCK_H)
@@ -100,11 +104,11 @@ def _partial_kernel(q_ptr, main_cache_ptr, main_idx_ptr, main_indptr_ptr,
     l_i = tl.zeros((BLOCK_H,), tl.float32)
     acc = tl.zeros((BLOCK_H, 512), tl.float32)
     kk = tl.arange(0, BLOCK_K)
-    for start in tl.range(lo, hi, BLOCK_K):
+    for start in tl.range(lo, hi, BLOCK_K, num_stages=NUM_STAGES):
         pos = start + kk
         k, valid = _load_k(main_cache_ptr, extra_cache_ptr, main_idx_ptr, extra_idx_ptr,
                            main_start, extra_start, main_len, hi, pos, main_rows, extra_rows,
-                           main_bs, extra_bs, main_stride, extra_stride, IS_FNUZ, BLOCK_K)
+                           main_bs, extra_bs, main_stride, extra_stride, IS_FNUZ, BLOCK_K, DEQ)
         sc = tl.dot(q, tl.trans(k)) * scale
         sc = tl.where(hmask[:, None] & valid[None, :], sc, neg)
         m_new = tl.maximum(m_i, tl.max(sc, 1))
@@ -156,7 +160,7 @@ def num_splits(num_queries: int, cus: int = 110) -> int:
 
 def sparse_decode(q, main_cache, main_indices, main_indptr, scale, attn_sink,
                   extra_cache=None, extra_indices=None, extra_indptr=None, out=None,
-                  is_fnuz=False, splits=None, block_k=32, num_warps=4):
+                  is_fnuz=False, splits=None, block_k=32, num_warps=4, num_stages=1, deq=0):
     """Decode attention like rocm_aiter_mla_sparse._rocm_sparse_attn_decode_ragged_triton
     for V4/V4.1's fp8_ds_mla record (448 FP8 NoPE + 64 bf16 RoPE, head dim 512) and up
     to 16 heads per rank. q [B, H, 512] bf16; indices/indptr int32 ragged lists."""
@@ -180,7 +184,7 @@ def sparse_decode(q, main_cache, main_indices, main_indptr, scale, attn_sink,
         main_cache.shape[0] * main_cache.shape[1], extra_cache.shape[0] * extra_cache.shape[1],
         main_cache.shape[1], extra_cache.shape[1], main_cache.stride(0), extra_cache.stride(0),
         scale, H, NUM_SPLITS=S, BLOCK_H=BH, BLOCK_K=block_k, HAS_EXTRA=has_extra,
-        IS_FNUZ=is_fnuz, num_warps=num_warps,
+        IS_FNUZ=is_fnuz, NUM_STAGES=num_stages, DEQ=deq, num_warps=num_warps,
     )
     sink = attn_sink if attn_sink is not None else pm
     _reduce_kernel[(B, H)](

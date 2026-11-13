@@ -104,11 +104,11 @@ for B, extra, vary, use_sink in itertools.product((1, 7, 32, 128), (0, 512), (Fa
             bad.append((B, extra, vary, use_sink, S, err))
     print(f"  B={B:3d} extra={extra:3d} ragged={vary:d} sink={use_sink:d}: last err {err:.1e}")
 
-print("2. GPU us per call (graph replay); best = fastest (splits, BLOCK_K, warps)")
-print(f"{'layer':<10} {'B':>4} {'fallback':>9} {'split-K':>8} {'auto':>7} {'best':>7}  best config")
-best_cfg = {}
+print("2. GPU us per call (graph replay); config = (splits, BLOCK_K, warps, stages)")
+CONFIGS = list(itertools.product((1, 2, 4, 8, 16), (16, 32), (4, 8), (1, 2)))
+results = {}
 for layer, extra in (("SWA", 0), ("top-k", 512)):
-    for B in (1, 4, 16, 32, 48, 64, 96, 128):
+    for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
         q = torch.randn(B, H, HD, device=dev).bfloat16()
         mi, mp = ragged(B, 128, swa.shape[0] * BS)
         args = [q, swa, mi, mp, SCALE, sink, NOPE, ROPE]
@@ -119,17 +119,30 @@ for layer, extra in (("SWA", 0), ("top-k", 512)):
             kw = dict(extra_cache=comp, extra_indices=ei, extra_indptr=ep)
         t_ref = timed(lambda: ref(*args))
         t_split = timed(lambda: split_k(*args))
-        t_auto = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, **kw))
         times = {}
-        for S, bk, nw in itertools.product((1, 2, 4, 8), (16, 32, 64), (4, 8)):
+        for S, bk, nw, st in CONFIGS:
             try:
-                times[(S, bk, nw)] = timed(lambda: sparse_decode(
-                    q, swa, mi, mp, SCALE, sink, splits=S, block_k=bk, num_warps=nw, **kw))
+                times[(S, bk, nw, st)] = timed(lambda: sparse_decode(
+                    q, swa, mi, mp, SCALE, sink, splits=S, block_k=bk, num_warps=nw,
+                    num_stages=st, **kw))
             except Exception as e:  # out of resources for big tiles
-                times[(S, bk, nw)] = float("inf")
-                print(f"  ({S}, {bk}, {nw}) failed: {type(e).__name__}")
+                times[(S, bk, nw, st)] = float("inf")
+        results[(layer, B)] = times
         cfg = min(times, key=times.get)
-        best_cfg[(layer, B)] = cfg
-        print(f"{layer:<10} {B:>4} {t_ref:>9.1f} {t_split:>8.1f} {t_auto:>7.1f} {times[cfg]:>7.1f}  "
-              f"{cfg} (auto splits {num_splits(B)})")
+        top = sorted(times, key=times.get)[:4]
+        print(f"{layer:<6} B={B:>4} fallback {t_ref:6.1f} split-K {t_split:6.1f} best {times[cfg]:6.1f} "
+              + " ".join(f"{c}:{times[c]:.0f}" for c in top))
+        if layer == "top-k" and B in (32, 64):
+            c = cfg
+            t_nodeq = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, splits=c[0],
+                            block_k=c[1], num_warps=c[2], num_stages=c[3], deq=1, **kw))
+            print(f"         ablation at {c}: without the FP8 decode {t_nodeq:.1f} us")
+print("per-split-count best (top-k): for each B, the best time with S fixed")
+for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
+    t = results[("top-k", B)]
+    row = []
+    for S in (1, 2, 4, 8, 16):
+        c = min((k for k in t if k[0] == S), key=t.get)
+        row.append(f"S{S}:{t[c]:.0f}{c[1:]}")
+    print(f"  B={B:>4} " + "  ".join(row))
 print("FAILED:", bad if bad else "none")
