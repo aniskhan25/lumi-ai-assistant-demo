@@ -12,6 +12,7 @@ import os
 import sys
 
 import torch
+from triton.runtime.errors import OutOfResources
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "plugin"))
 from lumi_dsv4_debug import score_gemm  # noqa: E402
@@ -76,9 +77,7 @@ def main():
                 for atomic in ((False, True) if cfg[3] > 1 else (False,)):
                     try:  # compiles here, outside capture; big tiles overflow LDS
                         out = score_gemm.score_mm(x, ws[0], cfg, atomic)
-                    except Exception as e:  # triton OutOfResources and friends
-                        if "resources" not in str(e).lower() and "LDS" not in str(e):
-                            raise
+                    except OutOfResources:
                         continue
                     err = (out.double() - ref).abs().max().item() / scale
                     t = timed(lambda w: score_gemm.score_mm(x, w, cfg, atomic), ws)
