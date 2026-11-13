@@ -246,6 +246,7 @@ GSM8K (99–100/100).
 | + split-K prenorm GEMM in Triton, `--max-num-seqs 64` | 23668248 | **14.0 / – / – / 263.9**, **400.0 at 64** | **71 / 108 ms**, 146 at 64 |
 | same, async scheduling (no `NO_ASYNC=1`) | 23696171 | 15.2 / – / – / 282.0, 427.8 at 64 | 65 / 95 ms, 130 at 64 |
 | + custom all-reduce (`CUSTOM_AR=1`), `NO_ASYNC=1` | 23698376 | **14.8 / – / – / 279.8**, **423.5 at 64** | **67 / 102 ms**, 138 at 64 |
+| split-K sparse decode instead (`SPARSE_SPLIT=1`, no `CUSTOM_AR`) | 23698452 | **16.9** / – / 194.3 / 264.5, 402.2 at 64 | **59** / 108 ms, 146 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -295,6 +296,16 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   groups only). GSM8K 98.5 % of 200 (3 misses, 2 shared with the baseline), both needles,
   decode = prefill to 19.7k, KV unchanged (1.35M tokens). **+5.5 % at 1 user, +6.0 % at 32,
   +5.9 % at 64.**
+- **Split-K sparse decode** (`SPARSE_SPLIT=1`, `hooks.py:_sparse_split`): V4's
+  `sparse_split.py` on V4.1's vendored ops. Off gfx942/950 upstream decodes with one
+  workgroup per query and head block; the hook takes the generic gfx942 split path (partial +
+  reduce, CU-count heuristic, not the gfx950 kernels) for batches of at most 16 queries.
+  `test_sparse_split.py` (job 23698377, V4.1's per-rank shapes = V4's): within 0.6 % of the
+  fallback; ratio-4 layer 407 → 62 µs at 1 query, 424 → 149 at 16, but 447 → 611 at 64,
+  hence the cutoff. Serving (job 23698452): **+20 % at 1 user (TPOT 71 → 59 ms)**, 32 and 64
+  users unchanged (V4 lost 3 ms at 16–32; V4.1 does not). GSM8K 97.5 % of 200, but all five
+  misses also occur in one of the other three runs (93, 100, 119, 161, 184): noise. Needles,
+  decode = prefill as before.
 
 Open: FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
@@ -311,11 +322,12 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 NO_ASYNC=1 \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_SPLIT=1 NO_ASYNC=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # one-GCD kernel tests for the two Triton replacements
 sbatch repro/deepseek_v41_gfx90a/run_paged_logits_test.sh
 sbatch repro/deepseek_v41_gfx90a/run_mhc_triton_test.sh
+sbatch repro/deepseek_v41_gfx90a/run_sparse_split_test.sh
 ```
