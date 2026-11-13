@@ -3,7 +3,9 @@
 Each GPU kernel is linked to the host call that launched it (`correlation`), and that call
 to the Python frames open on its thread at the time (traces taken with_stack=True). The
 innermost frame matching a rule below names the component. Run on an eager trace: inside a
-CUDA graph, kernels cannot be traced back to Python.
+CUDA graph, kernels cannot be traced back to Python. On a graph-mode trace (PIECEWISE), the
+eager breaks (attention, indexer, ...) are still attributed by Python frame; kernels replayed
+from a graph are classified by kernel name (NAME_RULES) and marked "[graph]".
 
     python analyze_trace.py TRACE.json.gz
 """
@@ -50,6 +52,31 @@ RULES = [
     ("decoder layer (other)", "lumi_dsv41/"),
 ]
 
+# Graph-replayed kernels: (component, lower-case substring of the kernel name), first wins.
+NAME_RULES = [
+    ("all-reduce", "cross_device_reduce"), ("all-reduce", "allreduce"),
+    ("all-reduce", "nccl"), ("all-reduce", "rccl"),
+    ("hyper-connections (mHC)", "mhc"), ("hyper-connections (mHC)", "prenorm_gemm"),
+    ("hyper-connections (mHC)", "pre_delayed"), ("hyper-connections (mHC)", "_post_kernel"),
+    ("hyper-connections (mHC)", "sinkhorn"), ("hyper-connections (mHC)", "big_fuse"),
+    ("MoE experts", "matmul_ogs"), ("MoE experts", "bitmatrix"), ("MoE experts", "routing"),
+    ("MoE experts", "topk"), ("MoE experts", "moe"), ("MoE experts", "swiglu"),
+    ("MoE experts", "_finalize"), ("MoE experts", "combine"),
+    ("Engram", "engram"), ("Engram", "hash"),
+    ("compressor", "compress"),
+    ("sparse indexer", "indexer"), ("sparse indexer", "mqa_logits"),
+    ("sparse attention", "sparse_attn"),
+    ("dense linear: FP8 act rounding / W8A8", "fp8_round"),
+    ("dense linear: FP8 act rounding / W8A8", "quant"),
+    ("GEMM (hipBLASLt / rocBLAS)", "cijk"), ("GEMM (hipBLASLt / rocBLAS)", "gemm"),
+    ("GEMM (hipBLASLt / rocBLAS)", "wvsplitk"), ("GEMM (hipBLASLt / rocBLAS)", "skinny"),
+    ("norms / rope / quant", "rms"), ("norms / rope / quant", "norm"),
+    ("norms / rope / quant", "rope"), ("norms / rope / quant", "rotary"),
+    ("elementwise / copy", "elementwise"), ("elementwise / copy", "copy"),
+    ("elementwise / copy", "fill"), ("elementwise / copy", "cat"),
+    ("elementwise / copy", "index"), ("elementwise / copy", "reduce"),
+]
+
 events = json.load(gzip.open(sys.argv[1]))["traceEvents"]
 kernels = [e for e in events if e.get("cat") == "kernel" and e.get("ph") == "X"]
 launches = {e["args"]["correlation"]: e for e in events
@@ -87,11 +114,17 @@ for tid, ls in by_tid.items():
         launch_comp[corr] = classify([f[2] for f in stack])
 
 
+graph_launches = {corr for corr, e in launches.items() if "graphlaunch" in e["name"].lower()}
+
+
 def component(kernel) -> str:
-    name = kernel["name"]
-    if "nccl" in name.lower() or "rccl" in name.lower():
+    name = kernel["name"].lower()
+    corr = kernel.get("args", {}).get("correlation")
+    if corr in graph_launches:
+        return "[graph] " + next((c for c, pat in NAME_RULES if pat in name), "other")
+    if "nccl" in name or "rccl" in name:
         return "all-reduce"
-    return launch_comp.get(kernel.get("args", {}).get("correlation"), "unattributed")
+    return launch_comp.get(corr, "unattributed")
 
 
 per = collections.Counter()
@@ -108,7 +141,7 @@ busy = sum(per.values())
 span = (max(k["ts"] + k["dur"] for k in kernels) - min(k["ts"] for k in kernels)) if kernels else 0
 print(f"{len(kernels)} kernels, {steps} model steps, GPU busy {busy / 1e3:.1f} ms "
       f"of {span / 1e3:.1f} ms span ({100 * busy / max(span, 1):.0f}%)")
-print(f"{'component':<28} {'ms/step':>8} {'share':>6}   top kernels")
+print(f"{'component':<44} {'ms/step':>8} {'share':>6}   top kernels")
 for comp, us in per.most_common():
-    top = ", ".join(f"{n} {d / max(us, 1):.0%}" for n, d in names[comp].most_common(2))
-    print(f"{comp:<28} {us / 1e3 / max(steps, 1):8.2f} {us / busy:6.1%}   {top}")
+    top = ", ".join(f"{n} {d / max(us, 1):.0%}" for n, d in names[comp].most_common(3))
+    print(f"{comp:<44} {us / 1e3 / max(steps, 1):8.2f} {us / busy:6.1%}   {top}")

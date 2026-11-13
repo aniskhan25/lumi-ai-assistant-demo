@@ -74,7 +74,7 @@ FLASH="/flash/${SLURM_JOB_ACCOUNT}/${USER}/DeepSeek-V4.1-Flash"
 [ "${V41:-0}" = 1 ] && [ -f "${FLASH}/config.json" ] && SNAPSHOT="${FLASH}"
 GSM8K="$(ls /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/datasets--openai--gsm8k/snapshots/*/main/test-00000-of-00001.parquet | head -n1)"
 PORT="$((20000 + ${SLURM_JOB_ID} % 20000))"   # shared nodes share ports
-LOG="${REPO}/benchmarks/results/dsv4$([ "${V41:-0}" = 1 ] && echo 1)-flash/job_${SLURM_JOB_ID}"
+LOG="${REPO}/benchmarks/results/dsv4$([ "${V41:-0}" = 1 ] && echo 1 || true)-flash/job_${SLURM_JOB_ID}"
 mkdir -p "${LOG}"
 
 module load Local-LAIF lumi-aif-singularity-bindings
