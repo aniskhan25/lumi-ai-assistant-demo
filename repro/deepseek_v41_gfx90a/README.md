@@ -4,10 +4,11 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-13): 18.7 / 207.1 / 308.9 / 429.9 tok/s at 1 / 16 / 32 / 64 users,
-> GSM8K 99.0 % (200), needles, decode = prefill (job 23706895), after merging V4's custom
-> all-reduce (`CUSTOM_AR=1`), porting its split-K sparse decode up to 32 queries
-> (`SPARSE_SPLIT=32`) and moving V4.1's query RoPE to Triton. Sparse attention is now the largest cost (graph profile below).**
+> **Status (2026-11-16): 20.3 / 220.1 / 328.3 / 462.7 tok/s at 1 / 16 / 32 / 64 users,
+> GSM8K 98.5 % (200), needles, decode = prefill (job 23708163), with V4's custom all-reduce
+> (`CUSTOM_AR=1`), a gfx90a sparse-decode kernel (`SPARSE_DECODE=1`) and V4.1's query
+> RoPE in Triton; at or above V4's recipe at every load. Async scheduling adds 7–12 % at
+> the cost of ~43 % of the KV cache. Sparse attention is now the largest cost (graph profile below).**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -254,8 +255,9 @@ GSM8K (99–100/100).
 | split-K sparse decode instead (`SPARSE_SPLIT=1`, no `CUSTOM_AR`) | 23698452 | **16.9** / – / 194.3 / 264.5, 402.2 at 64 | **59** / 108 ms, 146 at 64 |
 | both (`CUSTOM_AR=1 SPARSE_SPLIT=1`) | 23700637 | 17.8 / 69.2 / 199.5 / 282.5, 422.2 at 64 | 55 / 100 ms, 138 at 64 |
 | split-K up to 32 queries (`SPARSE_SPLIT=32`) | 23706326 | 17.9 / – / 200.2 / 299.4, 422.2 at 64 | 55 / 95 ms, 138 at 64 |
-| **+ query RoPE in one Triton kernel** (always on): the recipe | 23706895 | **18.7 / – / 207.1 / 308.9**, **429.9 at 64** | **53 / 91 ms**, 135 at 64 |
+| + query RoPE in one Triton kernel (always on) | 23706895 | 18.7 / – / 207.1 / 308.9, 429.9 at 64 | 53 / 91 ms, 135 at 64 |
 | same, async scheduling (no `NO_ASYNC=1`) | 23707780 | 20.9 / – / 225.3 / 332.4, 460.0 at 64 | 47 / 78 ms, 120 at 64 |
+| **gfx90a sparse decode kernel** (`SPARSE_DECODE=1` instead of `SPARSE_SPLIT=32`), `NO_ASYNC=1`: the recipe | 23708163 | **20.3 / – / 220.1 / 328.3**, **462.7 at 64** | **48 / 85 ms**, 124 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -360,9 +362,30 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   +7.0 % at 64**, a little more than on the older recipe (+7–9 %). KV cache 0.77M tokens
   instead of 1.35M, as before: the choice stays by workload (async for many short requests,
   `NO_ASYNC=1` when many long contexts must fit).
+- **gfx90a sparse decode kernel** (`lumi_dsv41/sparse_decode.py`, `SPARSE_DECODE=1`,
+  `hooks.py:_sparse_decode`). The stock fallback and upstream's split-K path share one
+  inner loop: 16 entries per iteration, the UE8M0 scale byte gathered per element, NoPE
+  and RoPE as separate dots with 448 padded to 512. The new partial kernel walks main and
+  extra as one list split over a batch-dependent number of programs, loads 8 scale bytes per
+  token, and builds one [16, 512] bf16 K tile (448 dequantised + 64 RoPE) per step: one
+  QK^T and one PV dot over the 8 heads (padded to 16); a second kernel merges the splits
+  with the sink. `test_sparse_decode.py` (jobs 23707915 sweep, 23707993 final): within
+  bf16 rounding of the fallback (fixed and ragged lists, -1 slots, NaN in unused bytes,
+  with and without sink), hook == direct call; GPU µs per top-k layer call:
 
-Open: a gfx90a sparse-decode kernel for 32–64 queries (V4.1's largest cost, 28 % of a
-32-user step); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+  | queries | 1 | 16 | 32 | 64 | 128 |
+  |---|---|---|---|---|---|
+  | fallback | 410 | 421 | 438 | 447 | 891 |
+  | upstream split-K | 62 | 151 | 281 | 584 | 1266 |
+  | **this kernel** | **30** | **56** | **108** | **189** | **339** |
+
+  The FP8 decode is ~20 % of it (86 vs 108 µs at 32 queries without it). Serving (job
+  23708163): **+8.7 % at 1 user, +6.3 % at 16 and 32, +7.6 % at 64** over the split-K
+  recipe; GSM8K 98.5 % (misses 93, 119, 161, all seen before), needles, decode = prefill.
+  V4.1 now matches or passes V4's recipe at every load (V4 with `SCORE_GEMM=1`: 17.7 /
+  198.1 / 325.1 / 481.8 at 1 / 16 / 32 / 64).
+
+Open: the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce
@@ -377,7 +400,7 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_SPLIT=32 NO_ASYNC=1 \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 NO_ASYNC=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -385,4 +408,6 @@ V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON
 sbatch repro/deepseek_v41_gfx90a/run_paged_logits_test.sh
 sbatch repro/deepseek_v41_gfx90a/run_mhc_triton_test.sh
 sbatch repro/deepseek_v41_gfx90a/run_sparse_split_test.sh
+sbatch repro/deepseek_v41_gfx90a/run_sparse_decode_test.sh
+sbatch repro/deepseek_v41_gfx90a/run_ops_test.sh
 ```
