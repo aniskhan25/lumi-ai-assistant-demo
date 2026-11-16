@@ -79,11 +79,13 @@ what keeps NaN in pad rows out of the MoE router (see "A layout-sensitive bug un
 graphs" below). `CUSTOM_AR=1` replaces RCCL with vLLM's custom all-reduce, made coherent on
 gfx90a, for 1.03–1.11× (see "All-reduce" below). `SCORE_GEMM=1` runs the compressors'
 fp32-output score GEMMs in a Triton kernel, 1.01–1.08× more (see "Compressor score GEMMs").
+Async scheduling (no `NO_ASYNC=1`) with `--max-num-batched-tokens 4096` adds 1.05–1.08×
+and 1.5× the KV capacity (see "Async scheduling, revisited").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
-  MORE_VLLM_ARGS="--max-num-seqs 64" \
+  TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 \
+  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 4096" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
 
@@ -92,8 +94,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **`MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1`** | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
-| **`MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1`** | 64 | 23706309 | 97.2 % | 17.7 / – / 198.1 / 325.1 / **481.8** | 56 / 88 / 122 ms |
+| **+ async, 4096-token chunks** | 32 | 23707179 | 97.8 % | 18.6 / 68.2 / 211.0 / 348.9 / – | 53 / 83 / – ms |
+| **+ async, 4096-token chunks** | 64 | 23707180 | 97.4 % | 18.6 / – / 211.3 / 349.1 / **521.7** | 53 / 84 / 114 ms |
+| `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
+| `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 64 | 23706309 | 97.2 % | 17.7 / – / 198.1 / 325.1 / 481.8 | 56 / 88 / 122 ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` | 32 | 23696592 | 97.6 % | 16.3 / 62.7 / 192.4 / 319.5 / – | 61 / 90 / – ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` | 64 | 23696593 | 97.6 % | 16.3 / – / 192.5 / 318.2 / 466.8 | 61 / 90 / 126 ms |
 | `MHC_FIX=triton` | 32 (default) | 23591543 | 97.4 % | 15.5 / 56.1 / 187.0 / 296.1 / – | 64 / 97 / – ms |
@@ -629,6 +633,27 @@ Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving
 192.5 → 198.2 tok/s at 16 users, 319 → 324 at 32 and 466.8 → 481.8 at 64 (+3 %; TPOT 126 →
 122 ms). GSM8K 97.0 / 97.2 % (97.0–97.8 % across all recipe runs).
 
+### Async scheduling, revisited (Nov 13–16)
+
+On Nov 9 async scheduling gave +3.5–4 % but halved the KV capacity (above). vLLM sizes the
+sliding-window reservation per request as window + `max_in_flight_tokens`, which is
+concurrent batches × `max_num_batched_tokens` (`VllmConfig.max_in_flight_tokens`): 2 × 8192
+with async, 1 × 8192 without. With `--max-num-batched-tokens 4096` async reserves what sync
+did, and the capacity rises instead (jobs 23707179/80, against 23706308/9, same code):
+
+| users | sync, 8192-token chunks | async, 4096-token chunks |
+|---|---|---|
+| 1 | 17.7 tok/s, TPOT 56 ms | **18.6**, 53 ms |
+| 16 | 198.2, TTFT 4.2 s | **211.0**, 3.2 s |
+| 32 | 324, TPOT 89 ms, TTFT 5.5 s | **349**, 83 ms, 3.6 s |
+| 64 | 481.8, TPOT 122 ms, TTFT 5.3 s | **521.7**, 114 ms, 4.5 s |
+| KV cache | 194k / 184k tokens | 289k / 280k tokens |
+
+GSM8K 97.8 / 97.4 %, sanity 5/5, needles at 2.1k and 16.8k tokens; no hang through 500
+questions and both sweeps (the earlier hang was before the indexer kernel's fixes). Prompts
+over 4096 tokens now prefill in more chunks. A control with 4096-token chunks and no async
+(job 23782435) separates the two effects.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -661,10 +686,8 @@ Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving
      it passes (jobs 23591543, 23591544).
   5. MXFP4 MoE (~17 ms): mostly routing glue at low batch (`pack_bitmatrix` etc.), not the
      matmul; tile tuning would barely help.
-  6. **Async scheduling** (Nov 9 profile): ~12 ms per token at 1 user and ~40 ms at 32 are
-     outside GPU compute, largely host work that `--no-async-scheduling` serialises. Fixing
-     the race behind `NO_ASYNC=1` is now the largest single lever.
-  7. Fuse the FP8 activation rounding into one kernel (~6 ms per step now, quant + dequant).
+  6. ~~Async scheduling~~: done, with 4096-token chunks, 1.05–1.08× (above).
+  7. ~~Fuse the FP8 activation rounding~~: done Nov 9 (`fp8_round_triton`, the default).
   8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
   10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
