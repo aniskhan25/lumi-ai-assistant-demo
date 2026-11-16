@@ -7,8 +7,9 @@ port work and before downloading its 475 GiB.
 > **Status (2026-11-16): 20.3 / 220.1 / 328.3 / 462.7 tok/s at 1 / 16 / 32 / 64 users,
 > GSM8K 98.5 % (200), needles, decode = prefill (job 23708163), with V4's custom all-reduce
 > (`CUSTOM_AR=1`), a gfx90a sparse-decode kernel (`SPARSE_DECODE=1`) and V4.1's query
-> RoPE in Triton; at or above V4's recipe at every load. Async scheduling adds 7–12 % at
-> the cost of ~43 % of the KV cache. Sparse attention is now the largest cost (graph profile below).**
+> RoPE in Triton; at or above V4's recipe up to 32 users. With async scheduling (drop
+> `NO_ASYNC=1`): 22.9 / 242.3 / 352.0 / 494.2 tok/s, GSM8K 98.2 % of 500 (job 23784396),
+> at the cost of ~43 % of the KV cache (0.77M instead of 1.35M tokens). Sparse attention is now the largest cost (graph profile below).**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -258,7 +259,7 @@ GSM8K (99–100/100).
 | + query RoPE in one Triton kernel (always on) | 23706895 | 18.7 / – / 207.1 / 308.9, 429.9 at 64 | 53 / 91 ms, 135 at 64 |
 | same, async scheduling (no `NO_ASYNC=1`) | 23707780 | 20.9 / – / 225.3 / 332.4, 460.0 at 64 | 47 / 78 ms, 120 at 64 |
 | **gfx90a sparse decode kernel** (`SPARSE_DECODE=1` instead of `SPARSE_SPLIT=32`), `NO_ASYNC=1`: the recipe | 23708163 | **20.3 / – / 220.1 / 328.3**, **462.7 at 64** | **48 / 85 ms**, 124 at 64 |
-| same, async scheduling (no `NO_ASYNC=1`) | 23783297 | 22.9 / – / 242.3 / 352.0, 494.2 at 64 | 43 / 73 ms, 111 at 64 |
+| **same, async scheduling** (no `NO_ASYNC=1`): the high-throughput recipe | 23783297 | **22.9 / – / 242.3 / 352.0**, **494.2 at 64** | **43 / 73 ms**, 111 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -389,8 +390,12 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   1 / 16 / 32 / 64 users (+12.7 / +10.1 / +7.2 / +6.8 % over the synchronous kernel run),
   needles and decode = prefill fine, KV 0.77M tokens. GSM8K 97.5 % of 200: misses 100, 119,
   161, 184 (seen before) and 125, which none of the 15 earlier good V4.1 runs missed, nor the
-  synchronous kernel run nor async without the kernel. Likely batching nondeterminism; a
-  500-question run is the check.
+  synchronous kernel run nor async without the kernel. The 500-question check (job
+  23784396) gives **GSM8K 98.2 %** (9 misses; 125 right this time, 93 and 119 as always),
+  above V4's recipe on the same 500 (97.0–97.8 %): batching nondeterminism, not a defect.
+  Validated. (A first attempt, job 23783775, died at start-up with "HW Exception by GPU
+  node-4: GPU Hang" during the memory-profiling forward on nid005019; the same code started
+  cleanly on three other nodes.)
 
 Open: the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
