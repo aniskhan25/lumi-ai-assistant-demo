@@ -651,8 +651,15 @@ did, and the capacity rises instead (jobs 23707179/80, against 23706308/9, same 
 
 GSM8K 97.8 / 97.4 %, sanity 5/5, needles at 2.1k and 16.8k tokens; no hang through 500
 questions and both sweeps (the earlier hang was before the indexer kernel's fixes). Prompts
-over 4096 tokens now prefill in more chunks. A control with 4096-token chunks and no async
-(job 23782435) separates the two effects.
+over 4096 tokens now prefill in more chunks.
+
+The control, 4096-token chunks without async (job 23782435, 64 sequences, GSM8K 97.8 %),
+separates the two: the smaller chunk alone gives 17.6 / 200.7 / 333.5 / 493.6 tok/s at 1 /
+16 / 32 / 64 users, a KV cache of 534k tokens and TTFT 2.5 / 2.7 / 3.6 s at 16 / 32 / 64
+(smaller chunks also lower vLLM's profiled activation peak, and fewer prefills share a
+step). Async then adds 5–6 % throughput and 3 ms of TPOT at 1 user, and costs half that KV
+capacity and ~1 s of TTFT. Async with 2048-token chunks reserves what sync with 4096 does
+(job 23783289).
 
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
