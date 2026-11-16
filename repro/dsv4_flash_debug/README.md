@@ -658,8 +658,39 @@ separates the two: the smaller chunk alone gives 17.6 / 200.7 / 333.5 / 493.6 to
 16 / 32 / 64 users, a KV cache of 534k tokens and TTFT 2.5 / 2.7 / 3.6 s at 16 / 32 / 64
 (smaller chunks also lower vLLM's profiled activation peak, and fewer prefills share a
 step). Async then adds 5–6 % throughput and 3 ms of TPOT at 1 user, and costs half that KV
-capacity and ~1 s of TTFT. Async with 2048-token chunks reserves what sync with 4096 does
-(job 23783289).
+capacity and ~1 s of TTFT. **Async with 2048-token chunks** (job 23783289, 64 sequences,
+GSM8K 97.8 %) has both: 18.7 / 210.7 / 350.4 / 523.0 tok/s at 1 / 16 / 32 / 64 users, KV
+cache 625k tokens, TTFT 2.1 / 2.4 / 2.4 s at 16 / 32 / 64.
+
+### MTP speculative decoding; split-K for small batches (Nov 16)
+
+V4-Flash has one MTP layer and vLLM 0.26 has an AMD `DeepSeekV4MTP`. With one draft token
+the sparse indexer gets two query tokens per sequence (`next_n` = 2, not flattened on this
+GPU) with a causal length per token, `context_lens` [B, 2]. `paged_logits.py` now takes any
+`next_n` (row r = b·next_n + j uses its own length and sequence b's block table);
+`test_paged_logits.py` section 4 checks it against vLLM's `next_n` = 1 torch path per token:
+rel err ~1e-7, same masks and top-512 (job 23783466). vLLM's own fallback for `next_n` > 1
+cannot serve as the reference: it slices the cache as interleaved [D values, 4 scale bytes]
+per position, while V4 writes per block (all values, then the scales), so it reads garbage.
+
+**MTP, 1 draft token** (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`,
+recipe with async and 4096-token chunks, 32 sequences, job 23783475): GSM8K 97.8 %,
+sanity 5/5, needles 2/2, draft acceptance 59–73 % (mean acceptance length 1.6–1.7):
+
+| users | 1 | 4 | 16 | 32 |
+|---|---|---|---|---|
+| without MTP (23707179) | 18.6 tok/s, TPOT 53 ms | 68.2 | 211.0 | 348.9 |
+| **MTP** | **31.6**, TPOT 32 ms | **104.0** | **310.8** | **436.0** |
+
+1.70× per user at 1 user, still 1.25× at 32. The step costs about what a plain decode step
+costs, so each accepted draft is nearly free.
+
+**Split-K sparse decode for ≤ 4 queries** (`SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=4`, jobs
+23783284/5, async and 4096-token chunks, GSM8K 97.4 / 97.8 %): TPOT at 1 user 53 → 49.5 ms
+(19.9 tok/s), 72.1 tok/s at 4 users (from 68.2), unchanged at 16–64 users. (One answer was
+flagged as garbage by the probe; it is a correct answer in LaTeX.)
+
+### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
@@ -695,7 +726,8 @@ capacity and ~1 s of TTFT. Async with 2048-token chunks reserves what sync with 
      matmul; tile tuning would barely help.
   6. ~~Async scheduling~~: done, with 4096-token chunks, 1.05–1.08× (above).
   7. ~~Fuse the FP8 activation rounding~~: done Nov 9 (`fp8_round_triton`, the default).
-  8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
+  8. ~~MTP speculative decoding~~: works, 31.6 tok/s at 1 user, 1.25–1.70× (above);
+     combined with split-K and 2048-token chunks, and with 2 draft tokens, being validated.
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
   10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
@@ -715,6 +747,9 @@ capacity and ~1 s of TTFT. Async with 2048-token chunks reserves what sync with 
   6. The custom all-reduce works on MI250X (all GCD pairs 1 XGMI hop) if graph mode copies
      into the uncached IPC buffer as eager mode does; reading the caller's tensor directly
      returns stale data on gfx90a. Attach `test_allreduce.py`.
+  7. `fp8_paged_mqa_logits_torch`'s `next_n` > 1 path (MTP without aiter) reads the indexer
+     cache as interleaved per position; V4 writes it per block, so MTP indexer logits are
+     wrong there. Attach `test_paged_logits.py` (section 4).
 - **DeepSeek-V4.1-Flash:** its blocker on gfx90a was that the shared V4 attention stack gave
   wrong output. That is now explained and worked around, so the stack is viable on gfx90a.
   The port itself is still large and the model needs two nodes (see
