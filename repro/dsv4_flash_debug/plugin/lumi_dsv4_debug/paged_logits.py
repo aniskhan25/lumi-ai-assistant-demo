@@ -7,9 +7,14 @@ with the number of users, and cannot be captured in a CUDA graph (job 23512857).
 
 This kernel computes the same thing in one launch. The grid is fixed by the batch size and
 `max_model_len`; each program reads its sequence length on the device and fills positions
-past it with -inf. For next_n == 1 (no MTP), for batch row b and cached position t < L_b:
+past it with -inf. For output row r = b * next_n + j (query token j of sequence b; next_n is
+2 with one MTP draft token) and cached position t < L_r:
 
-    logits[b, t] = scale[t] * sum_h weights[b, h] * relu(q[b, h, :] . k[t, :])
+    logits[r, t] = scale[t] * sum_h weights[r, h] * relu(q[b, j, h, :] . k[t, :])
+
+L_r is the token's causal length: vLLM's indexer passes it per token as context_lens [B,
+next_n] for MTP (indexer.py, native path); a [B] context_lens means L_b - next_n + j + 1, as
+in the torch fallback.
 
 The cache is the layout the V4 compressor writes (`_fused_kv_compress_norm_rope_insert_
 indexer_attn`) and the torch fallback reads: per block, `block_size * D` FP8 values, row-major
@@ -24,13 +29,14 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _paged_mqa_logits_kernel(
-    q_ptr,  # [B, 1, H, D] fp8
+    q_ptr,  # [B, NEXT_N, H, D] fp8
     kv_ptr,  # uint8, block stride KV_BLOCK_STRIDE bytes
-    w_ptr,  # [B, H] float32
-    lens_ptr,  # [B] int
+    w_ptr,  # [B * NEXT_N, H] float32
+    lens_ptr,  # [B * NEXT_N] int, causal length per query token
     bt_ptr,  # [B, max_blocks] int32
-    out_ptr,  # [B, max_model_len] float32
+    out_ptr,  # [B * NEXT_N, max_model_len] float32
     q_stride_b,
+    q_stride_n,
     q_stride_h,
     w_stride_b,
     bt_stride_b,
@@ -42,12 +48,15 @@ def _paged_mqa_logits_kernel(
     D: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_T: tl.constexpr,
+    NEXT_N: tl.constexpr,
 ):
-    b = tl.program_id(0).to(tl.int64)
+    r = tl.program_id(0).to(tl.int64)
+    b = r // NEXT_N
+    j = r % NEXT_N
     pid_t = tl.program_id(1)
     t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
-    seq_len = tl.load(lens_ptr + b)
-    out_row = out_ptr + b * out_stride_b
+    seq_len = tl.load(lens_ptr + r)
+    out_row = out_ptr + r * out_stride_b
     if pid_t * BLOCK_T >= seq_len:
         tl.store(out_row + t, float("-inf"), mask=t < max_model_len)
         return
@@ -63,10 +72,10 @@ def _paged_mqa_logits_kernel(
                     mask=valid, other=0.0)
 
     h = tl.arange(0, BLOCK_H)
-    q = tl.load(q_ptr + b * q_stride_b + h[:, None] * q_stride_h + d[None, :],
+    q = tl.load(q_ptr + b * q_stride_b + j * q_stride_n + h[:, None] * q_stride_h + d[None, :],
                 mask=(h < H)[:, None], other=0.0)
     q = q.to(tl.float32).to(tl.float16)
-    w = tl.load(w_ptr + b * w_stride_b + h, mask=h < H, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + r * w_stride_b + h, mask=h < H, other=0.0).to(tl.float32)
 
     s = tl.dot(k, tl.trans(q))  # [BLOCK_T, BLOCK_H], fp32
     s = tl.maximum(s, 0.0) * w[None, :]
@@ -75,35 +84,38 @@ def _paged_mqa_logits_kernel(
 
 
 def fp8_paged_mqa_logits_triton(
-    q: torch.Tensor,  # [B, 1, H, D] fp8
+    q: torch.Tensor,  # [B, next_n, H, D] fp8
     kv_cache: torch.Tensor,  # [num_blocks, block_size, 1, D + 4] uint8
-    weights: torch.Tensor,  # [B, H] float32
-    context_lens: torch.Tensor,  # [B] or [B, 1]
+    weights: torch.Tensor,  # [B * next_n, H] float32
+    context_lens: torch.Tensor,  # [B, next_n] per token, or [B]
     block_tables: torch.Tensor,  # [B, max_blocks]
     max_model_len: int,
     block_t: int = 64,
 ) -> torch.Tensor:
     batch, next_n, heads, dim = q.shape
-    assert next_n == 1
     block_size = kv_cache.shape[1]
     assert kv_cache.dtype == torch.uint8 and kv_cache.shape[-1] == dim + 4
     assert block_size % block_t == 0 or block_t % block_size == 0
     assert q.stride(-1) == 1 and weights.stride(-1) == 1
     lens = context_lens.reshape(-1)
-    out = torch.empty(batch, max_model_len, dtype=torch.float32, device=q.device)
-    grid = (batch, triton.cdiv(max_model_len, block_t))
+    if next_n > 1 and lens.numel() == batch:  # per sequence: token j sees L - next_n + j + 1
+        offs = torch.arange(1 - next_n, 1, device=lens.device, dtype=lens.dtype)
+        lens = (lens[:, None] + offs).reshape(-1)
+    assert lens.numel() == batch * next_n and weights.shape[0] == batch * next_n
+    out = torch.empty(batch * next_n, max_model_len, dtype=torch.float32, device=q.device)
+    grid = (batch * next_n, triton.cdiv(max_model_len, block_t))
     _paged_mqa_logits_kernel[grid](
         q, kv_cache, weights, lens, block_tables, out,
-        q.stride(0), q.stride(2), weights.stride(0), block_tables.stride(0), out.stride(0),
-        max_model_len, heads, kv_cache.stride(0),
+        q.stride(0), q.stride(1), q.stride(2), weights.stride(0), block_tables.stride(0),
+        out.stride(0), max_model_len, heads, kv_cache.stride(0),
         BLOCK_SIZE=block_size, D=dim, BLOCK_H=triton.next_power_of_2(heads), BLOCK_T=block_t,
-        num_warps=4,
+        NEXT_N=next_n, num_warps=4,
     )
     return out
 
 
 def install() -> None:
-    """Route rocm_fp8_paged_mqa_logits to the kernel above when aiter is off and next_n == 1."""
+    """Route rocm_fp8_paged_mqa_logits to the kernel above when aiter is off."""
     import vllm.v1.attention.ops.rocm_aiter_mla_sparse as ops
 
     import os
@@ -126,7 +138,7 @@ def install() -> None:
                                   schedule_metadata, max_model_len):
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_enabled() or q_fp8.shape[1] != 1:
+        if rocm_aiter_ops.is_enabled():
             return stock(q_fp8, kv_cache_fp8, weights, context_lens, block_tables,
                          schedule_metadata, max_model_len)
         if not checks["described"]:
