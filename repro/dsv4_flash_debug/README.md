@@ -79,13 +79,16 @@ what keeps NaN in pad rows out of the MoE router (see "A layout-sensitive bug un
 graphs" below). `CUSTOM_AR=1` replaces RCCL with vLLM's custom all-reduce, made coherent on
 gfx90a, for 1.03–1.11× (see "All-reduce" below). `SCORE_GEMM=1` runs the compressors'
 fp32-output score GEMMs in a Triton kernel, 1.01–1.08× more (see "Compressor score GEMMs").
-Async scheduling (no `NO_ASYNC=1`) with `--max-num-batched-tokens 4096` adds 1.05–1.08×
-and 1.5× the KV capacity (see "Async scheduling, revisited").
+Async scheduling (no `NO_ASYNC=1`) with `--max-num-batched-tokens 2048` adds 1.05–1.08×,
+3.4× the KV capacity and half the TTFT (see "Async scheduling, revisited"). `MTP=1` adds
+speculative decoding with V4's MTP layer: **34 tok/s for one user** (from 18.7), 1.27× at
+32 users and 1.09× at 64; `SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8` adds split-K sparse decode
+for 1–4 users (see "MTP speculative decoding").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 \
-  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 4096" \
+  MTP=1 SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8 TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 \
+  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
 
@@ -94,8 +97,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **+ async, 4096-token chunks** | 32 | 23707179 | 97.8 % | 18.6 / 68.2 / 211.0 / 348.9 / – | 53 / 83 / – ms |
-| **+ async, 4096-token chunks** | 64 | 23707180 | 97.4 % | 18.6 / – / 211.3 / 349.1 / **521.7** | 53 / 84 / 114 ms |
+| **+ async (2048-token chunks), MTP, split-K** | 32 | 23802055 | 97.6 % | **34.3** / **118.9** / 307.2 / **446.2** / – | 29 / 57 / – ms |
+| **+ async (2048-token chunks), MTP, split-K** | 64 | 23802056 | 97.2 % | **35.1** / – / 296.2 / 411.0 / **571.2** | 28 / 57 / 83 ms |
+| + async, 4096-token chunks | 32 | 23707179 | 97.8 % | 18.6 / 68.2 / 211.0 / 348.9 / – | 53 / 83 / – ms |
+| + async, 4096-token chunks | 64 | 23707180 | 97.4 % | 18.6 / – / 211.3 / 349.1 / 521.7 | 53 / 84 / 114 ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 64 | 23706309 | 97.2 % | 17.7 / – / 198.1 / 325.1 / 481.8 | 56 / 88 / 122 ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` | 32 | 23696592 | 97.6 % | 16.3 / 62.7 / 192.4 / 319.5 / – | 61 / 90 / – ms |
@@ -690,6 +695,22 @@ costs, so each accepted draft is nearly free.
 (19.9 tok/s), 72.1 tok/s at 4 users (from 68.2), unchanged at 16–64 users. (One answer was
 flagged as garbage by the probe; it is a correct answer in LaTeX.)
 
+**Combined** (`MTP=1 SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8`, 2048-token chunks; with MTP each
+sequence brings 2 queries, so 8 covers 1–4 users), and 2 draft tokens for comparison:
+
+| | job | GSM8K | acceptance | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 | TTFT at 16 / 32 / 64 |
+|---|---|---|---|---|---|---|
+| no MTP (async, 2048 chunks) | 23783289 | 97.8 % | – | 18.7 / – / 210.7 / 350.4 / 523.0 | 53 ms | 2.1 / 2.4 / 2.4 s |
+| **MTP 1**, 32 seqs | 23802055 | 97.6 % | 82 % | **34.3 / 118.9 / 307.2 / 446.2** / – | **29 ms** | 1.0 / 1.1 / – s |
+| **MTP 1**, 64 seqs | 23802056 | 97.2 % | 75 % | **35.1** / – / 296.2 / 411.0 / **571.2** | 28 ms | 0.7 / 1.1 / 1.7 s |
+| MTP 2, 32 seqs | 23802057 | 97.6 % | 53 % | **39.0** / 99.3 / 276.5 / 413.7 / – | 24.5 ms | 0.8 / 1.6 / – s |
+
+Sanity 5/5 and needles 2/2 in all; KV cache 590–620k tokens. One draft token wins from 4
+users up. A second draft is reused from the same single MTP layer and accepted only ~11 % of
+the time at its position, so it pays only for a single user (39 tok/s). At 2 drafts
+(`next_n` = 3) vLLM flattens the indexer queries to `next_n` = 1, which the kernel also
+handles. Acceptance includes the GSM8K probe; free-form chat will accept less.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
@@ -726,8 +747,7 @@ flagged as garbage by the probe; it is a correct answer in LaTeX.)
      matmul; tile tuning would barely help.
   6. ~~Async scheduling~~: done, with 4096-token chunks, 1.05–1.08× (above).
   7. ~~Fuse the FP8 activation rounding~~: done Nov 9 (`fp8_round_triton`, the default).
-  8. ~~MTP speculative decoding~~: works, 31.6 tok/s at 1 user, 1.25–1.70× (above);
-     combined with split-K and 2048-token chunks, and with 2 draft tokens, being validated.
+  8. ~~MTP speculative decoding~~: done, `MTP=1`, 34–35 tok/s at 1 user, 1.09–1.8× (above).
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
   10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
