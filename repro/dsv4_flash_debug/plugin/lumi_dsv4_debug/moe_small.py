@@ -1,13 +1,20 @@
-"""MoE routing at decode batch sizes (DSV4_MOE_SMALL=1) and the router GEMM (DSV4_GATE_GEMM=1).
+"""MoE at decode batch sizes (DSV4_MOE_SMALL=1) and the router GEMM (DSV4_GATE_GEMM=1).
 
 Eager profile at one user (job 23782732, rank 0, per decode step over 43 MoE layers):
-`pack_bitmatrix` 96 us per call (4.1 ms), the router GEMM 40 us per call (1.7 ms).
+`pack_bitmatrix` 96 us per call (4.1 ms), the two expert GEMMs 93 + 69 us (7 ms), the
+router GEMM 40 us (1.7 ms).
 
 pack_bitmatrix  vLLM's `make_routing_data` (gpt_oss_triton_kernels_moe.py) launches it with
                 BLOCK_SIZE_M = 512 whatever the token count, so one or two tokens run in a
                 single workgroup holding [512, 32] tiles through bm_cols = 8 column passes.
-                The launcher here picks the row block from the row count; the output is the
-                same bitmatrix (test_moe_small.py).
+                Row blocks of 16 give the same bitmatrix and are the fastest at every row
+                count (test_moe_small.py, job 23811434, graph replay: 43.7 -> 3.3 us at 1-512
+                rows, 43.6 -> 6.7 us at 8192).
+expert GEMMs    triton_kernels' AMD opt flags pick block_n 256 for the gate/up GEMM (N 512 per
+                rank) and split_k from a grid that counts every expert, so few workgroups do
+                the work. Forced block_n / split_k per token count (test_moe_matmul.py, job
+                23811580, 8 routings cycled so the weights are cold): gate/up 1.3-1.6x at 1-64
+                tokens (37.6 -> 23.6 us at 1, 525 -> 390 us at 64), down 1.2-1.6x at 1-2.
 router GEMM     `GateLinear` (4096 -> 256 experts, out_dtype float32) has no ROCm tier and
                 falls through to bf16 F.linear (hipBLASLt MT32x32 with fp32 MFMA) followed by
                 a cast, so the logits are rounded to bf16 first. score_gemm.score_mm computes
@@ -19,12 +26,18 @@ import triton
 
 
 def pack_block_m(n_rows: int) -> int:
-    return max(16, min(512, triton.next_power_of_2(n_rows)))  # set from test_moe_small.py
+    return 16
+
+
+# (max tokens, (block_n, split_k)); larger batches (prefill) keep the library's choice.
+GATE_UP = [(1, (32, 4)), (2, (128, 4)), (4, (128, 2)), (8, (128, 4)), (128, (128, 2))]
+DOWN = [(2, (64, 1))]  # 4+ tokens: the default is already best
+TOPK = 6  # V4-Flash num_experts_per_tok: the down GEMM's rows are tokens * TOPK
 
 
 class _PackBitmatrix:
     """Stands in for the `pack_bitmatrix` JIT function: `[grid](...)` ignores vLLM's grid
-    and BLOCK_SIZE_M and launches with a row block sized to n_rows."""
+    and BLOCK_SIZE_M and launches with pack_block_m rows per program."""
 
     def __init__(self, kernel):
         self.kernel = kernel
@@ -43,6 +56,43 @@ def install_pack() -> None:
 
     if not isinstance(m.pack_bitmatrix, _PackBitmatrix):
         m.pack_bitmatrix = _PackBitmatrix(m.pack_bitmatrix)
+
+
+def _pick(table, tokens):
+    for m_max, cfg in table:
+        if tokens <= m_max:
+            return {"block_n": cfg[0], "split_k": cfg[1]}
+    return None
+
+
+def install_matmul() -> None:
+    import importlib
+
+    import vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe as m
+
+    stock = m.matmul_ogs
+    if getattr(stock, "_lumi", False):
+        return
+    pkg = stock.__module__.rsplit(".", 1)[0]  # vLLM's (aliased) triton_kernels
+    of = importlib.import_module(pkg + ".matmul_ogs_details.opt_flags")
+
+    def matmul_ogs(x, w, bias, routing_data=None, gather_indx=None, scatter_indx=None, **kw):
+        cons = None
+        if routing_data is not None and gather_indx is not None:  # gate/up: x is [tokens, K]
+            cons = _pick(GATE_UP, x.shape[0])
+        elif routing_data is not None and scatter_indx is not None:  # down: x is [tokens*topk, I]
+            cons = _pick(DOWN, x.shape[0] // TOPK)
+        if cons is None:
+            return stock(x, w, bias, routing_data, gather_indx, scatter_indx, **kw)
+        saved = of._opt_flags_constraints
+        of._opt_flags_constraints = {**saved, **cons}
+        try:
+            return stock(x, w, bias, routing_data, gather_indx, scatter_indx, **kw)
+        finally:
+            of._opt_flags_constraints = saved
+
+    matmul_ogs._lumi = True
+    m.matmul_ogs = matmul_ogs
 
 
 def install_gate() -> None:
