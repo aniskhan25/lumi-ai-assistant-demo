@@ -29,6 +29,8 @@
 #   PROFILE=1 PROBE=0                                              # torch-profile decode at
 #     c=1 and c=32 (eager: kernels in graphs can't be attributed); rank-0 component split
 #     by repro/dsv4_flash_debug/analyze_trace.py
+#     (with COMPILE=1 also graph_trace.py: idle and host-late gaps per step; STEP_MOE=43
+#      without MTP)
 #     (needed with TRITON_LOGITS=1: with async scheduling the server hangs after a few
 #      decode steps, jobs 23518755, 23519175; the torch fallback's per-sequence syncs hid it)
 #
@@ -195,6 +197,9 @@ if [ "${PROFILE:-0}" = 1 ]; then
     ls -la "${PROF_DIR}/c${c}" | head
     rank0="$(ls "${PROF_DIR}/c${c}"/*rank0* "${PROF_DIR}/c${c}"/*.json.gz 2>/dev/null | head -1)"
     [ -n "${rank0}" ] && "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/analyze_trace.py" "${rank0}"
+    # Graph mode: idle time and host-late gaps per step (MoE layers per step: 43, +1 with MTP)
+    [ -n "${rank0}" ] && [ "${COMPILE:-0}" = 1 ] && "${RUN[@]}" python \
+      "${REPO}/repro/dsv4_flash_debug/graph_trace.py" "${rank0}" pack_bitmatrix "${STEP_MOE:-44}"
   done
 fi
 [ "${STATUS}" != 0 ] && { echo "--- server log tail ---"; grep -v amdsmi "${LOG}/server.log" | tail -60; }
