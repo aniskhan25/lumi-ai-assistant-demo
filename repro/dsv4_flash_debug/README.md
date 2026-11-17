@@ -99,6 +99,7 @@ garbage, no runaway answers):
 |---|---|---|---|---|---|
 | **+ async (2048-token chunks), MTP, split-K** | 32 | 23802055 | 97.6 % | **34.3** / **118.9** / 307.2 / **446.2** / – | 29 / 57 / – ms |
 | **+ async (2048-token chunks), MTP, split-K** | 64 | 23802056 | 97.2 % | **35.1** / – / 296.2 / 411.0 / **571.2** | 28 / 57 / 83 ms |
+| **the command above, verbatim** | 64 | 23810538 | 97.4 % | **34.8** / 114.0 / 275.2 / 431.2 / **630.3** | 28 / 59 / 85 ms |
 | + async, 4096-token chunks | 32 | 23707179 | 97.8 % | 18.6 / 68.2 / 211.0 / 348.9 / – | 53 / 83 / – ms |
 | + async, 4096-token chunks | 64 | 23707180 | 97.4 % | 18.6 / – / 211.3 / 349.1 / 521.7 | 53 / 84 / 114 ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
@@ -710,6 +711,11 @@ users up. A second draft is reused from the same single MTP layer and accepted o
 the time at its position, so it pays only for a single user (39 tok/s). At 2 drafts
 (`next_n` = 3) vLLM flattens the indexer queries to `next_n` = 1, which the kernel also
 handles. Acceptance includes the GSM8K probe; free-form chat will accept less.
+
+The recipe command run verbatim (job 23810538, `MTP=1` switch, concurrency 1 / 4 / 16 / 32 /
+64): 34.8 / 114.0 / 275.2 / 431.2 / 630.3 tok/s, TTFT 0.3 / 0.6 / 1.0 / 1.6 / 2.1 s, GSM8K
+97.4 %, acceptance 75 %. With MTP the per-load numbers spread more between runs than
+without (16 users: 275–307 tok/s; 64 users: 571–630), as acceptance depends on the prompts.
 
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
