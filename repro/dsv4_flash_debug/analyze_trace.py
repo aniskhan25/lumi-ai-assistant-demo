@@ -5,7 +5,10 @@ to the Python frames open on its thread at the time (traces taken with_stack=Tru
 innermost frame matching a rule below names the component. Run on an eager trace: inside a
 CUDA graph, kernels cannot be traced back to Python.
 
-    python analyze_trace.py TRACE.json.gz
+    python analyze_trace.py TRACE.json.gz [COMPONENT ...]
+
+Each COMPONENT named (a prefix, e.g. "MoE") also gets every kernel listed with its calls per
+step and time per call.
 """
 
 import collections
@@ -90,10 +93,12 @@ def component(kernel) -> str:
 
 per = collections.Counter()
 names = collections.defaultdict(collections.Counter)
+calls = collections.defaultdict(collections.Counter)
 for k in kernels:
     c = component(k)
     per[c] += k["dur"]
     names[c][k["name"][:70]] += k["dur"]
+    calls[c][k["name"][:70]] += 1
 
 steps = sum(1 for e in events if e.get("cat") == "python_function"
             and e["name"].endswith(": execute_model") and "gpu_model_runner" in e["name"])
@@ -105,3 +110,10 @@ print(f"{'component':<28} {'ms/step':>8} {'share':>6}   top kernels")
 for comp, us in per.most_common():
     top = ", ".join(f"{n} {d / max(us, 1):.0%}" for n, d in names[comp].most_common(2))
     print(f"{comp:<28} {us / 1e3 / max(steps, 1):8.2f} {us / busy:6.1%}   {top}")
+
+for want in sys.argv[2:]:
+    for comp in [c for c in per if c.startswith(want)]:
+        print(f"\n{comp}: kernel, ms/step, calls/step, us/call")
+        for n, d in names[comp].most_common():
+            c = calls[comp][n]
+            print(f"  {n:<70} {d / 1e3 / max(steps, 1):7.2f} {c / max(steps, 1):7.1f} {d / c:8.1f}")
