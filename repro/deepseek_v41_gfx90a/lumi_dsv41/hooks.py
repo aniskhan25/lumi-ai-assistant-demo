@@ -845,7 +845,33 @@ def _debug_engram(module) -> None:
     cls.ensure_cache, cls.forward = ensure_cache, forward
 
 
+def _empty_prefill_chunks(module) -> None:
+    """Async scheduling with --max-num-batched-tokens 2048 (jobs 23836592/3) crashed in
+    V4.1's ROCm _forward_prefill: a chunk of 22 prefills whose CPU query and sequence
+    lengths were all 0 gives chunk_M = 0, and view(22, 0, -1) fails. A request with no
+    query tokens writes no output rows, so its chunk can be skipped. Logs the first such
+    batches (num_decodes, lengths) to find where the empty entries come from."""
+    cls = module.DeepseekSparseSWAMetadata
+    stock = cls.get_prefill_chunk_plan
+    seen = [0]
+
+    def get_prefill_chunk_plan(self, *args, **kwargs):
+        plan = stock(self, *args, **kwargs)
+        kept = [c for c in plan if c[3] > 0]
+        if len(kept) != len(plan) and seen[0] < 5:
+            seen[0] += 1
+            print(f"[DSV41_EMPTY_PREFILL] skipped {len(plan) - len(kept)} of {len(plan)} chunks; "
+                  f"num_decodes={self.num_decodes} num_prefills={self.num_prefills} "
+                  f"num_prefill_tokens={self.num_prefill_tokens} "
+                  f"query_lens={self.prefill_query_lens_cpu.tolist()} "
+                  f"seq_lens={self.prefill_seq_lens_cpu.tolist()} plan={plan}", flush=True)
+        return kept
+
+    cls.get_prefill_chunk_plan = get_prefill_chunk_plan
+
+
 VENDORED_HOOKS = {
+    "vllm.v1.attention.backends.mla.sparse_swa": [_empty_prefill_chunks],
     "vllm.models.deepseek_v41.common.engram": [_debug_engram],
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang, _mhc_triton],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
