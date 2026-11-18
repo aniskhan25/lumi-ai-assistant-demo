@@ -79,11 +79,19 @@ what keeps NaN in pad rows out of the MoE router (see "A layout-sensitive bug un
 graphs" below). `CUSTOM_AR=1` replaces RCCL with vLLM's custom all-reduce, made coherent on
 gfx90a, for 1.03–1.11× (see "All-reduce" below). `SCORE_GEMM=1` runs the compressors'
 fp32-output score GEMMs in a Triton kernel, 1.01–1.08× more (see "Compressor score GEMMs").
+Async scheduling (no `NO_ASYNC=1`) with `--max-num-batched-tokens 2048` adds 1.05–1.08×,
+3.4× the KV capacity and half the TTFT (see "Async scheduling, revisited"). `MTP=1` adds
+speculative decoding with V4's MTP layer: **34 tok/s for one user** (from 18.7), 1.27× at
+32 users and 1.09× at 64; `SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8` adds split-K sparse decode
+for 1–4 users (see "MTP speculative decoding"). `MOE_SMALL=1 GATE_GEMM=1` retunes the MoE
+routing and expert GEMMs for decode-sized batches and runs the router in Triton: 1.03–1.12×
+at 4–32 users, ~1.02× at 1 and 64 (see "MoE at decode sizes").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  TRITON_LOGITS=1 NO_ASYNC=1 BF16_LINEAR=1 COMPILE=1 \
-  MORE_VLLM_ARGS="--max-num-seqs 64" \
+  MTP=1 SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8 MOE_SMALL=1 GATE_GEMM=1 \
+  TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 \
+  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
 
@@ -92,8 +100,15 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **`MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1`** | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
-| **`MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1`** | 64 | 23706309 | 97.2 % | 17.7 / – / 198.1 / 325.1 / **481.8** | 56 / 88 / 122 ms |
+| **the command above** | 32 | 23811671 | 97.4 % | **35.2** / **122.1** / **333.6** / **501.9** / – | 28 / 54 / – ms |
+| **the command above** | 64 | 23811670 | 97.6 % | **35.4** / **128.0** / 306.2 / 464.9 / **643.9** | 28 / 54 / 80 ms |
+| + async (2048-token chunks), MTP, split-K | 32 | 23802055 | 97.6 % | **34.3** / **118.9** / 307.2 / **446.2** / – | 29 / 57 / – ms |
+| + async (2048-token chunks), MTP, split-K | 64 | 23802056 | 97.2 % | **35.1** / – / 296.2 / 411.0 / **571.2** | 28 / 57 / 83 ms |
+| the same, run verbatim | 64 | 23810538 | 97.4 % | 34.8 / 114.0 / 275.2 / 431.2 / 630.3 | 28 / 59 / 85 ms |
+| + async, 4096-token chunks | 32 | 23707179 | 97.8 % | 18.6 / 68.2 / 211.0 / 348.9 / – | 53 / 83 / – ms |
+| + async, 4096-token chunks | 64 | 23707180 | 97.4 % | 18.6 / – / 211.3 / 349.1 / 521.7 | 53 / 84 / 114 ms |
+| `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 32 | 23706308 | 97.0 % | 17.7 / 64.7 / 198.3 / 323.3 / – | 56 / 89 / – ms |
+| `MHC_FIX=triton` + `CUSTOM_AR=1` + `SCORE_GEMM=1` | 64 | 23706309 | 97.2 % | 17.7 / – / 198.1 / 325.1 / 481.8 | 56 / 88 / 122 ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` | 32 | 23696592 | 97.6 % | 16.3 / 62.7 / 192.4 / 319.5 / – | 61 / 90 / – ms |
 | `MHC_FIX=triton` + `CUSTOM_AR=1` | 64 | 23696593 | 97.6 % | 16.3 / – / 192.5 / 318.2 / 466.8 | 61 / 90 / 126 ms |
 | `MHC_FIX=triton` | 32 (default) | 23591543 | 97.4 % | 15.5 / 56.1 / 187.0 / 296.1 / – | 64 / 97 / – ms |
@@ -629,6 +644,119 @@ Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving
 192.5 → 198.2 tok/s at 16 users, 319 → 324 at 32 and 466.8 → 481.8 at 64 (+3 %; TPOT 126 →
 122 ms). GSM8K 97.0 / 97.2 % (97.0–97.8 % across all recipe runs).
 
+### Async scheduling, revisited (Nov 13–16)
+
+On Nov 9 async scheduling gave +3.5–4 % but halved the KV capacity (above). vLLM sizes the
+sliding-window reservation per request as window + `max_in_flight_tokens`, which is
+concurrent batches × `max_num_batched_tokens` (`VllmConfig.max_in_flight_tokens`): 2 × 8192
+with async, 1 × 8192 without. With `--max-num-batched-tokens 4096` async reserves what sync
+did, and the capacity rises instead (jobs 23707179/80, against 23706308/9, same code):
+
+| users | sync, 8192-token chunks | async, 4096-token chunks |
+|---|---|---|
+| 1 | 17.7 tok/s, TPOT 56 ms | **18.6**, 53 ms |
+| 16 | 198.2, TTFT 4.2 s | **211.0**, 3.2 s |
+| 32 | 324, TPOT 89 ms, TTFT 5.5 s | **349**, 83 ms, 3.6 s |
+| 64 | 481.8, TPOT 122 ms, TTFT 5.3 s | **521.7**, 114 ms, 4.5 s |
+| KV cache | 194k / 184k tokens | 289k / 280k tokens |
+
+GSM8K 97.8 / 97.4 %, sanity 5/5, needles at 2.1k and 16.8k tokens; no hang through 500
+questions and both sweeps (the earlier hang was before the indexer kernel's fixes). Prompts
+over 4096 tokens now prefill in more chunks.
+
+The control, 4096-token chunks without async (job 23782435, 64 sequences, GSM8K 97.8 %),
+separates the two: the smaller chunk alone gives 17.6 / 200.7 / 333.5 / 493.6 tok/s at 1 /
+16 / 32 / 64 users, a KV cache of 534k tokens and TTFT 2.5 / 2.7 / 3.6 s at 16 / 32 / 64
+(smaller chunks also lower vLLM's profiled activation peak, and fewer prefills share a
+step). Async then adds 5–6 % throughput and 3 ms of TPOT at 1 user, and costs half that KV
+capacity and ~1 s of TTFT. **Async with 2048-token chunks** (job 23783289, 64 sequences,
+GSM8K 97.8 %) has both: 18.7 / 210.7 / 350.4 / 523.0 tok/s at 1 / 16 / 32 / 64 users, KV
+cache 625k tokens, TTFT 2.1 / 2.4 / 2.4 s at 16 / 32 / 64.
+
+### MTP speculative decoding; split-K for small batches (Nov 16)
+
+V4-Flash has one MTP layer and vLLM 0.26 has an AMD `DeepSeekV4MTP`. With one draft token
+the sparse indexer gets two query tokens per sequence (`next_n` = 2, not flattened on this
+GPU) with a causal length per token, `context_lens` [B, 2]. `paged_logits.py` now takes any
+`next_n` (row r = b·next_n + j uses its own length and sequence b's block table);
+`test_paged_logits.py` section 4 checks it against vLLM's `next_n` = 1 torch path per token:
+rel err ~1e-7, same masks and top-512 (job 23783466). vLLM's own fallback for `next_n` > 1
+cannot serve as the reference: it slices the cache as interleaved [D values, 4 scale bytes]
+per position, while V4 writes per block (all values, then the scales), so it reads garbage.
+
+**MTP, 1 draft token** (`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`,
+recipe with async and 4096-token chunks, 32 sequences, job 23783475): GSM8K 97.8 %,
+sanity 5/5, needles 2/2, draft acceptance 59–73 % (mean acceptance length 1.6–1.7):
+
+| users | 1 | 4 | 16 | 32 |
+|---|---|---|---|---|
+| without MTP (23707179) | 18.6 tok/s, TPOT 53 ms | 68.2 | 211.0 | 348.9 |
+| **MTP** | **31.6**, TPOT 32 ms | **104.0** | **310.8** | **436.0** |
+
+1.70× per user at 1 user, still 1.25× at 32. The step costs about what a plain decode step
+costs, so each accepted draft is nearly free.
+
+**Split-K sparse decode for ≤ 4 queries** (`SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=4`, jobs
+23783284/5, async and 4096-token chunks, GSM8K 97.4 / 97.8 %): TPOT at 1 user 53 → 49.5 ms
+(19.9 tok/s), 72.1 tok/s at 4 users (from 68.2), unchanged at 16–64 users. (One answer was
+flagged as garbage by the probe; it is a correct answer in LaTeX.)
+
+**Combined** (`MTP=1 SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8`, 2048-token chunks; with MTP each
+sequence brings 2 queries, so 8 covers 1–4 users), and 2 draft tokens for comparison:
+
+| | job | GSM8K | acceptance | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 | TTFT at 16 / 32 / 64 |
+|---|---|---|---|---|---|---|
+| no MTP (async, 2048 chunks) | 23783289 | 97.8 % | – | 18.7 / – / 210.7 / 350.4 / 523.0 | 53 ms | 2.1 / 2.4 / 2.4 s |
+| **MTP 1**, 32 seqs | 23802055 | 97.6 % | 82 % | **34.3 / 118.9 / 307.2 / 446.2** / – | **29 ms** | 1.0 / 1.1 / – s |
+| **MTP 1**, 64 seqs | 23802056 | 97.2 % | 75 % | **35.1** / – / 296.2 / 411.0 / **571.2** | 28 ms | 0.7 / 1.1 / 1.7 s |
+| MTP 2, 32 seqs | 23802057 | 97.6 % | 53 % | **39.0** / 99.3 / 276.5 / 413.7 / – | 24.5 ms | 0.8 / 1.6 / – s |
+
+Sanity 5/5 and needles 2/2 in all; KV cache 590–620k tokens. One draft token wins from 4
+users up. A second draft is reused from the same single MTP layer and accepted only ~11 % of
+the time at its position, so it pays only for a single user (39 tok/s). At 2 drafts
+(`next_n` = 3) vLLM flattens the indexer queries to `next_n` = 1, which the kernel also
+handles. Acceptance includes the GSM8K probe; free-form chat will accept less.
+
+The recipe command run verbatim (job 23810538, `MTP=1` switch, concurrency 1 / 4 / 16 / 32 /
+64): 34.8 / 114.0 / 275.2 / 431.2 / 630.3 tok/s, TTFT 0.3 / 0.6 / 1.0 / 1.6 / 2.1 s, GSM8K
+97.4 %, acceptance 75 %. With MTP the per-load numbers spread more between runs than
+without (16 users: 275–307 tok/s; 64 users: 571–630), as acceptance depends on the prompts.
+
+### MoE at decode sizes (Nov 17)
+
+An eager profile at 1 user without MTP (job 23782732, rank 0, ~43 ms of GPU work per step)
+put the MoE at 16.5 ms, and most of it in kernels sized for prefill. Over the 43 MoE layers:
+
+- **`pack_bitmatrix`**, 96 µs a call (4.1 ms). `make_routing_data` launches it with 512-row
+  blocks whatever the batch, so one token runs as one workgroup sweeping [512, 32] tiles.
+  16-row blocks give a bit-identical bitmatrix and are fastest at every size (graph replay,
+  job 23811434): 43.7 → 3.3 µs at 1–512 rows, 43.6 → 6.7 µs at 8192.
+- **Expert GEMMs** (`matmul_ogs`, MXFP4), 93 + 69 µs. triton_kernels' AMD opt flags pick
+  block_n 256 for the gate/up GEMM (N = 512 per rank) and size split-K from a grid that
+  counts all 256 experts. Forcing block_n / split_k per token count (`test_moe_matmul.py`,
+  job 23811580, 8 routings cycled so the weights come from HBM): gate/up 37.6 → 23.6 µs at
+  1 token, 59 → 37 at 2, 145 → 100 at 8, 430 → 274 at 32, 525 → 390 at 64; down 29.1 →
+  17.8 µs at 1 and 34 → 28 at 2, already best from 4 tokens.
+- **Router GEMM** (4096 → 256, fp32 out), 40 µs. `GateLinear` has no ROCm tier and falls
+  through to bf16 `F.linear` (hipBLASLt with fp32 MFMA) plus a cast, so the logits are also
+  rounded to bf16 (rel err 2e-3). `score_mm` does it in ~10 µs with fp32 output (2.5e-7).
+
+`MOE_SMALL=1` (`moe_small.py`) wraps `pack_bitmatrix` and sets the opt-flag constraints
+around each `matmul_ogs` call up to 128 tokens; larger batches keep the library's choice.
+`GATE_GEMM=1` routes `GateLinear` through `score_mm`. With the rest of the recipe:
+
+| | job | GSM8K | acceptance | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 16 / 32 / 64 | TTFT at 32 / 64 |
+|---|---|---|---|---|---|---|
+| recipe, 32 seqs | 23802055 | 97.6 % | 82 % | 34.2 / 118.9 / 307.1 / 446.2 / – | 28.6 / 44.4 / 58.9 / – ms | 3.1 / – s |
+| **+ MoE**, 32 seqs | 23811671 | 97.4 % | 81 % | **35.2 / 122.1 / 333.6 / 501.9** / – | 27.6 / 41.5 / 54.0 / – ms | 1.0 / – s |
+| recipe, 64 seqs | 23810538 | 97.4 % | 75 % | 34.8 / 114.0 / 275.2 / 431.2 / 630.3 | 28.1 / 46.9 / 60.2 / 85.1 ms | 3.2 / 5.7 s |
+| **+ MoE**, 64 seqs | 23811670 | 97.6 % | 74 % | **35.4 / 128.0 / 306.2 / 464.9 / 643.9** | 28.1 / 41.1 / 53.9 / 79.9 ms | 1.3 / 1.7 s |
+
+Sanity 5/5, needles 2/2, no garbage. TPOT drops 3–6 ms at 16–64 users and TTFT at 32–64
+users by 2–3×, as prefill chunks route through the same kernels. At 1 user TPOT does not
+move: the ~4 ms the eager profile promised does not appear under graphs, where these
+kernels evidently cost less than their eager launches (not profiled yet).
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -659,13 +787,11 @@ Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving
      `MHC_FIX=triton` + `ROUTER_GUARD=1`, 296 tok/s at 32 users and 437 at 64 (recipe).
      The NaN seen earlier with TileLang's fused post+GEMM was the pad-row bug: with the guard
      it passes (jobs 23591543, 23591544).
-  5. MXFP4 MoE (~17 ms): mostly routing glue at low batch (`pack_bitmatrix` etc.), not the
-     matmul; tile tuning would barely help.
-  6. **Async scheduling** (Nov 9 profile): ~12 ms per token at 1 user and ~40 ms at 32 are
-     outside GPU compute, largely host work that `--no-async-scheduling` serialises. Fixing
-     the race behind `NO_ASYNC=1` is now the largest single lever.
-  7. Fuse the FP8 activation rounding into one kernel (~6 ms per step now, quant + dequant).
-  8. MTP speculative decoding for per-user speed (needs the Triton indexer kernel at next_n 2).
+  5. ~~MXFP4 MoE at decode sizes~~: done, `MOE_SMALL=1 GATE_GEMM=1`, 1.03–1.12× at 4–32
+     users (above). The ~15 small routing kernels around it remain.
+  6. ~~Async scheduling~~: done, with 4096-token chunks, 1.05–1.08× (above).
+  7. ~~Fuse the FP8 activation rounding~~: done Nov 9 (`fp8_round_triton`, the default).
+  8. ~~MTP speculative decoding~~: done, `MTP=1`, 34–35 tok/s at 1 user, 1.09–1.8× (above).
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
   10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
@@ -685,6 +811,9 @@ Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving
   6. The custom all-reduce works on MI250X (all GCD pairs 1 XGMI hop) if graph mode copies
      into the uncached IPC buffer as eager mode does; reading the caller's tensor directly
      returns stale data on gfx90a. Attach `test_allreduce.py`.
+  7. `fp8_paged_mqa_logits_torch`'s `next_n` > 1 path (MTP without aiter) reads the indexer
+     cache as interleaved per position; V4 writes it per block, so MTP indexer logits are
+     wrong there. Attach `test_paged_logits.py` (section 4).
 - **DeepSeek-V4.1-Flash:** its blocker on gfx90a was that the shared V4 attention stack gave
   wrong output. That is now explained and worked around, so the stack is viable on gfx90a.
   The port itself is still large and the model needs two nodes (see
@@ -719,4 +848,7 @@ Max error against fp64 is 2–7e-7 relative, half that of `torch.mm`. In serving
 | `test_score_gemm.py`, `run_score_gemm_test.sh` | that kernel vs `torch.mm`: error vs fp64, tile sweep, per-step totals |
 | `plugin/lumi_dsv4_debug/sparse_split.py` | split-K sparse attention decode for batches ≤ 16 (`DSV4_SPARSE_SPLIT`) |
 | `test_sparse_split.py`, `run_sparse_split_test.sh` | split-K vs fallback decode per layer type and batch, split-count sweep |
+| `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
+| `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
+| `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |

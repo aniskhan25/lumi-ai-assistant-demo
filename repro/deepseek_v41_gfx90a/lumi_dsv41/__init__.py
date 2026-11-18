@@ -27,6 +27,16 @@ def register() -> None:
     model_configs.MODELS_CONFIG_MAP[ARCH] = _config_class(model_configs)
     from . import quant  # noqa: F401 - registers the deepseek_v41_fp8 method
 
+    import os
+
+    if os.environ.get("DSV41_MOE_PACK") == "1":
+        # V4 plugin's moe_small: pack_bitmatrix with 16-row blocks (bit-identical; vLLM
+        # launches 512-row blocks whatever the batch). Its expert GEMM tiles are for V4's
+        # TP-sharded experts, so only this part is used.
+        from lumi_dsv4_debug import moe_small
+
+        moe_small.install_pack()
+
 
 def _config_class(model_configs):
     base = model_configs.VerifyAndUpdateConfig

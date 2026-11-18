@@ -23,12 +23,15 @@
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #   NO_ASYNC=1                                                     # --no-async-scheduling
+#   NUMA_BIND=1                                                    # pin workers to their GCD's CCD
 #   BF16_LINEAR=1                                                  # block-FP8 dense linears in bf16
 #     (activations still FP8-rounded; BF16_ACT=bf16 skips that and costs accuracy)
 #   FP8_ROUND=torch                                                # vLLM quantiser + dequant instead of the fused kernel
 #   PROFILE=1 PROBE=0                                              # torch-profile decode at
 #     c=1 and c=32 (eager: kernels in graphs can't be attributed); rank-0 component split
 #     by repro/dsv4_flash_debug/analyze_trace.py
+#     (with COMPILE=1 also graph_trace.py: idle and host-late gaps per step; STEP_MOE=43
+#      without MTP)
 #     (needed with TRITON_LOGITS=1: with async scheduling the server hangs after a few
 #      decode steps, jobs 23518755, 23519175; the torch fallback's per-sequence syncs hid it)
 #
@@ -50,9 +53,15 @@
 #   ROUTER_GUARD=1|0|count   nan_to_num MoE gate logits before ROCm top-k (default 1; plugin router_guard.py)
 #   GRAPH_DIFF=1             rerun each graph step eagerly, log first diverging layer site
 #   SPARSE_SPLIT=1           split-K sparse attention decode (vLLM gates it to gfx942/950; plugin sparse_split.py;
-#                            V41: =N sets the query cutoff, default 16)
+#                            V41: =N sets the query cutoff, default 16;
+#                            superseded there by SPARSE_DECODE=1)
+#   SPARSE_SPLIT_MAX=16      ... (V4) for decode batches of at most this many queries
 #   CUSTOM_AR=copy|fence     vLLM custom all-reduce instead of RCCL (vLLM gates it to gfx94x/95x; 1 = copy)
 #   SCORE_GEMM=1             compressor score GEMMs in Triton instead of hipBLASLt's fp32-MFMA kernel (plugin score_gemm.py)
+#   MOE_SMALL=1              MoE at decode sizes: pack_bitmatrix row block, expert GEMM tiles (plugin moe_small.py)
+#   GATE_GEMM=1              MoE router GEMM in Triton with fp32 logits (plugin moe_small.py)
+#   MTP=N                    speculative decoding with V4's MTP layer, N draft tokens (1 is best above 1 user;
+#                            needs TRITON_LOGITS=1 for the indexer at next_n = N + 1)
 #   NANFILL=1                fill fresh float allocations with NaN (exposes reads of unwritten memory)
 #
 # DeepSeek-V4.1-Flash (V41=1): the lumi_dsv41 plugin (this directory) on Model Runner V2.
@@ -106,6 +115,11 @@ if [ "${V41:-0}" = 1 ]; then
   # SPARSE_SPLIT gate when both are set, so it wins)
   export DSV41_SPARSE_DECODE="${SPARSE_DECODE:-0}"
   # CUSTOM_AR=1 comes from the V4 plugin (custom_ar.py): model-independent.
+  # MOE_SMALL=1: only moe_small's pack_bitmatrix row blocks (shape-free); its expert GEMM
+  # tiles are for V4's TP shapes (N 512 per rank), V4.1 runs whole experts under EP.
+  export DSV41_MOE_PACK="${MOE_SMALL:-0}"; MOE_SMALL=0
+  if [ "${GATE_GEMM:-0}" != 0 ]; then echo "V41=1: GATE_GEMM has no score_mm tiles for the 5120 -> 384 router"; exit 2; fi
+  if [ "${MTP:-0}" != 0 ]; then echo "V41=1: MTP/DSpark not ported"; exit 2; fi
   # SCORE_GEMM patches V4's attention class; V4.1 runs only 4 fp32 score GEMMs per step
   # (0.3 ms at 32 users, graph profile job 23701511, vs 62 / 4 ms on V4).
   if [ "${SCORE_GEMM:-0}" != 0 ]; then echo "V41=1: SCORE_GEMM targets V4's attention class"; exit 2; fi
@@ -118,7 +132,7 @@ fi
 if [ "${PLUGIN}" = 1 ]; then
   export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
-  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}"
+  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_SPARSE_SPLIT_MAX="${SPARSE_SPLIT_MAX:-16}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}" DSV4_MOE_SMALL="${MOE_SMALL:-0}" DSV4_GATE_GEMM="${GATE_GEMM:-0}"
   PP_DIRS="${REPO}/repro/dsv4_flash_debug/plugin"
   [ "${V41:-0}" = 1 ] && PP_DIRS="${REPO}/repro/deepseek_v41_gfx90a:${PP_DIRS}"
   RUN+=(--env "PYTHONPATH=${PP_DIRS}:/opt/venv/lib/python3.12/site-packages")
@@ -126,7 +140,7 @@ elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0} GATE_GEMM=${GATE_GEMM:-0} MTP=${MTP:-0} NUMA_BIND=${NUMA_BIND:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
@@ -146,6 +160,10 @@ else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 # keeps whole experts (2304 = 9 x 256), no padding.
 [ "${V41:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --enable-expert-parallel"
 [ "${NO_ASYNC:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --no-async-scheduling"
+[ "${MTP:-0}" != 0 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":${MTP}}"
+# NUMA_BIND=1: pin each worker to its GCD's CCD (LUMI-G map; core 0 of each CCD is reserved)
+# and NUMA node. Graph-mode profiles showed a random rank's host launching late.
+[ "${NUMA_BIND:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --numa-bind --numa-bind-nodes 3 3 1 1 0 0 2 2 --numa-bind-cpus 49-55 57-63 17-23 25-31 1-7 9-15 33-39 41-47"
 PROF_DIR="${LOG}/profile"
 [ "${PROFILE:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROF_DIR}\",\"ignore_frontend\":true}"
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
@@ -155,6 +173,7 @@ SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}} ${MORE_VLLM_ARGS:-})
 NODES="${SLURM_JOB_NUM_NODES:-1}"
 echo "Serving on ${NODES} node(s): ${SERVE[*]}"
+echo "CPUs allowed: $(taskset -cp $$ | cut -d: -f2) ($(nproc))"
 if [ "${NODES}" -gt 1 ]; then
   # Multi-node RCCL hangs creating communicators with the default MR cache monitor
   # (laifs-container-recipes#44, see launch_vllm_multinode_rank.sh).
@@ -265,6 +284,9 @@ if [ "${PROFILE:-0}" = 1 ]; then
     ls -la "${PROF_DIR}/c${c}" | head
     rank0="$(ls "${PROF_DIR}/c${c}"/*rank0* "${PROF_DIR}/c${c}"/*.json.gz 2>/dev/null | head -1)"
     [ -n "${rank0}" ] && "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/analyze_trace.py" "${rank0}"
+    # Graph mode: idle time and host-late gaps per step (MoE layers per step: 43, +1 with MTP)
+    [ -n "${rank0}" ] && [ "${COMPILE:-0}" = 1 ] && "${RUN[@]}" python \
+      "${REPO}/repro/dsv4_flash_debug/graph_trace.py" "${rank0}" pack_bitmatrix "${STEP_MOE:-44}"
   done
 fi
 [ "${STATUS}" != 0 ] && { echo "--- server log tail ---"; grep -v amdsmi "${LOG}/server.log" | tail -60; }

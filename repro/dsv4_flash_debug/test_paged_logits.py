@@ -4,7 +4,11 @@ For V4-Flash's indexer shape (64 heads, head dim 128, FP8 cache with float32 sca
   1. the Triton kernel vs `fp8_paged_mqa_logits_torch`: same -inf mask, finite values within
      fp32 rounding, same top-512 indices;
   2. CUDA-graph capture with one set of sequence lengths, replay with another;
-  3. time per call, torch loop vs Triton, at 1-32 sequences.
+  3. time per call, torch loop vs Triton, at 1-32 sequences;
+  4. MTP (next_n = 2): per-token [B, 2] causal lengths, as vLLM's indexer passes them, and
+     per-sequence [B] lengths, vs the fallback's next_n == 1 path run per query token. (Its
+     next_n > 1 path reads the cache as interleaved [D values, 4 scale bytes] per position,
+     not the per-block layout V4 writes, so it is wrong for V4.)
 
     python test_paged_logits.py
 """
@@ -118,5 +122,25 @@ for length in (384, 4096):
         t_triton = timeit(lambda: fp8_paged_mqa_logits_triton(q, kv, w, cl, bt, MAX_LEN))
         print(f"  len {length:>5} batch {batch:>2}: torch {t_torch:7.3f}  triton {t_triton:6.3f}"
               f"  ({t_torch / t_triton:5.1f}x)")
+
+print("4. MTP, next_n = 2, vs fp8_paged_mqa_logits_torch per query token")
+for block_size in (64, 256):
+    num_blocks = 2 * MAX_LEN // block_size
+    kv = make_cache(num_blocks, block_size)
+    for lens in ([2], [block_size + 1], [5000], [2, 64, 65, 300, 2047, 8192, MAX_LEN], [377] * 32):
+        b, n = len(lens), 2
+        _, _, cl, bt = make_batch(lens, block_size, num_blocks)
+        q = torch.randn(b, n, H, D, device=dev).to(FP8)
+        w = torch.randn(b * n, H, device=dev)
+        rows = [L - n + j + 1 for L in lens for j in range(n)]
+        per_token = torch.tensor(rows, dtype=torch.int32, device=dev).view(b, n)
+        want = torch.cat([
+            fp8_paged_mqa_logits_torch(q[r // n : r // n + 1, r % n : r % n + 1], kv, w[r : r + 1],
+                                       per_token.view(-1)[r : r + 1], bt[r // n : r // n + 1], MAX_LEN)
+            for r in range(b * n)])
+        for name, c in (("[B,2] lens", per_token), ("[B] lens", cl)):
+            got = fp8_paged_mqa_logits_triton(q, kv, w, c, bt, MAX_LEN)
+            label = f"bs={block_size} {name} {lens if len(lens) < 8 else f'{len(lens)}x{lens[0]}'}"
+            compare(label[:34], got, want, rows)
 
 print("FAILED:", failures or "none")

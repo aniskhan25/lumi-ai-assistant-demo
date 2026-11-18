@@ -35,6 +35,9 @@ DSV4_CUSTOM_AR=copy|fence (1 = copy)
                      from their L2 (custom_ar.py).
 DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel with bf16 MFMA;
                      hipBLASLt picks an fp32-MFMA kernel for them on gfx90a (score_gemm.py).
+DSV4_MOE_SMALL=1     MoE at decode sizes: pack_bitmatrix with 16-row blocks, expert GEMM
+                     block_n / split_k by token count (moe_small.py).
+DSV4_GATE_GEMM=1     MoE router GEMM (fp32 logits) via score_gemm.score_mm (moe_small.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
                      layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
@@ -250,6 +253,17 @@ def register() -> None:
 
         score_gemm.install()
         _log("DSV4_SCORE_GEMM=1: compressor score GEMMs in Triton (bf16 MFMA, fp32 out)")
+    if os.environ.get("DSV4_MOE_SMALL") == "1":
+        from . import moe_small
+
+        moe_small.install_pack()
+        moe_small.install_matmul()
+        _log("DSV4_MOE_SMALL=1: pack_bitmatrix row blocks of 16, expert GEMM tiles by token count")
+    if os.environ.get("DSV4_GATE_GEMM") == "1":
+        from . import moe_small
+
+        moe_small.install_gate()
+        _log("DSV4_GATE_GEMM=1: MoE router GEMM via score_mm (fp32 logits)")
     if os.environ.get("DSV4_BF16_LINEAR") == "1":
         from . import bf16_linear
 
