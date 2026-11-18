@@ -23,6 +23,7 @@
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #   NO_ASYNC=1                                                     # --no-async-scheduling
+#   NUMA_BIND=1                                                    # pin workers to their GCD's CCD
 #   BF16_LINEAR=1                                                  # block-FP8 dense linears in bf16
 #     (activations still FP8-rounded; BF16_ACT=bf16 skips that and costs accuracy)
 #   FP8_ROUND=torch                                                # vLLM quantiser + dequant instead of the fused kernel
@@ -89,7 +90,7 @@ elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0} GATE_GEMM=${GATE_GEMM:-0} MTP=${MTP:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0} GATE_GEMM=${GATE_GEMM:-0} MTP=${MTP:-0} NUMA_BIND=${NUMA_BIND:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
@@ -106,6 +107,9 @@ if [ "${COMPILE:-0}" = 1 ]; then
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 [ "${NO_ASYNC:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --no-async-scheduling"
 [ "${MTP:-0}" != 0 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":${MTP}}"
+# NUMA_BIND=1: pin each worker to its GCD's CCD (LUMI-G map; core 0 of each CCD is reserved)
+# and NUMA node. Graph-mode profiles showed a random rank's host launching late.
+[ "${NUMA_BIND:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --numa-bind --numa-bind-nodes 3 3 1 1 0 0 2 2 --numa-bind-cpus 49-55 57-63 17-23 25-31 1-7 9-15 33-39 41-47"
 PROF_DIR="${LOG}/profile"
 [ "${PROFILE:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROF_DIR}\",\"ignore_frontend\":true}"
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
@@ -114,6 +118,7 @@ SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --no-enable-prefix-caching --kv-cache-dtype fp8
        ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}} ${MORE_VLLM_ARGS:-})
 echo "Serving: ${SERVE[*]}"
+echo "CPUs allowed: $(taskset -cp $$ | cut -d: -f2) ($(nproc))"
 "${RUN[@]}" "${SERVE[@]}" > "${LOG}/server.log" 2>&1 &
 SERVER=$!
 trap 'kill ${WATCH:-} 2>/dev/null || true; kill ${SERVER} 2>/dev/null; wait ${SERVER} 2>/dev/null; pkill -u ${USER} -f "VLLM::" 2>/dev/null || true' EXIT

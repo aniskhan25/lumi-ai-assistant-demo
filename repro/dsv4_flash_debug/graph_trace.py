@@ -57,7 +57,7 @@ div = steps or 1
 unit = "per step" if steps else "total"
 print(f"window {span / 1e3:.1f} ms, GPU busy {busy / 1e3:.1f} ms ({100 * busy / span:.0f} %)"
       + (f"; per step: wall {span / div / 1e3:.2f} ms, busy {busy / div / 1e3:.2f} ms" if steps else ""))
-ar = sorted(e["dur"] for e in dev if e["name"].startswith(AR))
+ar = sorted(e["dur"] for e in dev if any(x in e["name"] for x in AR))
 if ar:
     floor = ar[len(ar) // 10]  # 10th percentile call: the transfer itself, little waiting
     print(f"all-reduce: {len(ar) / div:.0f} calls {unit}, {sum(ar) / div / 1e3:.2f} ms {unit}, "
