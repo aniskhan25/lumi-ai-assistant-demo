@@ -4,12 +4,12 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-16): 20.3 / 220.1 / 328.3 / 462.7 tok/s at 1 / 16 / 32 / 64 users,
-> GSM8K 98.5 % (200), needles, decode = prefill (job 23708163), with V4's custom all-reduce
-> (`CUSTOM_AR=1`), a gfx90a sparse-decode kernel (`SPARSE_DECODE=1`) and V4.1's query
-> RoPE in Triton; at or above V4's recipe up to 32 users. With async scheduling (drop
-> `NO_ASYNC=1`): 22.9 / 242.3 / 352.0 / 494.2 tok/s, GSM8K 98.2 % of 500 (job 23784396),
-> at the cost of ~43 % of the KV cache (0.77M instead of 1.35M tokens). Sparse attention is now the largest cost (graph profile below).**
+> **Status (2026-11-19): 22.9 / 245.3 / 362.1 / 515.2 tok/s at 1 / 16 / 32 / 64 users,
+> GSM8K 98.0 % (200), needles, decode = prefill, 2.43M tokens of KV cache (job 23851799):
+> V4's custom all-reduce, a gfx90a sparse-decode kernel (`SPARSE_DECODE=1`), V4.1's query
+> RoPE in Triton, async scheduling with 2048-token prefill chunks. V4 with the same
+> settings and no MTP (job 23783289): 18.7 / 210.7 / 350.4 / 523.0, so V4.1 is ahead at
+> 1-32 users and 1.5 % behind at 64; V4's MTP (34-35 tok/s at 1 user) is not ported.**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -258,8 +258,9 @@ GSM8K (99–100/100).
 | split-K up to 32 queries (`SPARSE_SPLIT=32`) | 23706326 | 17.9 / – / 200.2 / 299.4, 422.2 at 64 | 55 / 95 ms, 138 at 64 |
 | + query RoPE in one Triton kernel (always on) | 23706895 | 18.7 / – / 207.1 / 308.9, 429.9 at 64 | 53 / 91 ms, 135 at 64 |
 | same, async scheduling (no `NO_ASYNC=1`) | 23707780 | 20.9 / – / 225.3 / 332.4, 460.0 at 64 | 47 / 78 ms, 120 at 64 |
-| **gfx90a sparse decode kernel** (`SPARSE_DECODE=1` instead of `SPARSE_SPLIT=32`), `NO_ASYNC=1`: the recipe | 23708163 | **20.3 / – / 220.1 / 328.3**, **462.7 at 64** | **48 / 85 ms**, 124 at 64 |
-| **same, async scheduling** (no `NO_ASYNC=1`): the high-throughput recipe | 23783297 | **22.9 / – / 242.3 / 352.0**, **494.2 at 64** | **43 / 73 ms**, 111 at 64 |
+| **gfx90a sparse decode kernel** (`SPARSE_DECODE=1` instead of `SPARSE_SPLIT=32`), `NO_ASYNC=1` | 23708163 | **20.3 / – / 220.1 / 328.3**, **462.7 at 64** | **48 / 85 ms**, 124 at 64 |
+| same, async scheduling (no `NO_ASYNC=1`) | 23783297 | 22.9 / – / 242.3 / 352.0, 494.2 at 64 | 43 / 73 ms, 111 at 64 |
+| **async + 2048-token chunks** (`--max-num-batched-tokens 2048`): the recipe | 23851799 | **22.9 / – / 245.3 / 362.1**, **515.2 at 64** | **43 / 83 ms**, 117 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -396,6 +397,25 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   Validated. (A first attempt, job 23783775, died at start-up with "HW Exception by GPU
   node-4: GPU Hang" during the memory-profiling forward on nid005019; the same code started
   cleanly on three other nodes.)
+- **Async with 2048-token chunks** (from V4, "Async scheduling, revisited"; job 23851799):
+  vLLM reserves window + `max_in_flight_tokens` per request in every sliding-window layer,
+  and `max_in_flight_tokens` = batches in flight × `max_num_batched_tokens`. Async with
+  8192-token chunks reserved 2 × 8192, hence 0.77M tokens of KV; with 2048 it reserves
+  2 × 2048 and the KV cache grows to **2.43M tokens** (74 concurrent 32k requests; sync with
+  8192 had 1.35M). Throughput 22.9 / 245.3 / 362.1 / 515.2 tok/s at 1 / 16 / 32 / 64 users
+  (+0 / +1 / +3 / +4 % over async with 8192), mean TTFT 2.8 / 4.4 / 7.5 s at 16 / 32 / 64
+  (4.4 / 7.5 / 11.4 s before). GSM8K 98.0 % (misses 93, 100, 119, 184, all seen before),
+  needles at 2.1k and 16.8k, decode = prefill to 19.7k. **Async is now better on every
+  axis, so the recipe drops `NO_ASYNC=1`; no workload choice left.**
+
+  The first try crashed (jobs 23836592/3): `_forward_prefill` got a chunk of 22 prefills
+  with zero lengths and failed on `view(22, 0, -1)`. The guard `_empty_prefill_chunks`
+  (hooks.py) skips such chunks and logged the batch: the last 78-token chunk of the
+  2,126-token needle prompt, alone, padded by 0.26's runner to 64 requests (80 tokens);
+  `num_decodes=0 num_prefills=64 query_lens=[78, 0, …]`. Upstream counts the 63 padding
+  requests as prefills; with 8192-token chunks the prompt never reached a graph-sized
+  batch alone. Padding requests own no tokens, so skipping their chunk is exact (the needle
+  run itself is the check). The third 0.26 padding mismatch after the indexer one.
 
 Open: the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
@@ -412,8 +432,8 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 NO_ASYNC=1 \
-  MORE_VLLM_ARGS="--max-num-seqs 64" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 \
+  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # one-GCD kernel tests for the two Triton replacements
