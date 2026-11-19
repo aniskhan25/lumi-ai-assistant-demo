@@ -23,12 +23,26 @@ started = [0] * concurrency
 lock = threading.Lock()
 
 
+# Optional 5th argument: a JSONL file of {"prompt": ...} lines (BENCH_DATA=gsm8k), sent as
+# chat messages. Random words suit plain decoding, but speculative decoding accepts far
+# fewer drafts on them than on natural text, which changes the step being profiled.
+PROMPTS = ([json.loads(x)["prompt"] for x in open(sys.argv[5])]
+           if len(sys.argv) > 5 and sys.argv[5] else None)
+
+
 def run(i: int) -> None:
-    rng = random.Random(i)
-    prompt = " ".join(rng.choice(WORDS) for _ in range(900))
-    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": 160, "stream": True,
-                       "ignore_eos": True, "temperature": 0.0}).encode()
-    req = urllib.request.Request(f"{base}/v1/completions", body,
+    if PROMPTS:
+        body = json.dumps({"model": model, "messages": [{"role": "user",
+                           "content": PROMPTS[i % len(PROMPTS)]}], "max_tokens": 400,
+                           "stream": True, "ignore_eos": True, "temperature": 0.0}).encode()
+        path = "/v1/chat/completions"
+    else:
+        rng = random.Random(i)
+        prompt = " ".join(rng.choice(WORDS) for _ in range(900))
+        body = json.dumps({"model": model, "prompt": prompt, "max_tokens": 160, "stream": True,
+                           "ignore_eos": True, "temperature": 0.0}).encode()
+        path = "/v1/completions"
+    req = urllib.request.Request(f"{base}{path}", body,
                                  {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=3600) as resp:
         for line in resp:

@@ -264,7 +264,7 @@ fi
 # the probe's, "solve step by step"), output capped at the workload's length but allowed to
 # end at EOS. Random-token prompts make speculative decoding look far worse than it is
 # (DSpark acceptance length 1.2-2.4 there vs 3.7-4.0 on GSM8K text, job 23862125).
-if [ "${BENCH:-0}" = 1 ] && [ "${BENCH_DATA:-random}" = gsm8k ]; then
+if [ "${BENCH_DATA:-random}" = gsm8k ]; then  # also feeds PROFILE=1
   "${RUN[@]}" python -c "
 import json, sys, pandas as pd
 q = pd.read_parquet(sys.argv[1])['question'].tolist()[500:1012]
@@ -303,7 +303,8 @@ if [ "${PROFILE:-0}" = 1 ]; then
   for c in ${PROFILE_CONCURRENCIES:-1 32}; do
     echo "=== profile c=${c} ==="
     "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_decode.py" \
-      "http://127.0.0.1:${PORT}" dsv4 "${c}" "${PROFILE_SECONDS:-5}" || STATUS=1
+      "http://127.0.0.1:${PORT}" dsv4 "${c}" "${PROFILE_SECONDS:-5}" \
+      "$([ "${BENCH_DATA:-random}" = gsm8k ] && echo "${LOG}/bench_gsm8k.jsonl" || true)" || STATUS=1
     sleep 20   # traces are written after /stop_profile returns
     mkdir -p "${PROF_DIR}/c${c}"
     find "${PROF_DIR}" -maxdepth 1 -type f -exec mv {} "${PROF_DIR}/c${c}/" \;

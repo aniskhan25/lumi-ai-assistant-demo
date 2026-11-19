@@ -5,7 +5,8 @@ to the Python frames open on its thread at the time (traces taken with_stack=Tru
 innermost frame matching a rule below names the component. Run on an eager trace: inside a
 CUDA graph, kernels cannot be traced back to Python. On a graph-mode trace (PIECEWISE), the
 eager breaks (attention, indexer, ...) are still attributed by Python frame; kernels replayed
-from a graph are classified by kernel name (NAME_RULES) and marked "[graph]".
+from a graph are classified by kernel name (NAME_RULES) and marked "[graph]". Kernels
+launched under vLLM's spec_decode (a speculative-decoding draft step) are marked "[draft]".
 
     python analyze_trace.py TRACE.json.gz [COMPONENT ...]
 
@@ -100,6 +101,7 @@ def classify(stack) -> str:
 
 # One sweep per thread: walk launches in time order, keeping the stack of open frames.
 launch_comp = {}
+launch_draft = set()  # launches made under vLLM's spec_decode (the draft step)
 by_tid = collections.defaultdict(list)
 for corr, e in launches.items():
     by_tid[e["tid"]].append((e["ts"], corr))
@@ -115,6 +117,8 @@ for tid, ls in by_tid.items():
         while stack and stack[-1][1] < ts:
             stack.pop()
         launch_comp[corr] = classify([f[2] for f in stack])
+        if any("spec_decode" in f[2] for f in stack):  # launched by the drafter
+            launch_draft.add(corr)
 
 
 graph_launches = {corr for corr, e in launches.items() if "graphlaunch" in e["name"].lower()}
@@ -123,11 +127,12 @@ graph_launches = {corr for corr, e in launches.items() if "graphlaunch" in e["na
 def component(kernel) -> str:
     name = kernel["name"].lower()
     corr = kernel.get("args", {}).get("correlation")
+    draft = "[draft] " if corr in launch_draft else ""
     if corr in graph_launches:
-        return "[graph] " + next((c for c, pat in NAME_RULES if pat in name), "other")
+        return draft + "[graph] " + next((c for c, pat in NAME_RULES if pat in name), "other")
     if "nccl" in name or "rccl" in name:
-        return "all-reduce"
-    return launch_comp.get(corr, "unattributed")
+        return draft + "all-reduce"
+    return draft + launch_comp.get(corr, "unattributed")
 
 
 per = collections.Counter()
