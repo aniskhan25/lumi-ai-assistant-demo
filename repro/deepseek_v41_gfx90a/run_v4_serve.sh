@@ -118,6 +118,8 @@ if [ "${V41:-0}" = 1 ]; then
   # MOE_SMALL=1: only moe_small's pack_bitmatrix row blocks (shape-free); its expert GEMM
   # tiles are for V4's TP shapes (N 512 per rank), V4.1 runs whole experts under EP.
   export DSV41_MOE_PACK="${MOE_SMALL:-0}"; MOE_SMALL=0
+  # MOE_TILES=1: V4.1's own expert GEMM tiles (lumi_dsv41/__init__.py, test_moe_matmul.py)
+  export DSV41_MOE_TILES="${MOE_TILES:-0}"
   if [ "${GATE_GEMM:-0}" != 0 ]; then echo "V41=1: GATE_GEMM has no score_mm tiles for the 5120 -> 384 router"; exit 2; fi
   if [ "${MTP:-0}" != 0 ]; then echo "V41=1: MTP/DSpark not ported"; exit 2; fi
   # SCORE_GEMM patches V4's attention class; V4.1 runs only 4 fp32 score GEMMs per step

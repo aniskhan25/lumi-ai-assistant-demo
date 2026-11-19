@@ -36,6 +36,17 @@ def register() -> None:
         from lumi_dsv4_debug import moe_small
 
         moe_small.install_pack()
+    if os.environ.get("DSV41_MOE_TILES") == "1":
+        # V4's moe_small matmul_ogs wrapper with V4.1's tiles: whole experts under EP
+        # (48 per rank; gate/up 5120 -> 4608, down 2304 -> 5120). test_moe_matmul.py (job
+        # 23857141, graph replay, cold weights): gate/up 143 -> 38 us at 1 token, 154 -> 72
+        # at 4, 513 -> 431 at 32, 1006 -> 827 at 128; down 112 -> 32 at 1, 66 -> 48 at 4,
+        # flat from 16. Same output as the default tiles (split-K reorders sums: <= 2e-3).
+        from lumi_dsv4_debug import moe_small
+
+        moe_small.GATE_UP = [(1, (32, 2)), (2, (32, 4)), (8, (128, 2)), (128, (128, 1))]
+        moe_small.DOWN = [(2, (32, 2)), (4, (128, 2)), (128, (128, 1))]
+        moe_small.install_matmul()
 
 
 def _config_class(model_configs):
