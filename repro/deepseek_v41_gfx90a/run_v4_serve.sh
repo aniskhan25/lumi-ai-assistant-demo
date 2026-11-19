@@ -20,6 +20,7 @@
 #   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
 #   MORE_VLLM_ARGS="..."                                           # append flags, keep defaults
 #   PROBE=0 BENCH=1                                                # speed sweep instead of probe
+#   BENCH_DATA=gsm8k                                               # natural prompts, not random tokens
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #   NO_ASYNC=1                                                     # --no-async-scheduling
@@ -259,12 +260,30 @@ fi
 # BENCH=1: streaming `vllm bench serve` sweep, as for Qwen3.8-Flash (repro/qwen38_flash_gfx90a)
 # so the numbers compare. Warm-up first: the first requests of an allocation pay one-time
 # kernel compilation. PROMPTS_PER_SLOT is small because eager V4 is slow (~37 tok/s at c=16).
+# BENCH_DATA=gsm8k: natural prompts instead of random tokens (GSM8K test questions after
+# the probe's, "solve step by step"), output capped at the workload's length but allowed to
+# end at EOS. Random-token prompts make speculative decoding look far worse than it is
+# (DSpark acceptance length 1.2-2.4 there vs 3.7-4.0 on GSM8K text, job 23862125).
+if [ "${BENCH:-0}" = 1 ] && [ "${BENCH_DATA:-random}" = gsm8k ]; then
+  "${RUN[@]}" python -c "
+import json, sys, pandas as pd
+q = pd.read_parquet(sys.argv[1])['question'].tolist()[500:1012]
+with open(sys.argv[2], 'w') as f:
+    for x in q:
+        f.write(json.dumps({'prompt': x + ' Solve it step by step.'}) + '\n')
+" "${GSM8K}" "${LOG}/bench_gsm8k.jsonl"
+fi
 if [ "${BENCH:-0}" = 1 ]; then
   bench() {  # concurrency, prompts, input len, output len, result name
+    if [ "${BENCH_DATA:-random}" = gsm8k ]; then
+      DATA=(--dataset-name custom --dataset-path "${LOG}/bench_gsm8k.jsonl" --custom-output-len "$4")
+    else
+      DATA=(--dataset-name random --random-input-len "$3" --random-output-len "$4" --ignore-eos)
+    fi
     "${RUN[@]}" vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
       --base-url "http://127.0.0.1:${PORT}" --model dsv4 --tokenizer "${SNAPSHOT}" \
-      $([ "${V41:-0}" = 1 ] || echo --tokenizer-mode deepseek_v4) --dataset-name random --random-input-len "$3" \
-      --random-output-len "$4" --ignore-eos --num-prompts "$2" --max-concurrency "$1" \
+      $([ "${V41:-0}" = 1 ] || echo --tokenizer-mode deepseek_v4) "${DATA[@]}" \
+      --num-prompts "$2" --max-concurrency "$1" \
       --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
       --save-result --result-dir "${LOG}" --result-filename "$5.json" \
       | grep -E "Output token throughput|Mean TTFT|Median TPOT|P99 TPOT|Successful|Error" || true
