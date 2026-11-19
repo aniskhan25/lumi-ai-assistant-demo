@@ -4,13 +4,11 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-19): 35.8 / 263.4 / 395.0 / 542.5 tok/s at 1 / 16 / 32 / 64 users,
-> GSM8K 98.0 % (200), needles, decode = prefill, 2.43M tokens of KV cache (job 23857167):
-> V4's custom all-reduce and MoE routing pack, V4.1 expert GEMM tiles (`MOE_TILES=1`), a
-> gfx90a sparse-decode kernel (`SPARSE_DECODE=1`), V4.1's query RoPE in Triton, async
-> scheduling with 2048-token prefill chunks. V4 with its newest non-MTP settings: 18.7 /
-> 210.7 / 350.4 / 523.0 (job 23783289, before its MoE tiles); V4's MTP gives 35 tok/s at
-> 1 user, which V4.1 now matches without speculation (MTP/DSpark not ported).**
+> **Status (2026-11-19): with DSpark speculative decoding (`DSPARK=5`, V4.1's own drafter),
+> 66.0 / 376.4 / 553.5 / 755.6 tok/s at 1 / 16 / 32 / 64 users on natural prompts, 1.5–1.8×
+> the recipe without it (37.2 / 220.5 / 349.5 / 514.6 on the same prompts), GSM8K 99.0 %,
+> needles (jobs 23863557 / 23864381). Without DSpark, on the random-token sweep used so far:
+> 35.8 / 263.4 / 395.0 / 542.5 (job 23857167). KV cache 2.24M tokens.**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -502,8 +500,27 @@ the random-prompt sweep understates speculative decoding badly; step 2 needs a
 natural-text benchmark. Eager speed is not a measurement (8.4 tok/s at 1 user on the
 random prompts).
 
-Open: DSpark
-speculative decoding (V4: 1.8× at 1 user); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+**Step 2 done: DSpark with graphs** (`COMPILE=1 DSPARK=5`, job 23863557; baseline job
+23864381, same recipe without DSpark). The DSpark draft step is FULL-captured by 0.26's
+DFlash graph manager and runs on gfx90a without further changes. Both runs use
+`BENCH_DATA=gsm8k` (new: 512 GSM8K test questions after the probe's, "Solve it step by
+step.", up to 512 output tokens, stopping at EOS), since random-token prompts understate
+speculative decoding:
+
+| users | 1 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| recipe (tok/s) | 37.2 | 220.5 | 349.5 | 514.6 |
+| **+ DSpark, 5 drafts (tok/s)** | **66.0** | **376.4** | **553.5** | **755.6** |
+| speedup | **1.77×** | **1.71×** | **1.58×** | **1.47×** |
+| TPOT | 26 → 14 ms | 52 → 26 ms | 66 → 39 ms | 91 → 66 ms |
+| mean TTFT | 169 → 141 ms | 644 → 461 ms | 656 → 795 ms | 902 → 1251 ms |
+
+GSM8K 99.0 % with DSpark (98.0 % without), sanity 5/5, needles at 2.1k and 16.8k. Mean
+acceptance length 3.2–3.9 of 6 over the sweep (45–57 % of drafts accepted). KV cache
+2.24M tokens with the drafter's layers, 2.43M without.
+
+Open: DSpark block size (fewer drafts may pay at 32–64 users, where each rejected draft
+costs verification compute); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce
@@ -518,8 +535,8 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 MOE_SMALL=1 MOE_TILES=1 \
-  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 MOE_SMALL=1 MOE_TILES=1 DSPARK=5 \
+  MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" PROBE_GSM8K_N=200 BENCH=1 BENCH_DATA=gsm8k CONCURRENCIES="1 16 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # one-GCD kernel tests for the two Triton replacements
