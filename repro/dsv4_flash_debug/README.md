@@ -88,11 +88,13 @@ routing and expert GEMMs for decode-sized batches and runs the router in Triton:
 at 4–32 users, ~1.02× at 1 and 64 (see "MoE at decode sizes"). `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`
 captures whole decode steps, which removes the host launch overhead that held back one rank
 per step: **42–43 tok/s for one user** (from 37), unchanged from 4 users up (see "Where the
-1-user step goes").
+1-user step goes"). `SPARSE_DECODE=1` replaces `SPARSE_SPLIT` with the V4.1 port's sparse
+decode kernel: **48 tok/s for one user**, 1.05–1.15× at every load (see "Sparse decode
+kernel from V4.1").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8 MOE_SMALL=1 GATE_GEMM=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -103,8 +105,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **the command above** | 32 | 23851784 | 97.4 % | **42.7** / **129.8** / **331.6** / **496.1** / – | 23 / 55 / – ms |
-| **the command above** | 64 | 23836295 | 97.2 % | **42.0** / 120.3 / 308.6 / **499.3** / **648.1** | 23 / 54 / 81 ms |
+| **the command above** | 32 | 23858696 | 97.2 % | **48.2** / **135.9** / **365.8** / **512.5** / – | 20 / 52 / – ms |
+| **the command above** | 64 | 23857052 | 97.4 % | **48.2** / **141.1** / 346.9 / 494.2 / **707.0** | 20 / 52 / 75 ms |
+| split-K sparse decode, full graphs | 32 | 23851784 | 97.4 % | 42.7 / 129.8 / 331.6 / 496.1 / – | 23 / 55 / – ms |
+| split-K sparse decode, full graphs | 64 | 23836295 | 97.2 % | 42.0 / 120.3 / 308.6 / 499.3 / 648.1 | 23 / 54 / 81 ms |
 | piecewise graphs, + MoE | 32 | 23811671 | 97.4 % | 35.2 / 122.1 / 333.6 / 501.9 / – | 28 / 54 / – ms |
 | piecewise graphs, + MoE | 64 | 23811670 | 97.6 % | 35.4 / 128.0 / 306.2 / 464.9 / 643.9 | 28 / 54 / 80 ms |
 | + async (2048-token chunks), MTP, split-K | 32 | 23802055 | 97.6 % | **34.3** / **118.9** / 307.2 / **446.2** / – | 29 / 57 / – ms |
@@ -796,6 +800,38 @@ within 1 ms of the control; the 4- and 16-user throughput differences come from 
 prompts per level (8–32), not from slower decoding. Pinning workers changes nothing. On
 Nov 9 full graphs gave nothing, when the GPU work was ~3× larger and hid the host.
 
+### Sparse decode kernel from V4.1 (Nov 19)
+
+With full graphs the 1-user step is GPU-bound, and sparse attention was its largest item
+(~6.9 ms of ~37). The V4.1 port has its own gfx90a decode kernel (split-K partial + reduce,
+16 KV entries per iteration, one scale load per token, NoPE and RoPE in one bf16 tile, the
+main and compressed lists walked as one). V4-Flash shares the attention stack and the
+584-byte `fp8_ds_mla` record, so the kernel is copied unchanged (`sparse_decode.py`, from
+fd3fd13 on `exp/deepseek-v41-gfx90a`); only the hook differs, as stock 0.26's
+`_rocm_sparse_attn_decode_ragged_triton` has no `out` argument. `SPARSE_DECODE=1`
+supersedes `SPARSE_SPLIT`.
+
+`test_sparse_decode.py` (job 23857050, one GCD, 8 heads): output within 2e-2 of the stock
+fallback in all 60 cases (fixed and ragged lists, -1 slots, NaN in unused cache bytes, with
+and without the sink, called with keywords through the hook). GPU µs per call:
+
+| queries (MTP: 2 per user) | 2 | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|
+| ratio 4 (top-512): fallback / split-K / **kernel** | 407 / 63 / **30** | 409 / 82 / **36** | 418 / 147 / **56** | 435 / 275 / **108** | 444 / 589 / **189** | 887 / 1171 / **338** |
+| ratio 128: fallback / split-K / **kernel** | 130 / 61 / **15** | 129 / 61 / **18** | 130 / 62 / **27** | 132 / 89 / **62** | 140 / 233 / **88** | 281 / 461 / **129** |
+| SWA only: fallback / split-K / **kernel** | 89 / 27 / **14** | 89 / 27 / **15** | 91 / 28 / **22** | 91 / 47 / **36** | 94 / 78 / **56** | 187 / 153 / **92** |
+
+Serving, recipe with full graphs, same day:
+
+| | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| `SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8`, 64 seqs | 23857053 | 97.4 % | 42.0 / 134.8 / 324.9 / 468.7 / 649.1 | 23.2 / 40.8 / 54.5 / 80.8 ms |
+| **`SPARSE_DECODE=1`**, 64 seqs | 23857052 | 97.4 % | **48.2 / 141.1 / 346.9 / 494.2 / 707.0** | **20.2 / 38.6 / 51.9 / 74.9 ms** |
+| **`SPARSE_DECODE=1`**, 32 seqs | 23858696 | 97.2 % | **48.2 / 135.9 / 365.8 / 512.5** / – | **20.1 / 37.7 / 51.7** / – ms |
+
+1.15× at 1 user, 1.05–1.09× from 4 to 64; TPOT 2–6 ms lower at every load. Sanity 5/5,
+needles 2/2, no garbage.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -835,6 +871,8 @@ Nov 9 full graphs gave nothing, when the GPU work was ~3× larger and hid the ho
   10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
   11. ~~Host launch overhead at 1 user~~: done, full decode graphs, 1.13× (above). CPU
       pinning (`NUMA_BIND=1`) does not help.
+  12. ~~Sparse attention decode~~: done, the V4.1 port's kernel (`SPARSE_DECODE=1`),
+      1.05–1.15× (above).
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -890,6 +928,8 @@ Nov 9 full graphs gave nothing, when the GPU work was ~3× larger and hid the ho
 | `test_score_gemm.py`, `run_score_gemm_test.sh` | that kernel vs `torch.mm`: error vs fp64, tile sweep, per-step totals |
 | `plugin/lumi_dsv4_debug/sparse_split.py` | split-K sparse attention decode for batches ≤ 16 (`DSV4_SPARSE_SPLIT`) |
 | `test_sparse_split.py`, `run_sparse_split_test.sh` | split-K vs fallback decode per layer type and batch, split-count sweep |
+| `plugin/lumi_dsv4_debug/sparse_decode.py` | the V4.1 port's sparse decode kernel, hooked into stock 0.26 (`DSV4_SPARSE_DECODE`) |
+| `test_sparse_decode.py`, `run_sparse_decode_test.sh` | that kernel vs the fallback and split-K: accuracy, µs per call by layer type |
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
