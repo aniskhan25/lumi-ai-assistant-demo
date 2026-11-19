@@ -29,6 +29,8 @@ DSV4_ROUTER_GUARD=1  nan_to_num the MoE gate logits before ROCm's top-k (router_
                      corrupt the MoE routing of real tokens. =count also logs how many.
 DSV4_SPARSE_SPLIT=1  Decode sparse attention with vLLM's split-K kernels, gated to gfx942/950,
                      instead of the one-workgroup-per-query fallback (sparse_split.py).
+DSV4_SPARSE_DECODE=1 Decode sparse attention with the V4.1 port's split-K kernel at every
+                     batch size (sparse_decode.py); supersedes DSV4_SPARSE_SPLIT.
 DSV4_CUSTOM_AR=copy|fence (1 = copy)
                      Use vLLM's custom all-reduce for TP (0.26 enables it on ROCm only for
                      gfx94x/95x), made coherent on gfx90a: as is, ranks read stale peer data
@@ -233,6 +235,13 @@ def register() -> None:
 
         mhc_fix.install_check()
         _log("DSV4_MHC_CHECK: every mHC call recomputed with the reference and compared (eager only)")
+    if os.environ.get("DSV4_SPARSE_DECODE") == "1":
+        if os.environ.get("DSV4_SPARSE_SPLIT") == "1":
+            raise ValueError("DSV4_SPARSE_DECODE=1 supersedes DSV4_SPARSE_SPLIT=1; set one")
+        from . import sparse_decode
+
+        sparse_decode.install()
+        _log("DSV4_SPARSE_DECODE=1: sparse attention decode with the V4.1 split-K kernel")
     if os.environ.get("DSV4_SPARSE_SPLIT") == "1":
         from . import sparse_split
 
