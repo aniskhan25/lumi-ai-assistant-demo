@@ -8,6 +8,10 @@ Candidates per token count, GPU us per call from graph replays over rotating wei
 einsum (as served), F.linear, vLLM's ROCm unquantized dispatch (wvSplitK for <= 5 tokens,
 else F.linear), and score_gemm's Triton kernel + cast to bf16 (stock tile, best tile).
 
+Then: the DSV4_WO_A hook against the stock rocm_inv_rope_einsum (same inverse RoPE and
+cached weight, T = 1-200), and score_mm's split-K sum (Triton kernel vs torch .sum(0)) at the
+compressor and router shapes.
+
     sbatch repro/dsv4_flash_debug/run_wo_a_test.sh
 """
 
@@ -29,7 +33,8 @@ torch.manual_seed(0)
 ws = [torch.randn(N, K, device=dev).bfloat16() * 0.02 for _ in range(8)]
 print(torch.cuda.get_device_name())
 best_table = []
-for M in (1, 2, 3, 4, 5, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128):
+SWEEP_MS = (1, 2, 3, 4, 5, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
+for M in SWEEP_MS if os.environ.get("WO_A_SWEEP", "1") == "1" else ():  # 0: skip (job 23866833)
     x = torch.randn(M, K, device=dev).bfloat16()
     ref = x.double() @ ws[0].double().T
     scale = ref.abs().max().item()
@@ -58,3 +63,42 @@ for M in (1, 2, 3, 4, 5, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128):
           + f"  triton-best {t_best:6.1f} us {cfg_best} ({e_best:.0e})  [stock tile {pick(M, N)}]",
           flush=True)
 print("best tiles:", best_table)
+
+print("\nDSV4_WO_A hook vs the stock rocm_inv_rope_einsum (max |diff| / max |ref|)")
+import types  # noqa: E402
+
+import vllm.models.deepseek_v4.amd.rocm as r  # noqa: E402
+from lumi_dsv4_debug import score_gemm, wo_a  # noqa: E402
+
+stock_fn = r.rocm_inv_rope_einsum
+wo_a.install()
+hook = r.rocm_inv_rope_einsum
+assert hook.stock is stock_fn
+H, D, R = 8, 512, 64
+rot = types.SimpleNamespace(cos_sin_cache=torch.randn(8192, R, device=dev))
+mod = types.SimpleNamespace(weight=ws[0].clone())
+fail = []
+for T in (1, 2, 3, 4, 7, 16, 64, 128, 200):
+    o = torch.randn(T, H, D, device=dev).bfloat16()
+    pos = torch.randint(0, 8192, (T,), device=dev)
+    ref = stock_fn(rot, o, pos, R, 1, N, mod).float()
+    out = hook(rot, o, pos, R, 1, N, mod).float()
+    e = ((out - ref).abs().max() / ref.abs().max()).item()
+    ok = out.shape == ref.shape and e < 1e-2
+    fail += [] if ok else [(T, e, tuple(out.shape))]
+    print(f"  {'ok  ' if ok else 'FAIL'} T={T:3d} shape {tuple(out.shape)} err {e:.1e}")
+
+print("\nsplit-K sum: Triton kernel vs torch .sum(0), us per score_mm call (and max |diff|)")
+for N2 in (2048, 1024, 512, 256):
+    w2 = [torch.randn(N2, K, device=dev).bfloat16() * 0.02 for _ in range(max(4, 64 * 2**20 // (N2 * K * 2)))]
+    for M in (2, 8, 32, 64):
+        x = torch.randn(M, K, device=dev).bfloat16()
+        score_gemm.TORCH_SUM = True
+        a = score_mm(x, w2[0])
+        t_torch = tsg.timed(lambda w: score_mm(x, w), w2)
+        score_gemm.TORCH_SUM = False
+        b = score_mm(x, w2[0])
+        t_tri = tsg.timed(lambda w: score_mm(x, w), w2)
+        d = (a - b).abs().max().item()
+        print(f"  N={N2:5d} M={M:3d} cfg {pick(M, N2)}  torch sum {t_torch:6.1f}  triton sum {t_tri:6.1f}  diff {d:.1e}")
+print("FAILED:", fail or "none")

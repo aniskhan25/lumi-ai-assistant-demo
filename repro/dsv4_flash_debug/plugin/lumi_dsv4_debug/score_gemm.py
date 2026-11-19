@@ -14,6 +14,8 @@ per decode step 3.96 -> 1.11 ms at 32 tokens, 6.54 -> 1.45 ms at 64. Split-K par
 summed by a second kernel rather than atomics (deterministic; atomics saved only 1-2 us).
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -44,8 +46,20 @@ def _score_mm_kernel(x_ptr, w_ptr, o_ptr, M, N, K, sxm, swn, som,
     o_ptrs = o_ptr + rm[:, None] * som + rn[None, :]
     if ATOMIC:
         tl.atomic_add(o_ptrs, acc, mask=mask_m, sem="relaxed")
-    else:  # split k writes partial pid_k of [SPLIT_K, M, N]
-        tl.store(o_ptrs + pid_k * M * som, acc, mask=mask_m)
+    else:  # split k writes partial pid_k of [SPLIT_K, M, N]; SPLIT_K 1 may store bf16
+        tl.store(o_ptrs + pid_k * M * som, acc.to(o_ptr.dtype.element_ty), mask=mask_m)
+
+
+@triton.jit
+def _splitk_sum_kernel(part_ptr, out_ptr, MN, SPLIT_K: tl.constexpr, BLOCK: tl.constexpr):
+    """out[i] = sum over k of part[k, i], in order k = 0.. (deterministic), cast to out's
+    dtype. One pass, instead of torch's .sum(0) (~11 us at these sizes) plus a cast."""
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = i < MN
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    for k in tl.static_range(SPLIT_K):
+        acc += tl.load(part_ptr + k * MN + i, mask=mask, other=0.0)
+    tl.store(out_ptr + i, acc.to(out_ptr.dtype.element_ty), mask=mask)
 
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps) per N and largest M; from the sweep.
@@ -69,25 +83,42 @@ def pick(M: int, N: int):
     return None
 
 
-def score_mm(x: torch.Tensor, w: torch.Tensor, cfg=None, atomic: bool = False) -> torch.Tensor:
-    """x [M, K] bf16 @ w[N, K].T -> [M, N] fp32."""
+SUM_BLOCK = 1024
+# DSV4_SPLITK_SUM=torch keeps torch's .sum(0) for the split-K partials (as validated up to
+# Nov 19); the default sums them with _splitk_sum_kernel.
+TORCH_SUM = os.environ.get("DSV4_SPLITK_SUM", "triton") == "torch"
+
+
+def score_mm(x: torch.Tensor, w: torch.Tensor, cfg=None, atomic: bool = False,
+             out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """x [M, K] bf16 @ w[N, K].T -> [M, N] in out_dtype (fp32 accumulation either way)."""
     M, K = x.shape
     N = w.shape[0]
     cfg = cfg or pick(M, N)
     if cfg is None or x.stride(1) != 1 or w.stride(1) != 1:
-        return torch.mm(x, w.T, out_dtype=torch.float32)
+        return torch.mm(x, w.T, out_dtype=out_dtype)
     bm, bn, bk, sk, warps = cfg
     assert N % bn == 0 and K % (bk * sk) == 0, (M, N, K, cfg)
     grid = (N // bn, triton.cdiv(M, bm), sk)
-    if sk == 1 or atomic:
-        out = (torch.zeros if sk > 1 else torch.empty)(M, N, dtype=torch.float32, device=x.device)
+    if sk == 1:
+        out = torch.empty(M, N, dtype=out_dtype, device=x.device)
         _score_mm_kernel[grid](x, w, out, M, N, K, x.stride(0), w.stride(0), out.stride(0),
-                               bm, bn, bk, sk, sk > 1, num_warps=warps)
+                               bm, bn, bk, sk, False, num_warps=warps)
         return out
+    if atomic:
+        out = torch.zeros(M, N, dtype=torch.float32, device=x.device)
+        _score_mm_kernel[grid](x, w, out, M, N, K, x.stride(0), w.stride(0), out.stride(0),
+                               bm, bn, bk, sk, True, num_warps=warps)
+        return out.to(out_dtype)
     part = torch.empty(sk, M, N, dtype=torch.float32, device=x.device)
     _score_mm_kernel[grid](x, w, part, M, N, K, x.stride(0), w.stride(0), N,
                            bm, bn, bk, sk, False, num_warps=warps)
-    return part.sum(0)
+    if TORCH_SUM:
+        return part.sum(0).to(out_dtype)
+    out = torch.empty(M, N, dtype=out_dtype, device=x.device)
+    _splitk_sum_kernel[(triton.cdiv(M * N, SUM_BLOCK),)](part, out, M * N, sk, SUM_BLOCK,
+                                                         num_warps=4)
+    return out
 
 
 def install() -> None:

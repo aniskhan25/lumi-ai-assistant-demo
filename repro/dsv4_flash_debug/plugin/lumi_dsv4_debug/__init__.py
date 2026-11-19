@@ -40,6 +40,8 @@ DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel wit
 DSV4_MOE_SMALL=1     MoE at decode sizes: pack_bitmatrix with 16-row blocks, expert GEMM
                      block_n / split_k by token count (moe_small.py).
 DSV4_GATE_GEMM=1     MoE router GEMM (fp32 logits) via score_gemm.score_mm (moe_small.py).
+DSV4_WO_A=1          Attention wo_a GEMM (rocm_inv_rope_einsum) via wvSplitK at 1-3 tokens and
+                     score_gemm's Triton kernel with bf16 output at 4-128 (wo_a.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
                      layer site where graph and eager differ (graph_diff.py).
 DSV4_TORCH_MHC=1     Turn off the TileLang hyper-connection (mHC) kernels on gfx90a.
@@ -262,6 +264,11 @@ def register() -> None:
 
         score_gemm.install()
         _log("DSV4_SCORE_GEMM=1: compressor score GEMMs in Triton (bf16 MFMA, fp32 out)")
+    if os.environ.get("DSV4_WO_A") == "1":
+        from . import wo_a
+
+        wo_a.install()
+        _log("DSV4_WO_A=1: attention wo_a GEMM via wvSplitK / Triton instead of einsum")
     if os.environ.get("DSV4_MOE_SMALL") == "1":
         from . import moe_small
 
