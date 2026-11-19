@@ -8,6 +8,7 @@ upstream's AMD drafter with the target wrapper's adaptations (model.py):
 - engine config fields 0.26 lacks get their defaults;
 - dense MXFP8 linears load through 0.26's Fp8LinearMethod (quant.py), whose scale
   parameter is `weight_scale_inv`, not the `weight_scale` upstream picks for MXFP8;
+- the vision routing bias (`gate.bias_vl`) is skipped at load;
 - no confidence head: upstream uses it for adaptive verification, which 0.26's speculator
   does not do (it never calls compute_confidence), and 0.26 lacks the head's class.
 """
@@ -25,3 +26,10 @@ class DSparkDeepseekV41ForCausalLM(upstream.DSparkDeepseekV4ForCausalLM):
         draft_hf.vision_n_layers = 0  # language model only, as for the target
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.linear_scale_name = "weight_scale_inv"
+
+    def load_weights(self, weights):
+        # As the target (model.py): language model only, so the image-sentinel routing
+        # bias has no parameter (job 23861528: KeyError model.layers.0.ffn.gate.bias_vl).
+        return super().load_weights(
+            (name, tensor) for name, tensor in weights if not name.endswith(".gate.bias_vl")
+        )
