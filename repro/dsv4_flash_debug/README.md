@@ -85,12 +85,15 @@ speculative decoding with V4's MTP layer: **34 tok/s for one user** (from 18.7),
 32 users and 1.09× at 64; `SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8` adds split-K sparse decode
 for 1–4 users (see "MTP speculative decoding"). `MOE_SMALL=1 GATE_GEMM=1` retunes the MoE
 routing and expert GEMMs for decode-sized batches and runs the router in Triton: 1.03–1.12×
-at 4–32 users, ~1.02× at 1 and 64 (see "MoE at decode sizes").
+at 4–32 users, ~1.02× at 1 and 64 (see "MoE at decode sizes"). `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`
+captures whole decode steps, which removes the host launch overhead that held back one rank
+per step: **42–43 tok/s for one user** (from 37), unchanged from 4 users up (see "Where the
+1-user step goes").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
   MTP=1 SPARSE_SPLIT=1 SPARSE_SPLIT_MAX=8 MOE_SMALL=1 GATE_GEMM=1 \
-  TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 \
+  TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
 ```
@@ -100,8 +103,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **the command above** | 32 | 23811671 | 97.4 % | **35.2** / **122.1** / **333.6** / **501.9** / – | 28 / 54 / – ms |
-| **the command above** | 64 | 23811670 | 97.6 % | **35.4** / **128.0** / 306.2 / 464.9 / **643.9** | 28 / 54 / 80 ms |
+| **the command above** | 32 | 23851784 | 97.4 % | **42.7** / **129.8** / **331.6** / **496.1** / – | 23 / 55 / – ms |
+| **the command above** | 64 | 23836295 | 97.2 % | **42.0** / 120.3 / 308.6 / **499.3** / **648.1** | 23 / 54 / 81 ms |
+| piecewise graphs, + MoE | 32 | 23811671 | 97.4 % | 35.2 / 122.1 / 333.6 / 501.9 / – | 28 / 54 / – ms |
+| piecewise graphs, + MoE | 64 | 23811670 | 97.6 % | 35.4 / 128.0 / 306.2 / 464.9 / 643.9 | 28 / 54 / 80 ms |
 | + async (2048-token chunks), MTP, split-K | 32 | 23802055 | 97.6 % | **34.3** / **118.9** / 307.2 / **446.2** / – | 29 / 57 / – ms |
 | + async (2048-token chunks), MTP, split-K | 64 | 23802056 | 97.2 % | **35.1** / – / 296.2 / 411.0 / **571.2** | 28 / 57 / 83 ms |
 | the same, run verbatim | 64 | 23810538 | 97.4 % | 34.8 / 114.0 / 275.2 / 431.2 / 630.3 | 28 / 59 / 85 ms |
@@ -757,6 +762,40 @@ users by 2–3×, as prefill chunks route through the same kernels. At 1 user TP
 move: the ~4 ms the eager profile promised does not appear under graphs, where these
 kernels evidently cost less than their eager launches (not profiled yet).
 
+### Where the 1-user step goes; full decode graphs (Nov 18–19)
+
+The MoE fixes did not shorten the 1-user step, so I profiled the recipe with piecewise
+graphs (`PROFILE=1 COMPILE=1`, jobs 23818676/7, all 8 ranks). `graph_trace.py` splits a
+graph-mode trace into compute, all-reduce, and GPU idle time, and marks a gap as
+host-late when the next kernel's launch call came after the GPU went idle:
+
+| 1 user, per step (main model + MTP) | rank 4 | the other 7 ranks |
+|---|---|---|
+| GPU compute (busy minus all-reduce) | 36.7 ms | 37.2–37.5 ms |
+| all-reduce kernels | 2.2 ms | 41–52 ms, spinning |
+| host-late gaps | 51 ms (477 gaps) | 0.4–11 ms |
+
+Every rank does the same ~37 ms of work. One rank's host launches nearly every kernel late,
+and the custom all-reduce makes the other seven spin until it arrives. The slow rank is
+different in each job (rank 2 at 32 users), and the profiler's own launch overhead
+inflates it, but serving shows the same pattern: a ~50 ms step against ~39 ms of GPU work.
+
+Two fixes, one allocation each, recipe at 64 sequences, with a same-day control (MTP runs
+vary by 1–2 tok/s at 1 user between days):
+
+| | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| control | 23836296 | 97.2 % | 37.3 / 126.8 / 329.9 / 488.0 / 629.4 | 26.2 / 40.6 / 54.6 / 80.9 ms |
+| `NUMA_BIND=1` (workers pinned to their GCD's CCD) | 23836294 | 97.6 % | 36.7 / 125.1 / 324.6 / 461.9 / 642.9 | 26.6 / 42.0 / 55.3 / 81.4 ms |
+| **`CUDAGRAPH_MODE=FULL_AND_PIECEWISE`** | 23836295 | 97.2 % | **42.0** / 120.3 / 308.6 / 499.3 / 648.1 | **23.2** / 41.5 / 54.3 / 80.8 ms |
+| same, 32 sequences | 23851784 | 97.4 % | **42.7** / 129.8 / 331.6 / 496.1 / – | **22.8** / 41.3 / 54.5 / – ms |
+
+Full decode graphs (one graph launch per step for batches up to 2× the sequence limit,
+which covers MTP's 2 tokens per sequence) give 1.13–1.15× at 1 user. From 4 users up, TPOT is
+within 1 ms of the control; the 4- and 16-user throughput differences come from the few
+prompts per level (8–32), not from slower decoding. Pinning workers changes nothing. On
+Nov 9 full graphs gave nothing, when the GPU work was ~3× larger and hid the host.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -794,6 +833,8 @@ kernels evidently cost less than their eager launches (not profiled yet).
   8. ~~MTP speculative decoding~~: done, `MTP=1`, 34–35 tok/s at 1 user, 1.09–1.8× (above).
   9. ~~All-reduce~~: done, vLLM's custom all-reduce with an uncached copy, 1.03–1.11×.
   10. ~~The compressors' fp32-output score GEMMs~~: done, Triton, 1.01–1.08× (above).
+  11. ~~Host launch overhead at 1 user~~: done, full decode graphs, 1.13× (above). CPU
+      pinning (`NUMA_BIND=1`) does not help.
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -836,6 +877,7 @@ kernels evidently cost less than their eager launches (not profiled yet).
 | `plugin/lumi_dsv4_debug/paged_logits.py` | batched Triton indexer decode logits (`DSV4_TRITON_PAGED_LOGITS`) |
 | `test_paged_logits.py`, `run_paged_logits_test.sh` | that kernel vs the torch fallback, graph replay, timing |
 | `profile_decode.py`, `analyze_trace.py` | decode profile driver (`PROFILE=1`) and per-component GPU-time split |
+| `graph_trace.py` | graph-mode traces: compute, all-reduce waiting, host-late gaps per step |
 | `test_skinny_gemm_strides.py`, `run_skinny_test.sh` | ROCm skinny bf16 GEMMs with strided inputs (they are fine) |
 | `bench_fp8_linear.py`, `run_fp8_linear_bench.sh`, `fp8_configs/` | dense FP8 linears: stock vs tuned vs bf16; tuned MI250X configs |
 | `plugin/lumi_dsv4_debug/router_guard.py` | NaN-to-0 on MoE gate logits before top-k (`DSV4_ROUTER_GUARD`, `count` also logs how many rows) |
