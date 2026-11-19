@@ -855,6 +855,19 @@ def _v41_attention(module) -> None:
     )
 
 
+def _v41_dspark(module) -> None:
+    """The DSpark drafter writes its context KV through the same fused op with upstream's
+    11 arguments; 0.26's takes 9 (job 23861880). Route it to ops.py as the attention."""
+    from . import ops
+
+    _source_patch(
+        module, "_insert_context_kv",
+        "torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(",
+        "_lumi_qnorm_rope_kv_rope_quant_insert(",
+        extra_globals={"_lumi_qnorm_rope_kv_rope_quant_insert": ops.qnorm_rope_kv_rope_quant_insert},
+    )
+
+
 # Functions run on vendored (upstream) modules right after they execute.
 def _debug_engram(module) -> None:
     """DSV41_DEBUG_ENGRAM=1: log the first real and the first skipped n-gram hash, and the
@@ -926,4 +939,5 @@ VENDORED_HOOKS = {
         _paged_logits_unshuffle, _paged_logits_triton, _sparse_split, _sparse_decode],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
+    "vllm.models.deepseek_v41.amd.dspark": [_v41_dspark],
 }
