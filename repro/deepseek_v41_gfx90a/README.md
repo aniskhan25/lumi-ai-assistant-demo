@@ -519,6 +519,20 @@ GSM8K 99.0 % with DSpark (98.0 % without), sanity 5/5, needles at 2.1k and 16.8k
 acceptance length 3.2–3.9 of 6 over the sweep (45–57 % of drafts accepted). KV cache
 2.24M tokens with the drafter's layers, 2.43M without.
 
+**128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
+users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
+sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
+sanity 5/5, needles; acceptance length 3.1–3.4 at 128 users. So `--max-num-seqs 128` for
+throughput-bound serving, 64 otherwise.
+
+**Bit-level FP8 decode in the sparse kernel** (`sparse_decode.py`, `deq=2`, off): e4m3 ×
+UE8M0 written straight into bf16 bits instead of Triton's software FP8 conversion and an
+fp32 multiply. Bit-identical to the default path over every e4m3 code (jobs 23870597 /
+23870620), but slower from 16 queries (top-k layer at 32: 86 → 108 µs, at 128: 210 → 267),
+faster only at 1–16 on SWA layers. Not used. (The test's stock-kernel comparison excludes
+the NaN codes 0x7f / 0xff, which the stock kernel decodes as finite values and the cache
+writer never produces.)
+
 **Draft count:** 5 is the only working setting. `DSPARK=3` is refused by 0.26 itself
 (job 23866836: "DSpark requires num_speculative_tokens >= dspark_block_size (5) ... Smaller
 values produce incorrect output"), so 4 is too. `DSPARK=7` (job 23868852) fails at start-up
