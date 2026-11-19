@@ -33,12 +33,16 @@ stock = next(c.cell_contents for c in shim.__closure__
 print(f"device {torch.cuda.get_device_properties(0).gcnArchName}, CUs {m._decode_cu_count()}")
 
 
-def make_cache(nblocks, nan_pad=False):
+def make_cache(nblocks, nan_pad=False, nan_codes=False):
     rows = nblocks * BS
     nope = torch.randn(rows, NOPE).to(torch.float8_e4m3fn).view(torch.uint8)
-    # every e4m3 code (subnormals, NaN 0x7f / 0xff) somewhere, for the bit-level decode
+    # every e4m3 code somewhere (subnormals; NaN 0x7f / 0xff only with nan_codes, which
+    # the cache writer never produces and the stock kernel decodes as finite values)
     hit = torch.rand(rows, NOPE) < 0.02
-    nope[hit] = torch.randint(0, 256, (int(hit.sum()),), dtype=torch.uint8)
+    codes = torch.randint(0, 256, (int(hit.sum()),), dtype=torch.uint8)
+    if not nan_codes:
+        codes[(codes & 0x7F) == 0x7F] = 0x7E
+    nope[hit] = codes
     rope = torch.randn(rows, ROPE).bfloat16().view(torch.uint8)
     scales = torch.randint(122, 128, (rows, 8), dtype=torch.uint8)
     data = torch.cat([nope, rope], 1).view(nblocks, BS * 576)
@@ -163,6 +167,7 @@ for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
         row.append(f"S{S}:{t[c]:.0f}{c[1:]}")
     print(f"  B={B:>4} " + "  ".join(row))
 print("3. bit-level FP8 decode (deq=2) vs the generic one (deq=0): equal outputs, us per call")
+swa, comp = make_cache(256, nan_pad=True, nan_codes=True), make_cache(512, nan_pad=True, nan_codes=True)
 for B, extra in itertools.product((1, 16, 32, 64, 128), (0, 512)):
     q = torch.randn(B, H, HD, device=dev).bfloat16()
     mi, mp = ragged(B, 128, swa.shape[0] * BS, vary=True)
