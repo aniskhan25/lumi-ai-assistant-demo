@@ -264,6 +264,7 @@ GSM8K (99–100/100).
 | async + 2048-token chunks (`--max-num-batched-tokens 2048`) | 23851799 | 22.9 / – / 245.3 / 362.1, 515.2 at 64 | 43 / 83 ms, 117 at 64 |
 | + `pack_bitmatrix` in 16-row blocks (`MOE_SMALL=1`) | 23851800 | 24.2 / – / 254.4 / 370.9, 526.2 at 64 | 41 / 81 ms, 114 at 64 |
 | **+ V4.1 expert GEMM tiles** (`MOE_TILES=1`): the recipe | 23857167 | **35.8 / – / 263.4 / 395.0**, **542.5 at 64** | **27 / 75 ms**, 111 at 64 |
+| + router GEMM via score_mm (`GATE_GEMM=1`), not adopted | 23857581 | 34.9 / – / 265.3 / 395.5, 546.3 at 64 | 28 / 75 ms, 110 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -445,8 +446,16 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   the slowest at the all-reduce, so the gain under graphs exceeds the per-call sum. The
   warm-up phase (4 users) includes the new tiles' first compilation, so its TPOT is not a
   measurement.
+- **Router GEMM** (`GATE_GEMM=1`: V4's `GateLinear` → `score_gemm.score_mm` with V4.1 tiles
+  for 5120 → 384, `lumi_dsv41/__init__.py`). `test_router_gemm.py` (job 23857491): today's
+  bf16 `F.linear` + cast is 37 µs a call with the logits rounded to bf16 (rel err 2–3e-3);
+  `score_mm` is 13–21 µs at 1–128 tokens with fp32 logits (2e-7). In serving (job
+  23857581) the ~1 ms a step it saves does not show: 34.9 / 265.3 / 395.5 / 546.3 tok/s
+  (−2.7 / +0.7 / +0.1 / +0.7 % against job 23857167, within run-to-run spread), and GSM8K
+  97.0 % with one question never missed before (16) besides 93, 100, 119, 161, 184. Off:
+  no measurable gain, and it changes the routing.
 
-Open: router GEMM tiles (`GATE_GEMM`, 5120 → 384); MTP/DSpark
+Open: MTP/DSpark
 speculative decoding (V4: 1.8× at 1 user); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
