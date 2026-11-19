@@ -470,7 +470,33 @@ def _dspark_confidence_head(module) -> None:
     module.DSparkConfidenceHead = DSparkConfidenceHead
 
 
+def _config_replace(module) -> None:
+    """vllm.config.utils.replace rebuilds a config from its instance __dict__ and raises
+    for any key that is not a dataclass field. The plugin stores upstream-only settings as
+    plain attributes on 0.26's AttentionConfig (indexer_kv_dtype,
+    sparse_mla_prefill_workspace_factor; __init__.py verify_and_update_config), so the
+    DSpark loader's replace(attention_config, ...) failed (job 23861137). Skip non-fields
+    when rebuilding, then carry them over to the new instance."""
+    import dataclasses
+
+    def replace(dataclass_instance, /, **kwargs):
+        cls = type(dataclass_instance)
+        names = {f.name for f in dataclasses.fields(cls)}
+        current = dataclass_instance.__dict__
+        init = {k: v for k, v in current.items()
+                if k in names and module.is_init_field(cls, k)}
+        init.update(kwargs)
+        new = cls(**init)
+        for k, v in current.items():  # upstream-only attributes the plugin added
+            if k not in names and k not in kwargs:
+                object.__setattr__(new, k, v)
+        return new
+
+    module.replace = replace
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.config.utils"].append(_config_replace)
 HOOKS["vllm.model_executor.models.qwen3_dspark"] = [_dspark_confidence_head]
 HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
 HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes, _debug_kv_views]
