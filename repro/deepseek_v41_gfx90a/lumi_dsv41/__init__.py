@@ -47,6 +47,16 @@ def register() -> None:
         moe_small.GATE_UP = [(1, (32, 2)), (2, (32, 4)), (8, (128, 2)), (128, (128, 1))]
         moe_small.DOWN = [(2, (32, 2)), (4, (128, 2)), (128, (128, 1))]
         moe_small.install_matmul()
+    if os.environ.get("DSV41_GATE_GEMM") == "1":
+        # V4's GATE_GEMM (GateLinear -> score_gemm.score_mm, bf16 MFMA, fp32 logits) with
+        # tiles for V4.1's router, 5120 -> 384. test_router_gemm.py (job 23857491): 37 us and
+        # rel err 2-3e-3 (bf16 F.linear + cast) -> 13-21 us, 2e-7, at 1-128 tokens.
+        from lumi_dsv4_debug import moe_small, score_gemm
+
+        score_gemm.CONFIGS[384] = [
+            (16, (16, 16, 128, 8, 4)), (24, (16, 64, 128, 8, 4)), (32, (32, 16, 128, 8, 4)),
+            (96, (16, 64, 128, 8, 4)), (128, (64, 16, 128, 4, 4))]
+        moe_small.install_gate()
 
 
 def _config_class(model_configs):
