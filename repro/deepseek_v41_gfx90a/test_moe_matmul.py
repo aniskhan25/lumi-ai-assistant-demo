@@ -127,11 +127,11 @@ if __name__ == "__main__":
             cs = calls(M, which)
             fns = [c[0] for c in cs]
             with_flags(None, lambda: [f() for f in fns])
-            def rows(c, t):  # the rows vLLM reads: routed slots for gate/up, all for down
+            def read_rows(c, t):  # the rows vLLM reads: routed slots for gate/up, all for down
                 t = t.view(-1, t.shape[-1]).float()
                 return t if c[2] is None else t[c[2].long()]
 
-            ref = [rows(c, c[1]).clone() for c in cs]
+            ref = [read_rows(c, c[1]).clone() for c in cs]
             assert all(torch.isfinite(r).all() for r in ref), "default output not finite"
             t0 = with_flags(None, lambda: graph_us(fns))
             rows = []
@@ -139,7 +139,7 @@ if __name__ == "__main__":
                 cons = {"block_n": bn, "split_k": sk}
                 try:
                     with_flags(cons, lambda: [f() for f in fns])
-                    err = max(((rows(c, c[1]) - r).abs().max()
+                    err = max(((read_rows(c, c[1]) - r).abs().max()
                                / r.abs().max().clamp_min(1e-6)).item()
                               for c, r in zip(cs, ref))
                     rows.append((with_flags(cons, lambda: graph_us(fns)), cons, f"{err:.1e}"))
