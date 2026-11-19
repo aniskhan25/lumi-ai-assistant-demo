@@ -56,18 +56,39 @@ def _load_k(main_cache_ptr, extra_cache_ptr, main_idx_ptr, extra_idx_ptr, main_s
     d = tl.arange(0, 512)
     is_nope = d < 448
     x = tl.load(data[:, None] + d[None, :], mask=valid[:, None] & is_nope[None, :], other=0)
-    if DEQ == 1:  # ablation only: skip the FP8 decode (wrong values)
-        xf = x.to(tl.float32)
-    elif IS_FNUZ:
-        xf = x.to(tl.float8e4b8, bitcast=True).to(tl.float32)
-    else:
-        xf = x.to(tl.float8e4nv, bitcast=True).to(tl.float32)
     e = tl.load(scale_row[:, None] + tl.arange(0, 8)[None, :], mask=valid[:, None], other=127)
-    s = tl.exp2(e.to(tl.float32) - 127.0)  # UE8M0
-    s = tl.reshape(tl.broadcast_to(s[:, :, None], (BLOCK_K, 8, 64)), (BLOCK_K, 512))
     rope = tl.load((data + 448).to(tl.pointer_type(tl.bfloat16))[:, None] + (d[None, :] - 448),
                    mask=valid[:, None] & ~is_nope[None, :], other=0.0)
-    k = tl.where(is_nope[None, :], (xf * s).to(tl.bfloat16), rope)
+    if DEQ == 2 and not IS_FNUZ:
+        # OCP e4m3 x UE8M0 straight to bf16 bits: gfx90a has no FP8 conversion, so the
+        # generic path decodes in software and multiplies in fp32. A normal e4m3 value
+        # (exponent ex > 0, bias 7) times 2^(e - 127) is the bf16 with exponent ex + e - 7
+        # and the 3 mantissa bits shifted up by 4; subnormals (ex == 0) are m * 2^(e - 136),
+        # exact in fp32; NaN (ex 15, m 7) becomes 0 as below. Bit-identical to DEQ 0 while
+        # ex + e - 7 stays in 1..254 (UE8M0 scales near 127).
+        ei = tl.reshape(tl.broadcast_to(e.to(tl.int32)[:, :, None], (BLOCK_K, 8, 64)),
+                        (BLOCK_K, 512))
+        xi = x.to(tl.int32)
+        sgn = (xi >> 7) & 1
+        ex = (xi >> 3) & 15
+        mt = xi & 7
+        bits = (sgn << 15) | ((ex + ei - 7) << 7) | (mt << 4)
+        normal = bits.to(tl.int16).to(tl.bfloat16, bitcast=True)
+        sub = mt.to(tl.float32) * tl.exp2(ei.to(tl.float32) - 136.0)
+        sub = tl.where(sgn == 1, -sub, sub).to(tl.bfloat16)
+        kn = tl.where(ex == 0, sub, normal)
+        kn = tl.where((ex == 15) & (mt == 7), 0.0, kn)
+        k = tl.where(is_nope[None, :], kn, rope)
+    else:
+        if DEQ == 1:  # ablation only: skip the FP8 decode (wrong values)
+            xf = x.to(tl.float32)
+        elif IS_FNUZ:
+            xf = x.to(tl.float8e4b8, bitcast=True).to(tl.float32)
+        else:
+            xf = x.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        s = tl.exp2(e.to(tl.float32) - 127.0)  # UE8M0
+        s = tl.reshape(tl.broadcast_to(s[:, :, None], (BLOCK_K, 8, 64)), (BLOCK_K, 512))
+        k = tl.where(is_nope[None, :], (xf * s).to(tl.bfloat16), rope)
     k = tl.where(valid[:, None] & (k == k), k, 0.0)
     return k, valid
 

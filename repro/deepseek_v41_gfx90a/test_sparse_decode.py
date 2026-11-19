@@ -36,6 +36,9 @@ print(f"device {torch.cuda.get_device_properties(0).gcnArchName}, CUs {m._decode
 def make_cache(nblocks, nan_pad=False):
     rows = nblocks * BS
     nope = torch.randn(rows, NOPE).to(torch.float8_e4m3fn).view(torch.uint8)
+    # every e4m3 code (subnormals, NaN 0x7f / 0xff) somewhere, for the bit-level decode
+    hit = torch.rand(rows, NOPE) < 0.02
+    nope[hit] = torch.randint(0, 256, (int(hit.sum()),), dtype=torch.uint8)
     rope = torch.randn(rows, ROPE).bfloat16().view(torch.uint8)
     scales = torch.randint(122, 128, (rows, 8), dtype=torch.uint8)
     data = torch.cat([nope, rope], 1).view(nblocks, BS * 576)
@@ -159,4 +162,20 @@ for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
         c = min((k for k in t if k[0] == S), key=t.get)
         row.append(f"S{S}:{t[c]:.0f}{c[1:]}")
     print(f"  B={B:>4} " + "  ".join(row))
+print("3. bit-level FP8 decode (deq=2) vs the generic one (deq=0): equal outputs, us per call")
+for B, extra in itertools.product((1, 16, 32, 64, 128), (0, 512)):
+    q = torch.randn(B, H, HD, device=dev).bfloat16()
+    mi, mp = ragged(B, 128, swa.shape[0] * BS, vary=True)
+    kw = {}
+    if extra:
+        ei, ep = ragged(B, extra, comp.shape[0] * BS, vary=True)
+        kw = dict(extra_cache=comp, extra_indices=ei, extra_indptr=ep)
+    a = sparse_decode(q, swa, mi, mp, SCALE, sink, deq=0, **kw)
+    b = sparse_decode(q, swa, mi, mp, SCALE, sink, deq=2, **kw)
+    same = torch.equal(a, b)
+    if not same:
+        bad.append((B, extra, "deq2 != deq0", ((a.float() - b.float()).abs().max()).item()))
+    t0 = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, deq=0, **kw))
+    t2 = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, deq=2, **kw))
+    print(f"  {'top-k' if extra else 'SWA':<6} B={B:4d}: equal {same}  deq0 {t0:6.1f}  deq2 {t2:6.1f}")
 print("FAILED:", bad if bad else "none")
