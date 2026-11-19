@@ -455,7 +455,23 @@ def _debug_kv_views(module) -> None:
     module._reshape_kv_cache = _reshape_kv_cache
 
 
+def _dspark_confidence_head(module) -> None:
+    """Upstream's V4.1 drafter imports DSparkConfidenceHead from qwen3_dspark; 0.26 has
+    only DSparkMarkovHead (same signature as upstream's). The head serves adaptive
+    verification, which 0.26's DSpark speculator does not do, so lumi_dsv41/dspark.py
+    turns it off; this stand-in satisfies the import and refuses to be built."""
+    if hasattr(module, "DSparkConfidenceHead"):
+        return
+
+    class DSparkConfidenceHead:
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError("DSpark confidence head: not on vLLM 0.26")
+
+    module.DSparkConfidenceHead = DSparkConfidenceHead
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
+HOOKS["vllm.model_executor.models.qwen3_dspark"] = [_dspark_confidence_head]
 HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
 HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes, _debug_kv_views]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]

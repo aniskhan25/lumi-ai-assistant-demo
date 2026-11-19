@@ -122,7 +122,10 @@ if [ "${V41:-0}" = 1 ]; then
   export DSV41_MOE_TILES="${MOE_TILES:-0}"
   # GATE_GEMM=1: V4's router GEMM via score_mm with V4.1's tiles (lumi_dsv41/__init__.py)
   export DSV41_GATE_GEMM="${GATE_GEMM:-0}"; GATE_GEMM=0
-  if [ "${MTP:-0}" != 0 ]; then echo "V41=1: MTP/DSpark not ported"; exit 2; fi
+  if [ "${MTP:-0}" != 0 ]; then echo "V41=1: V4.1 has no V4-style MTP; its drafter is DSpark (DSPARK=N)"; exit 2; fi
+  # DSPARK=N: speculative decoding with V4.1's DSpark drafter (mtp.* weights), N draft
+  # tokens per step (its block size is 5); lumi_dsv41/dspark.py
+  [ "${DSPARK:-0}" != 0 ] && SPEC_EXTRA="--speculative-config {\"method\":\"dspark\",\"num_speculative_tokens\":${DSPARK}}"
   # SCORE_GEMM patches V4's attention class; V4.1 runs only 4 fp32 score GEMMs per step
   # (0.3 ms at 32 users, graph profile job 23701511, vs 62 / 4 ms on V4).
   if [ "${SCORE_GEMM:-0}" != 0 ]; then echo "V41=1: SCORE_GEMM targets V4's attention class"; exit 2; fi
@@ -164,6 +167,7 @@ else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
 [ "${V41:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --enable-expert-parallel"
 [ "${NO_ASYNC:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --no-async-scheduling"
 [ "${MTP:-0}" != 0 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":${MTP}}"
+[ -n "${SPEC_EXTRA:-}" ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} ${SPEC_EXTRA}"
 # NUMA_BIND=1: pin each worker to its GCD's CCD (LUMI-G map; core 0 of each CCD is reserved)
 # and NUMA node. Graph-mode profiles showed a random rank's host launching late.
 [ "${NUMA_BIND:-0}" = 1 ] && DEFAULT_EXTRA="${DEFAULT_EXTRA} --numa-bind --numa-bind-nodes 3 3 1 1 0 0 2 2 --numa-bind-cpus 49-55 57-63 17-23 25-31 1-7 9-15 33-39 41-47"

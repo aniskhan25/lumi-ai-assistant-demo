@@ -8,6 +8,8 @@ quantization registrations. Put the parent directory on PYTHONPATH.
 
 ARCH = "DeepseekV41ForCausalLM"
 MODEL = "lumi_dsv41.model:DeepseekV41ForCausalLM"
+DSPARK_ARCH = "DSparkDraftModel"
+DSPARK_MODEL = "lumi_dsv41.dspark:DSparkDeepseekV41ForCausalLM"
 
 
 def register() -> None:
@@ -24,6 +26,9 @@ def register() -> None:
     hf_configs._CONFIG_REGISTRY["deepseek_v41"] = "DeepseekV41Config"
     if ARCH not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model(ARCH, MODEL)
+    # 0.26 names a DeepSeek target's in-checkpoint DSpark drafter "DSparkDraftModel"
+    # (config/speculative.py); this plugin only loads for V4.1, so point it at V4.1's.
+    ModelRegistry.register_model(DSPARK_ARCH, DSPARK_MODEL)
     model_configs.MODELS_CONFIG_MAP[ARCH] = _config_class(model_configs)
     from . import quant  # noqa: F401 - registers the deepseek_v41_fp8 method
 
@@ -85,8 +90,11 @@ def _config_class(model_configs):
             if getattr(attention, "sparse_mla_prefill_workspace_factor", None) is None:
                 factor = 5 if vllm_config.model_config.max_model_len <= 256 * 1024 else 2
                 object.__setattr__(attention, "sparse_mla_prefill_workspace_factor", factor)
-            if vllm_config.speculative_config is not None:
-                raise NotImplementedError("DeepSeek-V4.1 on vLLM 0.26: MTP/DSpark not ported")
+            spec = vllm_config.speculative_config
+            if spec is not None and spec.method != "dspark":
+                raise NotImplementedError(
+                    f"DeepSeek-V4.1 on vLLM 0.26: speculative method {spec.method!r}; "
+                    "only its DSpark drafter (method dspark) is ported")
             if vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
                     "DeepSeek-V4.1 on vLLM 0.26: pass --no-enable-prefix-caching")
