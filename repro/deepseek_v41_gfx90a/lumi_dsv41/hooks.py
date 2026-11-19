@@ -479,17 +479,22 @@ def _config_replace(module) -> None:
     when rebuilding, then carry them over to the new instance."""
     import dataclasses
 
+    # Fields the plugin sets to values 0.26's type does not admit (validated again on
+    # rebuild): indexer_kv_dtype "auto" (0.26's Literal lacks it).
+    outside_type = {"indexer_kv_dtype": "auto"}
+
     def replace(dataclass_instance, /, **kwargs):
         cls = type(dataclass_instance)
         names = {f.name for f in dataclasses.fields(cls)}
         current = dataclass_instance.__dict__
+        carry = {k: v for k, v in current.items() if k not in kwargs and (
+            k not in names or outside_type.get(k, object()) == v)}
         init = {k: v for k, v in current.items()
-                if k in names and module.is_init_field(cls, k)}
+                if k in names and k not in carry and module.is_init_field(cls, k)}
         init.update(kwargs)
         new = cls(**init)
-        for k, v in current.items():  # upstream-only attributes the plugin added
-            if k not in names and k not in kwargs:
-                object.__setattr__(new, k, v)
+        for k, v in carry.items():  # upstream-only attributes and values the plugin set
+            object.__setattr__(new, k, v)
         return new
 
     module.replace = replace
