@@ -519,8 +519,14 @@ GSM8K 99.0 % with DSpark (98.0 % without), sanity 5/5, needles at 2.1k and 16.8k
 acceptance length 3.2–3.9 of 6 over the sweep (45–57 % of drafts accepted). KV cache
 2.24M tokens with the drafter's layers, 2.43M without.
 
-Open: DSpark block size (fewer drafts may pay at 32–64 users, where each rejected draft
-costs verification compute); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+**Draft count:** 5 is the only working setting. `DSPARK=3` is refused by 0.26 itself
+(job 23866836: "DSpark requires num_speculative_tokens >= dspark_block_size (5) ... Smaller
+values produce incorrect output"), so 4 is too. `DSPARK=7` (job 23868852) fails at start-up
+in 0.26's DeepSeek-V4 KV page packer (`_get_kv_cache_groups_uniform_groups`, an assertion
+on the group layout with the larger draft reservation); not pursued, since the drafter is
+trained on 5-token blocks and extra drafts mostly add verification work at load.
+
+Open: the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce

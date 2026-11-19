@@ -124,8 +124,8 @@ if [ "${V41:-0}" = 1 ]; then
   # GATE_GEMM=1: V4's router GEMM via score_mm with V4.1's tiles (lumi_dsv41/__init__.py)
   export DSV41_GATE_GEMM="${GATE_GEMM:-0}"; GATE_GEMM=0
   if [ "${MTP:-0}" != 0 ]; then echo "V41=1: V4.1 has no V4-style MTP; its drafter is DSpark (DSPARK=N)"; exit 2; fi
-  # DSPARK=N: speculative decoding with V4.1's DSpark drafter (mtp.* weights), N draft
-  # tokens per step (its block size is 5); lumi_dsv41/dspark.py
+  # DSPARK=5: speculative decoding with V4.1's DSpark drafter (mtp.* weights), 5 draft
+  # tokens per step (its block size; 0.26 refuses fewer, 7 trips its V4 KV page packer)
   [ "${DSPARK:-0}" != 0 ] && SPEC_EXTRA="--speculative-config {\"method\":\"dspark\",\"num_speculative_tokens\":${DSPARK}}"
   # SCORE_GEMM patches V4's attention class; V4.1 runs only 4 fp32 score GEMMs per step
   # (0.3 ms at 32 users, graph profile job 23701511, vs 62 / 4 ms on V4).
