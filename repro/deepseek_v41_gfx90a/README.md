@@ -455,7 +455,35 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   97.0 % with one question never missed before (16) besides 93, 100, 119, 161, 184. Off:
   no measurable gain, and it changes the routing.
 
-Open: MTP/DSpark
+### Speculative decoding: scoping (2026-11-19)
+
+V4.1's `mtp.{0,1,2}` weights are a **DSpark** drafter (`vendor/.../deepseek_v41/amd/dspark.py`),
+not V4-style MTP: one parallel pass drafts a block of 5 tokens (`dspark_block_size`) with
+non-causal attention, then a Markov head (`dspark_markov_rank` 256) samples them left to
+right. It reads the target's hidden states after layers 37–39 (`dspark_target_layer_ids`).
+Its 3 layers are SWA-only (compress ratio 0: no indexer, no compressor) with their own MoE
+(128 experts, top-3). What vLLM 0.26 already has, and what is missing:
+
+| piece | 0.26 | needed |
+|---|---|---|
+| DSpark speculator in MRV2 (`v1/worker/gpu/spec_decode/dspark`, on DFlash's context-KV + query-block machinery, FULL graphs for the draft step) | yes | — |
+| `--speculative-config '{"method": "dspark"}'` with the drafter in the target checkpoint | yes: sets the draft arch to `DSparkDraftModel` | register `DSparkDraftModel` → the vendored V4.1 class |
+| hooks the speculator calls (`compute_draft_logits`, `markov_embed`, `markov_bias`, `map_draft_to_target`, `combine_hidden_states`, `precompute_and_store_context_kv`, `get_draft_kv_cache_layer_names`) | — | all in the vendored drafter |
+| `qwen3_dspark.DSparkMarkovHead` | yes, same signature | — |
+| `qwen3_dspark.DSparkConfidenceHead` | **no** | graft (upstream's adaptive verification; 0.26's speculator never calls it) |
+| target aux hidden states | — | vendored V4.1 model has `aux_hidden_state_layers` |
+| target verification: 6 query tokens per sequence | — | the V4.1 indexer flattens >2 tokens to 1 per row on ROCm (`_use_flattening`), so our Triton logits kernel applies; sparse decode kernel takes any row count |
+| non-causal SWA indices for the draft block | — | vendored (`ComputeDSparkNoncausalSWAIndicesKernel`); untested on gfx90a |
+| plugin refuses any speculative config (`verify_and_update_config`) | — | lift for dspark |
+
+Plan: (1) eager smoke with DSpark (registrations, graft, the refusal lifted), check
+acceptance and GSM8K; (2) graphs: the draft step is FULL-captured, so every op in the
+draft layers must be capturable (our kernels are; any `.item()` fallback is not); (3)
+0.26 padding mismatches under spec decode (the indexer and prefill-chunk hooks assume one
+query per sequence in places); (4) block size (5, or fewer at high load) and async.
+V4's MTP gave 1.8× at 1 user with ~75 % acceptance of one draft; DSpark drafts 5 per step.
+
+Open: DSpark
 speculative decoding (V4: 1.8× at 1 user); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
