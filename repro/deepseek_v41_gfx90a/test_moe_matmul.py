@@ -96,15 +96,18 @@ def calls(M, which):
         if which == "gate_up":
             x = torch.randn(M, H, device=dev).bfloat16()
             y = torch.empty(1, rows, N1, device=dev, dtype=torch.bfloat16)
+            y.zero_()  # under EP only the routed rows are written; vLLM reads y[dst_indx]
             out.append((lambda x=x, y=y, rd=rd, gi=gi:
-                        matmul_ogs(x, w13, None, rd, gather_indx=gi, precision_config=pc13, y=y), y))
+                        matmul_ogs(x, w13, None, rd, gather_indx=gi, precision_config=pc13, y=y),
+                        y, gi.dst_indx))
         else:
             rd.n_expts_act = 1
             x = torch.randn(rows, I, device=dev).bfloat16()[gi.src_indx]
             y = torch.empty(1, rows, H, device=dev, dtype=torch.bfloat16)
+            y.zero_()
             out.append((lambda x=x, y=y, rd=rd, si=si:
                         matmul_ogs(x, w2, None, rd, scatter_indx=si, precision_config=pc2,
-                                   gammas=rd.gate_scal, y=y), y))
+                                   gammas=rd.gate_scal, y=y), y, None))
     return out
 
 
@@ -124,15 +127,20 @@ if __name__ == "__main__":
             cs = calls(M, which)
             fns = [c[0] for c in cs]
             with_flags(None, lambda: [f() for f in fns])
-            ref = [c[1].clone() for c in cs]
+            def rows(c, t):  # the rows vLLM reads: routed slots for gate/up, all for down
+                t = t.view(-1, t.shape[-1]).float()
+                return t if c[2] is None else t[c[2].long()]
+
+            ref = [rows(c, c[1]).clone() for c in cs]
+            assert all(torch.isfinite(r).all() for r in ref), "default output not finite"
             t0 = with_flags(None, lambda: graph_us(fns))
             rows = []
             for bn, sk in itertools.product((32, 64, 128, 256), (1, 2, 4, 8, 16)):
                 cons = {"block_n": bn, "split_k": sk}
                 try:
                     with_flags(cons, lambda: [f() for f in fns])
-                    err = max(((c[1].float() - r.float()).abs().max()
-                               / r.float().abs().max().clamp_min(1e-6)).item()
+                    err = max(((rows(c, c[1]) - r).abs().max()
+                               / r.abs().max().clamp_min(1e-6)).item()
                               for c, r in zip(cs, ref))
                     rows.append((with_flags(cons, lambda: graph_us(fns)), cons, f"{err:.1e}"))
                 except Exception as e:  # unsupported combination
