@@ -112,7 +112,18 @@ class DeepseekV41ForCausalLM(upstream.DeepseekV41LLMForCausalLM):
         if not getattr(self, "_mhc_finalized", False):
             self.model.finalize_mhc_broadcast_weights()
             self._mhc_finalized = True
-        return super().forward(*args, **kwargs)
+        out = super().forward(*args, **kwargs)
+        self._last_hidden = out[0] if isinstance(out, tuple) else out
+        return out
+
+    def get_mtp_target_hidden_states(self):
+        # Upstream skips the pre-hc_head buffer for DSpark (it drafts from the aux hidden
+        # states), so this returns None; 0.26's runner slices whatever it returns
+        # (job 23861746: 'NoneType' object is not subscriptable). Give it the step's
+        # hidden states then, which the DFlash/DSpark propose only falls back on without
+        # aux states.
+        buf = super().get_mtp_target_hidden_states()
+        return buf if buf is not None else getattr(self, "_last_hidden", None)
 
 
 @triton.jit
