@@ -483,6 +483,25 @@ draft layers must be capturable (our kernels are; any `.item()` fallback is not)
 query per sequence in places); (4) block size (5, or fewer at high load) and async.
 V4's MTP gave 1.8× at 1 user with ~75 % acceptance of one draft; DSpark drafts 5 per step.
 
+**Step 1 done: DSpark runs, eager** (`DSPARK=5`, job 23862125; `lumi_dsv41/dspark.py`).
+Five 0.26-vs-upstream gaps on the way, one per run:
+
+| job | failure | fix |
+|---|---|---|
+| 23861137 | `replace(attention_config)`: field `sparse_mla_prefill_workspace_factor` not found | `hooks.py:_config_replace` rebuilds from fields, carries the plugin's extra attributes |
+| 23861245 | `indexer_kv_dtype='auto'` fails 0.26's Literal on rebuild | carried the same way |
+| 23861528 | `KeyError: model.layers.0.ffn.gate.bias_vl` | drafter skips the vision routing bias, as the target |
+| 23861746 | 0.26's runner slices `get_mtp_target_hidden_states()`, which upstream returns as None for DSpark | target returns the step's hidden states then |
+| 23861880 | context-KV insert calls the fused op with upstream's 11 arguments (0.26: 9) | `_v41_dspark` routes it through `ops.py` |
+
+Result: sanity 5/5, needles at 2.1k and 16.8k, **GSM8K 99 % of 100**, KV 2.24M tokens.
+Acceptance (vLLM's SpecDecoding metrics, 5 drafts): during GSM8K (natural text) **mean
+acceptance length 3.7–4.0 of 6**, first draft accepted 82–89 %, per position ~0.87 / 0.71
+/ 0.55 / 0.42 / 0.30; during the benchmark, whose prompts are random words, 1.2–2.4. So
+the random-prompt sweep understates speculative decoding badly; step 2 needs a
+natural-text benchmark. Eager speed is not a measurement (8.4 tok/s at 1 user on the
+random prompts).
+
 Open: DSpark
 speculative decoding (V4: 1.8× at 1 user); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
