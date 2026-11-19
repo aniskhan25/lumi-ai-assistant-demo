@@ -49,8 +49,12 @@ def register() -> None:
         # flat from 16. Same output as the default tiles (split-K reorders sums: <= 2e-3).
         from lumi_dsv4_debug import moe_small
 
-        moe_small.GATE_UP = [(1, (32, 2)), (2, (32, 4)), (8, (128, 2)), (128, (128, 1))]
-        moe_small.DOWN = [(2, (32, 2)), (4, (128, 2)), (128, (128, 1))]
+        # Up to 1024 tokens: DSpark verifies 6 tokens per sequence, so decode batches reach
+        # 96-768 rows; block_n 128 / split_k 1 beats the default by 13-16 % on gate/up there
+        # (job 23871479; 192: 1068 -> 933 us, 384: 1722 -> 1458), down 0-4 %. Prefill
+        # chunks (2048) keep the library's choice.
+        moe_small.GATE_UP = [(1, (32, 2)), (2, (32, 4)), (8, (128, 2)), (1024, (128, 1))]
+        moe_small.DOWN = [(2, (32, 2)), (4, (128, 2)), (1024, (128, 1))]
         moe_small.install_matmul()
     if os.environ.get("DSV41_GATE_GEMM") == "1":
         # V4's GATE_GEMM (GateLinear -> score_gemm.score_mm, bf16 MFMA, fp32 logits) with

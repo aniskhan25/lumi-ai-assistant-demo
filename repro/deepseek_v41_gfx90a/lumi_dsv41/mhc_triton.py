@@ -20,7 +20,10 @@ from vllm.triton_utils import tl, triton
 
 BLOCK_H = 512
 # Split-K prenorm GEMM for decode-sized batches; larger batches use torch (hipBLASLt).
-GEMM_MAX_TOKENS, GEMM_CHUNK, GEMM_BK = 64, 512, 256
+# Split-K beats the torch GEMM (fp32 copy + hipBLASLt fp32 GEMM + square-sum) up to ~256
+# tokens (job 23871480: 0.099 vs 0.195 ms at 96, 0.155 vs 0.197 at 192, equal at 384);
+# DSpark's verify batches (6 tokens per sequence) land in that range.
+GEMM_MAX_TOKENS, GEMM_CHUNK, GEMM_BK = 256, 512, 256
 
 
 @triton.jit
