@@ -4,12 +4,13 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-19): 22.9 / 245.3 / 362.1 / 515.2 tok/s at 1 / 16 / 32 / 64 users,
-> GSM8K 98.0 % (200), needles, decode = prefill, 2.43M tokens of KV cache (job 23851799):
-> V4's custom all-reduce, a gfx90a sparse-decode kernel (`SPARSE_DECODE=1`), V4.1's query
-> RoPE in Triton, async scheduling with 2048-token prefill chunks. V4 with the same
-> settings and no MTP (job 23783289): 18.7 / 210.7 / 350.4 / 523.0, so V4.1 is ahead at
-> 1-32 users and 1.5 % behind at 64; V4's MTP (34-35 tok/s at 1 user) is not ported.**
+> **Status (2026-11-19): 24.2 / 254.4 / 370.9 / 526.2 tok/s at 1 / 16 / 32 / 64 users,
+> GSM8K 98.0 % (200), needles, decode = prefill, 2.43M tokens of KV cache (job 23851800):
+> V4's custom all-reduce and MoE routing pack, a gfx90a sparse-decode kernel
+> (`SPARSE_DECODE=1`), V4.1's query RoPE in Triton, async scheduling with 2048-token
+> prefill chunks. V4 with the same settings and no MTP (job 23783289): 18.7 / 210.7 /
+> 350.4 / 523.0, so V4.1 is ahead at every load; V4's MTP (34-35 tok/s at 1 user) is not
+> ported.**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -260,7 +261,8 @@ GSM8K (99–100/100).
 | same, async scheduling (no `NO_ASYNC=1`) | 23707780 | 20.9 / – / 225.3 / 332.4, 460.0 at 64 | 47 / 78 ms, 120 at 64 |
 | **gfx90a sparse decode kernel** (`SPARSE_DECODE=1` instead of `SPARSE_SPLIT=32`), `NO_ASYNC=1` | 23708163 | **20.3 / – / 220.1 / 328.3**, **462.7 at 64** | **48 / 85 ms**, 124 at 64 |
 | same, async scheduling (no `NO_ASYNC=1`) | 23783297 | 22.9 / – / 242.3 / 352.0, 494.2 at 64 | 43 / 73 ms, 111 at 64 |
-| **async + 2048-token chunks** (`--max-num-batched-tokens 2048`): the recipe | 23851799 | **22.9 / – / 245.3 / 362.1**, **515.2 at 64** | **43 / 83 ms**, 117 at 64 |
+| async + 2048-token chunks (`--max-num-batched-tokens 2048`) | 23851799 | 22.9 / – / 245.3 / 362.1, 515.2 at 64 | 43 / 83 ms, 117 at 64 |
+| **+ `pack_bitmatrix` in 16-row blocks** (`MOE_SMALL=1`): the recipe | 23851800 | **24.2 / – / 254.4 / 370.9**, **526.2 at 64** | **41 / 81 ms**, 114 at 64 |
 
 V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_flash_debug`).
 
@@ -416,8 +418,17 @@ V4-Flash's recipe on the same node gives 15.0 / 53.8 / 177.1 / 273.3 (`../dsv4_f
   requests as prefills; with 8192-token chunks the prompt never reached a graph-sized
   batch alone. Padding requests own no tokens, so skipping their chunk is exact (the needle
   run itself is the check). The third 0.26 padding mismatch after the indexer one.
+- **`MOE_SMALL=1`, routing pack only** (job 23851800; V4's `moe_small.install_pack`, via
+  `DSV41_MOE_PACK` in `lumi_dsv41/__init__.py`): vLLM's `make_routing_data` launches
+  `pack_bitmatrix` with 512-row blocks whatever the batch; 16-row blocks give the same
+  bitmatrix. **+5.4 % at 1 user, +3.7 % at 16, +2.4 % at 32, +2.1 % at 64.** GSM8K 98.0 %
+  (misses 100, 119, 184 as before, 125 as in job 23783297), needles, decode = prefill.
+  V4's expert GEMM tiles (`MOE_SMALL`'s other half) are for its TP-sharded experts (N 512
+  per rank); V4.1 runs whole experts under EP (N 4608, K 5120) and needs its own sweep, as
+  does `GATE_GEMM` for the 5120 → 384 router.
 
-Open: the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
+Open: V4.1 expert GEMM and router GEMM tiles (V4: 1.03–1.12× with both); MTP/DSpark
+speculative decoding (V4: 1.8× at 1 user); the FP8 decode in the sparse kernel (~20 %, gfx90a converts in software); FULL decode graphs (no gain on V4); reporting the two upstream gfx90a
 bugs (decode inverse RoPE, SHUFFLE indexer read) and the graph-padding mismatch.
 
 ## Reproduce
@@ -432,7 +443,7 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 MOE_SMALL=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" DIAG=1 PROBE_GSM8K_N=200 BENCH=1 CONCURRENCIES="1 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
