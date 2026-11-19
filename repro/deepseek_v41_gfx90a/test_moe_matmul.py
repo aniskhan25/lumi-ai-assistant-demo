@@ -16,6 +16,7 @@ the max error against the default flags' output.
 
 import importlib
 import itertools
+import os
 
 import torch
 
@@ -123,7 +124,7 @@ if __name__ == "__main__":
     print(torch.cuda.get_device_name(), f"local experts {E}, gate/up [{H} -> {N1}], down [{I} -> {H}]")
     for which in ("gate_up", "down"):
         print(f"\n{which}: us per call; best forced flags vs default (block_n, split_k)")
-        for M in (1, 2, 4, 8, 16, 32, 64, 128):
+        for M in (int(m) for m in os.environ.get("MOE_SWEEP_M", "1 2 4 8 16 32 64 128").split()):
             cs = calls(M, which)
             fns = [c[0] for c in cs]
             with_flags(None, lambda: [f() for f in fns])

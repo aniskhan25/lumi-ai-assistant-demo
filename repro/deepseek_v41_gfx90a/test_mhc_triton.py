@@ -89,7 +89,9 @@ def timeit(fn, iters=20):
     return start.elapsed_time(end) / iters
 
 
-for t in (1, 32):
+import lumi_dsv41.mhc_triton as mt  # noqa: E402
+
+for t in (1, 32, 96, 192, 384):
     residual = torch.randn(t, HC, H, device=dev).bfloat16()
     fn = torch.randn(HC3, HC * H, device=dev) * 0.02
     scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5
@@ -97,6 +99,21 @@ for t in (1, 32):
     args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
     a = timeit(lambda: ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix))
     b = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    # the prenorm GEMM path: split-K Triton forced vs the torch GEMM (served above 64 tokens)
+    saved = mt.GEMM_MAX_TOKENS
+    mt.GEMM_MAX_TOKENS = 1 << 20
+    r_sk = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+    b_sk = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.GEMM_MAX_TOKENS = 0
+    r_mm = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+    b_mm = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.GEMM_MAX_TOKENS = saved
+    want = ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix)
+    errs = [rel(x, y) for x, y in zip(r_sk, want)]
+    if max(errs) > 1e-4:
+        failures.append(f"split-K T={t}: {errs}")
+    print(f"  T={t:>3}: prenorm GEMM split-K {b_sk:6.3f}  torch GEMM {b_mm:6.3f}  "
+          f"(split-K max rel err {max(errs):.1e})")
     x = torch.randn(t, H, device=dev).bfloat16()
     post, comb = torch.rand(t, HC, 1, device=dev), torch.rand(t, HC, HC, device=dev)
     c = timeit(lambda: ref.mhc_post_torch(x, residual, post, comb))
