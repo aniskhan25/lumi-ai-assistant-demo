@@ -92,11 +92,15 @@ per step: **42–43 tok/s for one user** (from 37), unchanged from 4 users up (s
 decode kernel: **48 tok/s for one user**, 1.05–1.15× at every load (see "Sparse decode
 kernel from V4.1"). `WO_A=1 DENSE_GEMM=1` run the output projection `wo_a` and the other
 bf16 dense linears in Triton where it beats vLLM's ROCm GEMM dispatch: TPOT 1.3–3.6 ms
-lower from 4 users up (see "Dense bf16 GEMMs at decode sizes").
+lower from 4 users up (see "Dense bf16 GEMMs at decode sizes"). `MHC_FAST=1` runs the
+hyper-connections' post and prenorm GEMM in Triton (from the V4.1 port), closer to the
+torch reference than TileLang and TPOT 0.4–1.2 ms lower from 4 users up (see
+"Hyper-connections from the V4.1 port"). Use `--max-num-seqs 64` for every load: with
+short natural prompts, 32 sequences was 13 % slower at 32 users (same section).
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -107,8 +111,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **the command above** | 32 | 23896453 | 97.2 % | **51.8** / 141.3 / 360.9 / **538.7** / – | 18 / 49 / – ms |
-| **the command above** | 64 | 23880589 | 97.0 % | 44.8 / **169.7** / **364.4** / 524.1 / **717.1** | 22 / 50 / 73 ms |
+| **the command above**, GSM8K-question prompts (`BENCH_DATA=gsm8k`) | 64 | 23898747 | 97.4 % | 57.0 / 184.7 / 513.4 / 709.5 / 1054.5 | 17 / 34 / 52 ms |
+| the same, GSM8K-question prompts | 32 | 23898749 | 97.0 % | 54.3 / 181.5 / 485.8 / 618.5 / – | 17 / 42 / – ms |
+| without `MHC_FAST`, 1024-token random prompts | 32 | 23896453 | 97.2 % | **51.8** / 141.3 / 360.9 / **538.7** / – | 18 / 49 / – ms |
+| without `MHC_FAST`, 1024-token random prompts | 64 | 23880589 | 97.0 % | 44.8 / **169.7** / **364.4** / 524.1 / **717.1** | 22 / 50 / 73 ms |
 | without `WO_A`, `DENSE_GEMM` | 32 | 23858696 | 97.2 % | 48.2 / 135.9 / 365.8 / 512.5 / – | 20 / 52 / – ms |
 | without `WO_A`, `DENSE_GEMM` | 64 | 23857052 | 97.4 % | 48.2 / 141.1 / 346.9 / 494.2 / 707.0 | 20 / 52 / 75 ms |
 | split-K sparse decode, full graphs | 32 | 23851784 | 97.4 % | 42.7 / 129.8 / 331.6 / 496.1 / – | 23 / 55 / – ms |
@@ -893,6 +899,49 @@ server log shows `DENSE_GEMM`'s 1-user phase accepting 1.2–1.7 draft tokens pe
 1.5–1.7 in the control and ~1.8 in 23880541, at the same step rate. Compare 1-user runs by
 TPOT × acceptance length, or with natural prompts.
 
+### Hyper-connections from the V4.1 port; natural prompts (Nov 20)
+
+With `MHC_FIX=triton`, a fused post+pre call is TileLang's post (18.7 µs at 64 tokens), its
+prenorm GEMM (43.6 µs) and our big fuse (18.0 µs): 88 calls, ~7 ms of a 54.5 ms step at 32
+users (job 23861348). Without DeepGEMM vLLM runs that GEMM with one K split, one workgroup
+per token. The V4.1 port replaced the same work with Triton (`lumi_dsv41/mhc_triton.py`):
+a post kernel and a split-K prenorm GEMM, per token or tiled with an fp32 matrix-core dot.
+`mhc_fast.py` (`MHC_FAST=1`) brings both to V4. The partial sums go straight to the
+big-fuse kernel, which already adds up any number of splits, so there is no reduce kernel.
+A third variant, post and GEMM in one kernel, lost at every size and is unused.
+
+`test_mhc_fast.py` (job 23898369, one GCD, layer-5 parameters): all variants within 1e-4 of
+the torch references (served path: 2e-4 to 1.3e-3). One fused post+pre call, µs:
+
+| tokens | 2 | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|
+| served (TileLang post + GEMM, Triton big fuse) | 19.2 | 28.9 | 35.3 | 41.6 | 65.5 | 114.6 |
+| **`MHC_FAST`** | **14.6** | **17.0** | **21.0** | **25.1** | **34.7** | **44.2** |
+
+At 2 tokens the big fuse is half of what is left (7.6 µs, ~2.5 µs of it the 20 Sinkhorn
+iterations). Above 128 tokens (prefill chunks) vLLM's path stays.
+
+**Natural prompts.** The sweep now has `BENCH_DATA=gsm8k` (from the V4.1 branch): GSM8K test
+questions (~73 tokens) answered step by step up to 512 tokens, ending at EOS, 4 prompts per
+user slot. MTP accepts 1.89–1.92 tokens per step there in every run, against 1.2–1.8 on random
+tokens. These contexts are much shorter than the 1024-token random prompts, so the numbers
+are higher and do not compare with the earlier rows. `PROFILE=1` uses the same prompts.
+
+| 64 seqs, same day | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 4 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| control | 23898748 | 97.2 % (1 garbage) | 58.2 / 186.0 / 491.0 / 709.5 / 1068.9 | 16.7 / 19.4 / 27.2 / 35.6 / 52.1 ms |
+| **`MHC_FAST=1`** | 23898747 | 97.4 % | 57.0 / 184.7 / 513.4 / 709.5 / 1054.5 | 16.7 / **19.0 / 26.6 / 34.4 / 51.5** ms |
+| `MHC_FAST=1`, 32 seqs | 23898749 | 97.0 % | 54.3 / 181.5 / 485.8 / 618.5 / – | 16.7 / 19.2 / 27.7 / 41.7 / – ms |
+
+TPOT 0.4–1.2 ms lower from 4 users up. Throughput moves ±4 % both ways because output
+lengths differ between runs. That is ~2 ms per step at 32 users, near the 2.7 ms the
+one-GCD timings predict. At 64 users it is ~1 ms against a predicted 6. With 32 sequences,
+32 users ran 13 % slower than with 64. The graph sizes explain it: 32 sequences capture
+piecewise graphs only to 128 tokens. A step with 32 users' 64 decode tokens and one new
+prompt (~90 tokens with the chat template) is past that and runs eager. With 64 sequences
+the limit is 256. Random 1024-token prompts never fit a graph when they arrive, so this did
+not show before. `--max-num-seqs 64` is the setting for every load.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -937,6 +986,8 @@ TPOT × acceptance length, or with natural prompts.
   13. ~~Dense bf16 GEMMs at 4–128 tokens~~: done, `WO_A=1 DENSE_GEMM=1`, TPOT 1.3–3.6 ms
       lower from 4 users up (above). Left at 32 users: MXFP4 expert GEMMs (`matmul_ogs`,
       ~10 ms of 54), mHC `hc_prenorm` (3.8 ms), all-reduce (3.8 ms).
+  14. ~~Hyper-connections at decode sizes~~: done, `MHC_FAST=1` (V4.1's Triton post and
+      split-K prenorm GEMM), 1.3–2.6× per call, TPOT 0.4–1.2 ms lower from 4 users up.
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -997,6 +1048,8 @@ TPOT × acceptance length, or with natural prompts.
 | `plugin/lumi_dsv4_debug/wo_a.py` | `wo_a` (`rocm_inv_rope_einsum`) as `wvSplitK` up to 3 tokens, `score_mm` above (`DSV4_WO_A`) |
 | `test_wo_a.py`, `run_wo_a_test.sh` | `wo_a` sweep vs einsum / `F.linear` / vLLM, hook vs stock, split-K sum Triton vs torch |
 | `plugin/lumi_dsv4_debug/dense_gemm.py` | bf16 dense linears at 2–128 tokens via `score_mm`, per-shape tiles (`DSV4_DENSE_GEMM`) |
+| `plugin/lumi_dsv4_debug/mhc_fast.py` | mHC post + split-K prenorm GEMM + big fuse in Triton at decode sizes (`DSV4_MHC_FAST`) |
+| `test_mhc_fast.py`, `run_mhc_fast_test.sh` | those vs the served TileLang path and the torch references, variant sweep, parts |
 | `test_dense_gemm.py`, `run_dense_gemm_test.sh` | tile sweep against vLLM's ROCm GEMM dispatch for the per-rank dense shapes |
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
