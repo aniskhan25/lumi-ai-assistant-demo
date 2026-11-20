@@ -587,6 +587,23 @@ def _chunked_mqa_logits(module) -> None:
     module.fp8_mqa_logits_torch = fp8_mqa_logits_torch
 
 
+def _prefill_stages(module) -> None:
+    """DSV41_SPARSE_PREFILL=1: launch the ROCm sparse-attention prefill kernel with
+    num_stages=1. Its wrapper leaves Triton's default (2), and software-pipelining the
+    gathered KV rows makes it 2.2x slower on gfx90a: 5.98 -> 2.73 ms for a 2048-query chunk
+    at 4k context, 5.99 -> 2.87 ms at 16k, same tile otherwise and the same output
+    (test_sparse_prefill.py, job 23900392). It was ~29 % of prefill (job 23898197)."""
+    import os
+
+    if module._ON_GFX950 or os.environ.get("DSV41_SPARSE_PREFILL") != "1":
+        return
+    _source_patch(
+        module, "_rocm_sparse_attn_prefill_ragged_triton",
+        "        num_warps=num_warps,\n",
+        "        num_warps=num_warps,\n        num_stages=1,\n",
+    )
+
+
 def _prefill_logits_triton(module) -> None:
     """DSV41_PREFILL_LOGITS=1: the indexer's prefill logits (fp8_mqa_logits_torch, the
     no-aiter fallback of rocm_fp8_mqa_logits) in one Triton kernel (mqa_logits.py) instead
@@ -951,7 +968,8 @@ VENDORED_HOOKS = {
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
         _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _prefill_logits_triton,
         _decode_rows_bound, _decode_inv_rope,
-        _paged_logits_unshuffle, _paged_logits_triton, _sparse_split, _sparse_decode],
+        _paged_logits_unshuffle, _paged_logits_triton, _sparse_split, _sparse_decode,
+        _prefill_stages],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],
     "vllm.models.deepseek_v41.amd.dspark": [_v41_dspark],
