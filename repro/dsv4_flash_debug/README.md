@@ -90,11 +90,13 @@ captures whole decode steps, which removes the host launch overhead that held ba
 per step: **42–43 tok/s for one user** (from 37), unchanged from 4 users up (see "Where the
 1-user step goes"). `SPARSE_DECODE=1` replaces `SPARSE_SPLIT` with the V4.1 port's sparse
 decode kernel: **48 tok/s for one user**, 1.05–1.15× at every load (see "Sparse decode
-kernel from V4.1").
+kernel from V4.1"). `WO_A=1 DENSE_GEMM=1` run the output projection `wo_a` and the other
+bf16 dense linears in Triton where it beats vLLM's ROCm GEMM dispatch: TPOT 1.3–3.6 ms
+lower from 4 users up (see "Dense bf16 GEMMs at decode sizes").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -105,8 +107,10 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **the command above** | 32 | 23858696 | 97.2 % | **48.2** / **135.9** / **365.8** / **512.5** / – | 20 / 52 / – ms |
-| **the command above** | 64 | 23857052 | 97.4 % | **48.2** / **141.1** / 346.9 / 494.2 / **707.0** | 20 / 52 / 75 ms |
+| **the command above** | 32 | 23896453 | 97.2 % | **51.8** / 141.3 / 360.9 / **538.7** / – | 18 / 49 / – ms |
+| **the command above** | 64 | 23880589 | 97.0 % | 44.8 / **169.7** / **364.4** / 524.1 / **717.1** | 22 / 50 / 73 ms |
+| without `WO_A`, `DENSE_GEMM` | 32 | 23858696 | 97.2 % | 48.2 / 135.9 / 365.8 / 512.5 / – | 20 / 52 / – ms |
+| without `WO_A`, `DENSE_GEMM` | 64 | 23857052 | 97.4 % | 48.2 / 141.1 / 346.9 / 494.2 / 707.0 | 20 / 52 / 75 ms |
 | split-K sparse decode, full graphs | 32 | 23851784 | 97.4 % | 42.7 / 129.8 / 331.6 / 496.1 / – | 23 / 55 / – ms |
 | split-K sparse decode, full graphs | 64 | 23836295 | 97.2 % | 42.0 / 120.3 / 308.6 / 499.3 / 648.1 | 23 / 54 / 81 ms |
 | piecewise graphs, + MoE | 32 | 23811671 | 97.4 % | 35.2 / 122.1 / 333.6 / 501.9 / – | 28 / 54 / – ms |
@@ -126,6 +130,10 @@ garbage, no runaway answers):
 | `MHC_FIX=direct` | 64 | 23572795 | 97.8 % | 14.4 / 51.1 / 169.3 / 263.8 / 379.2 | 69 / 107 / 154 ms |
 | `TORCH_MHC=1` | 32 | 23564811 | 97.6 % | 9.9 / 35.8 / 121.0 / 196.1 / – | 101 / 149 / – ms |
 | `TORCH_MHC=1` | 64 | 23572796 | 98.0 % | 9.8 / – / – / 195.0 / 302.9 | 101 / 149 / 196 ms |
+
+With MTP, 1- and 4-user rows vary by up to ±10 % between runs with the same speed per step:
+the random-token prompts make acceptance shift with any numerical change (see "Dense bf16
+GEMMs at decode sizes").
 
 `MHC_FIX=triton` with 64 sequences is 5.0–7.3× eager. It is 1.53–1.58× the torch
 hyper-connections at every load, and 1.08–1.15× `MHC_FIX=direct`, at the same GSM8K. 64
@@ -832,6 +840,59 @@ Serving, recipe with full graphs, same day:
 1.15× at 1 user, 1.05–1.09× from 4 to 64; TPOT 2–6 ms lower at every load. Sanity 5/5,
 needles 2/2, no garbage.
 
+### Dense bf16 GEMMs at decode sizes: `wo_a` and the linears (Nov 19–20)
+
+Profiles of the recipe (`PROFILE=1`, jobs 23861347 at 1 user and 23861348 at 32) put the
+dense bf16 GEMMs next after the MoE: hipBLASLt `Cijk_*` kernels took ~8 ms of a 54.5 ms
+step at 32 users, and V4's output projection `wo_a` 1.9 ms of 33 at 1 user. vLLM's ROCm
+dispatch (`rocm_unquantized_gemm_impl`) uses its skinny kernels (`wvSplitK`, `LLMM1`) only
+up to 4–5 tokens. Above that, hipBLASLt takes nearly flat time from 8 to 128 rows: 33 µs for
+the 1024 × 4096 `wo_a`. The `score_mm` Triton kernel (from `SCORE_GEMM`) with a bf16 output
+beats it at almost every decode size:
+
+- **`WO_A=1`** (`wo_a.py`): `wo_a` is a grouped einsum (`rocm_inv_rope_einsum`). At TP=8
+  each rank holds one group, so it is a plain GEMM, which torch sends to hipBLASLt. The
+  hook keeps the stock inverse RoPE and cached bf16 weight. It runs `wvSplitK` up to 3
+  tokens (9–12 µs) and `score_mm` above that: 16 µs at 4–16 tokens, 24 at 64, 34 at 128
+  (job 23866833). Output is within 2.4e-3 of the stock einsum (job 23866911). `score_mm`'s
+  split-K sum is now a Triton kernel, 2–3 µs per call faster than torch's `.sum(0)` and equal
+  to 1e-6; this also speeds up `SCORE_GEMM` and `GATE_GEMM`.
+- **`DENSE_GEMM=1`** (`dense_gemm.py`): the same kernel for the other bf16 linears, by
+  hooking vLLM's `rocm_unquantized_gemm`. Tiles come per shape and token count from a sweep
+  against vLLM's own dispatch (`test_dense_gemm.py`, job 23880540). Where vLLM wins (2 tokens
+  on three of the five shapes) the table keeps the stock path. Per rank, µs per call:
+
+| shape (N × K per rank) | 8 tokens: vLLM / **Triton** | 64 tokens: vLLM / **Triton** |
+|---|---|---|
+| fused `wq_a` + `wkv` (1536 × 4096) | 35 / **15** | 37 / **25** |
+| `wq_b`, `wo_b` (4096 × 1024) | 16 / **11** | 21 / **17** |
+| shared expert w1+w3 (512 × 4096) | 33 / **9** | 32 / **12** |
+| shared expert w2 (4096 × 256) | 9 / **5** | 8 / **6** |
+| indexer `wq_b` (1024 × 1024) | 12 / **6** | 12 / **8** |
+
+Summed over one layer's GEMMs: 55 → 50 µs at 2 tokens, 137 → 57 at 8, 139 → 66 at 32,
+145 → 87 at 64, 157 → 125 at 128. Errors against fp64 are at bf16 rounding (2–4e-3) for both.
+
+Serving, recipe + `WO_A=1`, one allocation each:
+
+| | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 4 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| control (`WO_A=1`), 64 seqs | 23880590 | 98.0 % | 50.0 / 149.7 / 334.4 / 529.0 / 694.5 | 19.4 / 24.0 / 38.9 / 50.8 / 74.9 ms |
+| **`DENSE_GEMM=1`**, 64 seqs | 23880589 | 97.0 % | 44.8 / **169.7 / 364.4** / 524.1 / **717.1** | 21.7 / **21.8 / 35.3 / 49.5 / 73.2** ms |
+| `WO_A=1`, 32 seqs | 23880541 | 97.6 % | 54.8 / 154.2 / 346.3 / 500.6 / – | 17.6 / 23.9 / 37.8 / 50.9 / – ms |
+| **`DENSE_GEMM=1`**, 32 seqs | 23896453 | 97.2 % | 51.8 / 141.3 / **360.9 / 538.7** / – | 18.1 / **21.7 / 34.7 / 49.0** / – ms |
+
+`DENSE_GEMM` lowers TPOT by 1.3–3.6 ms from 4 users up, close to the ~2 ms per step the
+sweep predicts. `WO_A`, against the Nov 19 runs without it (23857052, 23858696), is within
+day-to-day noise from 16 users up and 0.5–2.5 ms faster at 1–4. The profile puts its gain at
+~1 ms per step.
+
+**The 1-user numbers here measure MTP acceptance as much as speed.** The benchmark prompts
+are random tokens, so a tiny numerical change sends generation down a different path. The
+server log shows `DENSE_GEMM`'s 1-user phase accepting 1.2–1.7 draft tokens per step against
+1.5–1.7 in the control and ~1.8 in 23880541, at the same step rate. Compare 1-user runs by
+TPOT × acceptance length, or with natural prompts.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -873,6 +934,9 @@ needles 2/2, no garbage.
       pinning (`NUMA_BIND=1`) does not help.
   12. ~~Sparse attention decode~~: done, the V4.1 port's kernel (`SPARSE_DECODE=1`),
       1.05–1.15× (above).
+  13. ~~Dense bf16 GEMMs at 4–128 tokens~~: done, `WO_A=1 DENSE_GEMM=1`, TPOT 1.3–3.6 ms
+      lower from 4 users up (above). Left at 32 users: MXFP4 expert GEMMs (`matmul_ogs`,
+      ~10 ms of 54), mHC `hc_prenorm` (3.8 ms), all-reduce (3.8 ms).
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -930,6 +994,10 @@ needles 2/2, no garbage.
 | `test_sparse_split.py`, `run_sparse_split_test.sh` | split-K vs fallback decode per layer type and batch, split-count sweep |
 | `plugin/lumi_dsv4_debug/sparse_decode.py` | the V4.1 port's sparse decode kernel, hooked into stock 0.26 (`DSV4_SPARSE_DECODE`) |
 | `test_sparse_decode.py`, `run_sparse_decode_test.sh` | that kernel vs the fallback and split-K: accuracy, µs per call by layer type |
+| `plugin/lumi_dsv4_debug/wo_a.py` | `wo_a` (`rocm_inv_rope_einsum`) as `wvSplitK` up to 3 tokens, `score_mm` above (`DSV4_WO_A`) |
+| `test_wo_a.py`, `run_wo_a_test.sh` | `wo_a` sweep vs einsum / `F.linear` / vLLM, hook vs stock, split-K sum Triton vs torch |
+| `plugin/lumi_dsv4_debug/dense_gemm.py` | bf16 dense linears at 2–128 tokens via `score_mm`, per-shape tiles (`DSV4_DENSE_GEMM`) |
+| `test_dense_gemm.py`, `run_dense_gemm_test.sh` | tile sweep against vLLM's ROCm GEMM dispatch for the per-rank dense shapes |
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
