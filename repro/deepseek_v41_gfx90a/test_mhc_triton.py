@@ -89,35 +89,52 @@ def timeit(fn, iters=20):
     return start.elapsed_time(end) / iters
 
 
+import itertools  # noqa: E402
+
 import lumi_dsv41.mhc_triton as mt  # noqa: E402
 
-for t in (1, 32, 96, 192, 384):
+print("4. prenorm GEMM paths inside the delayed pre (whole call, ms): per-token split-K, "
+      "torch GEMM, tiled fp32-MFMA (best config)")
+TILED = list(itertools.product((16, 32, 64), (32, 64, 128), (512, 1024, 2048, 4096), (4, 8)))
+for t in (16, 32, 96, 192, 384, 768):
     residual = torch.randn(t, HC, H, device=dev).bfloat16()
     fn = torch.randn(HC3, HC * H, device=dev) * 0.02
     scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5
     pre_mix = torch.rand(t, HC, device=dev) + 0.1
     args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
-    a = timeit(lambda: ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix))
-    b = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
-    # the prenorm GEMM path: split-K Triton forced vs the torch GEMM (served above 64 tokens)
-    saved = mt.GEMM_MAX_TOKENS
-    mt.GEMM_MAX_TOKENS = 1 << 20
-    r_sk = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
-    b_sk = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
-    mt.GEMM_MAX_TOKENS = 0
-    r_mm = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
-    b_mm = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
-    mt.GEMM_MAX_TOKENS = saved
     want = ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix)
-    errs = [rel(x, y) for x, y in zip(r_sk, want)]
-    if max(errs) > 1e-4:
-        failures.append(f"split-K T={t}: {errs}")
-    print(f"  T={t:>3}: prenorm GEMM split-K {b_sk:6.3f}  torch GEMM {b_mm:6.3f}  "
-          f"(split-K max rel err {max(errs):.1e})")
-    x = torch.randn(t, H, device=dev).bfloat16()
-    post, comb = torch.rand(t, HC, 1, device=dev), torch.rand(t, HC, HC, device=dev)
-    c = timeit(lambda: ref.mhc_post_torch(x, residual, post, comb))
-    d = timeit(lambda: mhc_post_triton(x, residual, post, comb))
-    print(f"  T={t:>2}: pre torch {a:6.3f}  triton {b:6.3f}   post torch {c:6.3f}  triton {d:6.3f}")
+    saved = (mt.GEMM_MAX_TOKENS, mt.TILED_MIN_TOKENS, mt.TILED_CFG)
+    mt.TILED_MIN_TOKENS = None
+    mt.GEMM_MAX_TOKENS = 1 << 20
+    t_sk = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.GEMM_MAX_TOKENS = 0
+    t_mm = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.TILED_MIN_TOKENS = 1
+    times = {}
+    for cfg in TILED:
+        mt.TILED_CFG = cfg
+        try:
+            got = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+        except Exception as e:  # out of resources
+            continue
+        err = max(rel(x, y) for x, y in zip(got, want))
+        if err > 1e-4:
+            failures.append(f"tiled {cfg} T={t}: {err:.1e}")
+            continue
+        times[cfg] = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    # layer-0 form (x = embedding, K = hidden), with the best config
+    best = min(times, key=times.get)
+    mt.TILED_CFG = best
+    x0 = torch.randn(t, H, device=dev).bfloat16()
+    fn0 = torch.randn(HC3, H, device=dev) * 0.02
+    a0 = (residual, fn0, scale, base, *EPS[:3], EPS[3], SK)
+    e0 = max(rel(x, y) for x, y in zip(mhc_pre_delayed_triton(*a0, x=x0),
+                                       ref.mhc_pre_delayed_torch(*a0, x=x0)))
+    if e0 > 1e-4:
+        failures.append(f"tiled layer0 T={t}: {e0:.1e}")
+    mt.GEMM_MAX_TOKENS, mt.TILED_MIN_TOKENS, mt.TILED_CFG = saved
+    top = sorted(times, key=times.get)[:3]
+    print(f"  T={t:4d}: split-K {t_sk:6.3f}  torch {t_mm:6.3f}  tiled {times[best]:6.3f} {best}  "
+          + " ".join(f"{c}:{times[c]:.3f}" for c in top[1:]) + f"  (layer0 err {e0:.1e})")
 
 print("FAILED:", failures or "none")

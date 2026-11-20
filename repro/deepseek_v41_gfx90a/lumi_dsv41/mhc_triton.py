@@ -49,6 +49,42 @@ def _prenorm_gemm_kernel(
 
 
 @triton.jit
+def _prenorm_gemm_tiled_kernel(
+    x_ptr, fn_ptr, mix_ptr, sqr_ptr, num_tokens, stride_xt, K,
+    HC3: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    """Program (token block m, split s): x[m-block, chunk] @ fn[:, chunk].T with an fp32
+    matrix-core dot (IEEE, no bf16/tf32 rounding of fn), plus sum x^2 over the chunk, into
+    mix[s, rows, :] and sqr[s, rows]. The per-token kernel above is a vector sum per token,
+    so its cost grows with T; this one reads fn once per token block."""
+    pm = tl.program_id(0)
+    s = tl.program_id(1)
+    rows = pm * BLOCK_M + tl.arange(0, BLOCK_M)
+    rmask = rows < num_tokens
+    n = tl.arange(0, BLOCK_N)
+    nmask = n < HC3
+    kk = tl.arange(0, BLOCK_K)
+    acc = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+    sq = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for k0 in tl.range(0, CHUNK, BLOCK_K):
+        k = s * CHUNK + k0 + kk
+        xk = tl.load(x_ptr + rows.to(tl.int64)[:, None] * stride_xt + k[None, :],
+                     mask=rmask[:, None], other=0.0).to(tl.float32)
+        f = tl.load(fn_ptr + n[None, :] * K + k[:, None], mask=nmask[None, :], other=0.0)
+        acc = tl.dot(xk, f, acc, input_precision="ieee")
+        sq += tl.sum(xk * xk, 1)
+    tl.store(mix_ptr + (s * num_tokens + rows)[:, None] * HC3 + n[None, :], acc,
+             mask=rmask[:, None] & nmask[None, :])
+    tl.store(sqr_ptr + s * num_tokens + rows, sq, mask=rmask)
+
+
+# Tiled prenorm GEMM from this many tokens on (None: off); (BLOCK_M, BLOCK_K, CHUNK, warps).
+TILED_MIN_TOKENS = None
+TILED_CFG = (32, 64, 1024, 4)
+
+
+@triton.jit
 def _pre_delayed_kernel(
     mix_ptr, sqr_ptr, scale_ptr, base_ptr, res_ptr, carried_ptr,
     post_ptr, comb_ptr, next_pre_ptr, out_ptr,
@@ -143,7 +179,19 @@ def mhc_pre_delayed_triton(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
     assert hidden % BLOCK_H == 0 and fn.shape[0] == hc3
     src = residual.reshape(t, hc * hidden) if x is None else x  # a view when contiguous
     k = src.shape[-1]
-    if t <= GEMM_MAX_TOKENS and k % GEMM_CHUNK == 0 and fn.is_contiguous():
+    bm, bk, chunk, warps = TILED_CFG
+    if (TILED_MIN_TOKENS is not None and t >= TILED_MIN_TOKENS and k % chunk == 0
+            and fn.is_contiguous() and fn.dtype == torch.float32):
+        src = _rows(src)
+        splits = k // chunk
+        mixes = torch.empty(splits, t, hc3, dtype=torch.float32, device=dev)
+        sqrsum = torch.empty(splits, t, dtype=torch.float32, device=dev)
+        _prenorm_gemm_tiled_kernel[(triton.cdiv(t, bm), splits)](
+            src, fn, mixes, sqrsum, t, src.stride(0), k,
+            HC3=hc3, BLOCK_M=bm, BLOCK_N=triton.next_power_of_2(hc3), BLOCK_K=bk,
+            CHUNK=chunk, num_warps=warps,
+        )
+    elif t <= GEMM_MAX_TOKENS and k % GEMM_CHUNK == 0 and fn.is_contiguous():
         src = _rows(src)
         splits = k // GEMM_CHUNK
         mixes = torch.empty(splits, t, hc3, dtype=torch.float32, device=dev)
