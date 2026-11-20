@@ -5,7 +5,8 @@ a bf16 output, tile-swept per shape and token count. Weights cycled from HBM (>=
 
 Per-rank shapes at TP=8, (N, K): fused wq_a+wkv (replicated) 1536 x 4096; wq_b and wo_b
 4096 x 1024; shared expert w1+w3 512 x 4096, w2 4096 x 256; indexer wq_b 1024 x 1024;
-wo_a 1024 x 4096. Prints a BF16_CONFIGS table with the entries where Triton wins by > 5 %.
+wo_a 1024 x 4096. Prints a BF16_CONFIGS table: per swept size the Triton tile, or None where it does not win by
+> 5 %.
 
     sbatch repro/dsv4_flash_debug/run_dense_gemm_test.sh
 """
@@ -50,8 +51,7 @@ for name, (N, K) in SHAPES.items():
         err = ((score_mm(x, ws[0], cfg, out_dtype=torch.bfloat16).double() - ref).abs().max()
                / ref.abs().max()).item()
         win = t_t < 0.95 * t_v
-        if win:
-            rows.append((M, cfg))
+        rows.append((M, cfg if win else None))
         total.setdefault(M, [0.0, 0.0])
         total[M][0] += t_v
         total[M][1] += min(t_v, t_t)

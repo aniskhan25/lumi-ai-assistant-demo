@@ -40,6 +40,8 @@ DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel wit
 DSV4_MOE_SMALL=1     MoE at decode sizes: pack_bitmatrix with 16-row blocks, expert GEMM
                      block_n / split_k by token count (moe_small.py).
 DSV4_GATE_GEMM=1     MoE router GEMM (fp32 logits) via score_gemm.score_mm (moe_small.py).
+DSV4_DENSE_GEMM=1    Dense bf16 GEMMs at decode sizes via score_gemm's Triton kernel (bf16 out)
+                     where it beats vLLM's ROCm dispatch, per shape and size (dense_gemm.py).
 DSV4_WO_A=1          Attention wo_a GEMM (rocm_inv_rope_einsum) via wvSplitK at 1-3 tokens and
                      score_gemm's Triton kernel with bf16 output at 4-128 (wo_a.py).
 DSV4_GRAPH_DIFF=1    Debug: after each graph replay rerun the step eagerly and log the first
@@ -280,6 +282,11 @@ def register() -> None:
 
         moe_small.install_gate()
         _log("DSV4_GATE_GEMM=1: MoE router GEMM via score_mm (fp32 logits)")
+    if os.environ.get("DSV4_DENSE_GEMM") == "1":  # before BF16_LINEAR binds the GEMM
+        from . import dense_gemm
+
+        dense_gemm.install()
+        _log("DSV4_DENSE_GEMM=1: dense bf16 GEMMs at decode sizes via Triton where faster")
     if os.environ.get("DSV4_BF16_LINEAR") == "1":
         from . import bf16_linear
 
