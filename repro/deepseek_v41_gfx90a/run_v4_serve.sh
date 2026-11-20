@@ -299,12 +299,19 @@ if [ "${BENCH:-0}" = 1 ]; then
     done
   done
 fi
+# PROFILE_PREFILL=N: profile one prefill of an ~N-token prompt instead of decode
+# (profile_prefill.py); the trace goes to profile/c1.
 if [ "${PROFILE:-0}" = 1 ]; then
   for c in ${PROFILE_CONCURRENCIES:-1 32}; do
     echo "=== profile c=${c} ==="
+    if [ -n "${PROFILE_PREFILL:-}" ]; then
+      "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_prefill.py" \
+        "http://127.0.0.1:${PORT}" dsv4 "${PROFILE_PREFILL}" || STATUS=1
+    else
     "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_decode.py" \
       "http://127.0.0.1:${PORT}" dsv4 "${c}" "${PROFILE_SECONDS:-5}" \
       "$([ "${BENCH_DATA:-random}" = gsm8k ] && echo "${LOG}/bench_gsm8k.jsonl" || true)" || STATUS=1
+    fi
     sleep 20   # traces are written after /stop_profile returns
     mkdir -p "${PROF_DIR}/c${c}"
     find "${PROF_DIR}" -maxdepth 1 -type f -exec mv {} "${PROF_DIR}/c${c}/" \;
