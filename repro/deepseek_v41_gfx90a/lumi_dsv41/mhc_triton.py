@@ -80,8 +80,12 @@ def _prenorm_gemm_tiled_kernel(
 
 
 # Tiled prenorm GEMM from this many tokens on (None: off); (BLOCK_M, BLOCK_K, CHUNK, warps).
-TILED_MIN_TOKENS = None
-TILED_CFG = (32, 64, 1024, 4)
+# test_mhc_triton.py section 4 (job 23882347), whole delayed-pre call: per-token split-K /
+# torch GEMM / tiled = 0.154 / 0.201 / 0.100 ms at 192 tokens, 0.297 / 0.293 / 0.163 at 384,
+# 0.577 / 0.548 / 0.293 at 768; all three ~0.1 ms below 100 tokens. DSpark's verify batches
+# (6 tokens per sequence) are 96-384 rows at 16-64 users.
+TILED_MIN_TOKENS = 96
+TILED_CFG = (64, 64, 512, 4)
 
 
 @triton.jit
