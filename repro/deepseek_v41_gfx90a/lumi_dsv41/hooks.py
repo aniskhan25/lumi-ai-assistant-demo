@@ -587,6 +587,20 @@ def _chunked_mqa_logits(module) -> None:
     module.fp8_mqa_logits_torch = fp8_mqa_logits_torch
 
 
+def _prefill_logits_triton(module) -> None:
+    """DSV41_PREFILL_LOGITS=1: the indexer's prefill logits (fp8_mqa_logits_torch, the
+    no-aiter fallback of rocm_fp8_mqa_logits) in one Triton kernel (mqa_logits.py) instead
+    of torch einsum + elementwise passes + a reduction (~85 ms of each 2048-token prefill
+    chunk at 16k context, job 23898197). Replaces the row-chunked version above."""
+    import os
+
+    if os.environ.get("DSV41_PREFILL_LOGITS") != "1":
+        return
+    from .mqa_logits import fp8_mqa_logits_triton
+
+    module.fp8_mqa_logits_torch = fp8_mqa_logits_triton
+
+
 # (max_num_seqs, num_speculative_tokens), set by the model's __init__ (model.py).
 SERVING_LIMITS: tuple[int, int] | None = None
 
@@ -935,7 +949,8 @@ VENDORED_HOOKS = {
     "vllm.models.deepseek_v41.common.engram": [_debug_engram],
     "vllm.model_executor.layers.mhc": [_mhc_no_tilelang, _mhc_triton],
     "vllm.v1.attention.ops.rocm_aiter_mla_sparse": [
-        _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _decode_rows_bound, _decode_inv_rope,
+        _indexer_graph_pad, _indexer_op, _chunked_mqa_logits, _prefill_logits_triton,
+        _decode_rows_bound, _decode_inv_rope,
         _paged_logits_unshuffle, _paged_logits_triton, _sparse_split, _sparse_decode],
     "vllm.model_executor.layers.sparse_attn_indexer": [_indexer_gate],
     "vllm.models.deepseek_v41.attention": [_v41_attention],

@@ -116,6 +116,8 @@ if [ "${V41:-0}" = 1 ]; then
   # SPARSE_DECODE=1: lumi_dsv41/sparse_decode.py for all decode batch sizes (wraps the
   # SPARSE_SPLIT gate when both are set, so it wins)
   export DSV41_SPARSE_DECODE="${SPARSE_DECODE:-0}"
+  # PREFILL_LOGITS=1: the indexer's prefill logits in Triton (lumi_dsv41/mqa_logits.py)
+  export DSV41_PREFILL_LOGITS="${PREFILL_LOGITS:-0}"
   # CUSTOM_AR=1 comes from the V4 plugin (custom_ar.py): model-independent.
   # MOE_SMALL=1: only moe_small's pack_bitmatrix row blocks (shape-free); its expert GEMM
   # tiles are for V4's TP shapes (N 512 per rank), V4.1 runs whole experts under EP.
