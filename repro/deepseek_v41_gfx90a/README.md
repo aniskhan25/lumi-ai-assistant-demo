@@ -8,8 +8,9 @@ port work and before downloading its 475 GiB.
 > and kernels retuned for its 6-token verify batches: 64.5 tok/s at 1 user (job 23871589);
 > 501.3 / 684.2 / 876.7 at 16 / 32 / 64 users in steady state (4 prompts per slot, job
 > 23895024); 970 at 128 users with `--max-num-seqs 128`. Natural prompts (GSM8K questions),
-> 1.7–2.0× the recipe without DSpark. GSM8K 98–99 %, needles. KV cache 2.24M tokens. Prefill (time to first token) 1.32 / 4.86 / 9.16 s at 4k / 16k / 30k
-> tokens after the Triton indexer logits and `SPARSE_PREFILL=1` (job 23900437).**
+> 1.7–2.0× the recipe without DSpark. GSM8K 98–99 %, needles. KV cache 2.24M tokens. Prefill (time to first token)
+> 1.19 / 4.35 / 8.07 s at 4k / 16k / 30k after the Triton indexer logits,
+> `SPARSE_PREFILL=1`, blocked FP8 rounding and prefill MoE tiles (job 23900916).**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -591,7 +592,17 @@ messages), MoE 75 ms, mHC ~50 ms, FP8 rounding 30 ms.
 | `PREFILL_LOGITS=1` (job 23900387) | 1.51 s | 5.90 s | 10.92 s |
 | **+ `SPARSE_PREFILL=1`** (job 23900437) | **1.32 s** | **4.86 s** | **9.16 s** |
 
-−21 / −29 / −34 %; GSM8K 98.5 %, sanity 5/5, needles at 2.1k and 16.8k.
+| **+ blocked FP8 rounding, MoE tiles to 8192 tokens** (job 23900916) | **1.19 s** | **4.35 s** | **8.07 s** |
+
+−21 / −29 / −34 % after the first two, −28 / −36 / −42 % in all; GSM8K 98.5 / 99.0 %, sanity
+5/5, needles at 2.1k and 16.8k. The last row: the FP8 activation rounding launched one
+1-warp program per 32-column group (V4.1's 32×32 blocks), mostly launch overhead; a blocked
+kernel (2048 columns a program, per-group maxima, the same arithmetic; V4 plugin
+`bf16_linear.py`) is bit-identical over every case of `test_fp8_round.py` and 438 → 45 µs at
+2048 rows, 84 → 11 at 384, 8.9 → 2.8 at 32 (job 23900869). MoE gate/up with block_n 128 /
+split_k 1 is also 13–14 % faster at 1024–2048 tokens (job 23900870), so `MOE_TILES` covers
+prefill chunks too. mHC at prefill sizes is already on the tiled path (0.71 ms a call at 2048
+tokens, twice the alternatives; job 23900871).
 
 Decode at 1 user with DSpark (profile job 23898196) is host/rank-skew bound rather than
 GPU bound: all-reduces wait ~2 ms each in the draft step (12 a step) and ~0.2 ms in the
