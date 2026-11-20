@@ -18,7 +18,10 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-BLOCK_M, BLOCK_N, NUM_WARPS = 64, 64, 4
+# test_mqa_logits.py (job 23900362), 2048 query rows: torch 4.5 / 18.2 / 37.8 / 68.1 ms ->
+# 0.33 / 1.90 / 4.03 / 7.50 ms at 2k / 8k / 16k / 30k keys; same mask, max rel err 2e-7,
+# top-512 overlap >= 99.96 %.
+BLOCK_M, BLOCK_N, NUM_WARPS = 32, 128, 4
 
 
 @triton.jit
