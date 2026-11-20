@@ -156,6 +156,104 @@ def _fused_post_prenorm_kernel(
     tl.store(sqr_ptr + s * num_tokens + rows, sq, mask=rmask)
 
 
+@triton.jit
+def _gates(mul_ptr, sqr_ptr, scale_ptr, base_ptr, t, num_tokens, n_splits, sk_repeat, inv_k,
+           rms_eps, pre_eps, sk_eps, post_mult, HC: tl.constexpr, ALL: tl.constexpr):
+    """Sum the prenorm splits for token t in a runtime loop; return pre and (ALL) post and the
+    Sinkhorn-normalised comb, iterated in a runtime loop: the code stays small."""
+    HC3: tl.constexpr = HC * (2 + HC)
+    j = tl.arange(0, HC)
+    jk = j[:, None] * HC + j[None, :]
+    sq = tl.load(sqr_ptr + t)
+    m_pre = tl.load(mul_ptr + t * HC3 + j)
+    m_post = tl.zeros([HC], dtype=tl.float32)
+    m_comb = tl.zeros([HC, HC], dtype=tl.float32)
+    if ALL:
+        m_post = tl.load(mul_ptr + t * HC3 + HC + j)
+        m_comb = tl.load(mul_ptr + t * HC3 + 2 * HC + jk)
+    for s in range(1, n_splits):
+        row = (s * num_tokens + t) * HC3
+        sq += tl.load(sqr_ptr + s * num_tokens + t)
+        m_pre += tl.load(mul_ptr + row + j)
+        if ALL:
+            m_post += tl.load(mul_ptr + row + HC + j)
+            m_comb += tl.load(mul_ptr + row + 2 * HC + jk)
+    rms = tl.rsqrt(sq * inv_k + rms_eps)
+    pre = tl.sigmoid(m_pre * rms * tl.load(scale_ptr) + tl.load(base_ptr + j)) + pre_eps
+    post = tl.sigmoid(m_post * rms * tl.load(scale_ptr + 1) + tl.load(base_ptr + HC + j)) * post_mult
+    cm = m_comb
+    if ALL:
+        cm = m_comb * rms * tl.load(scale_ptr + 2) + tl.load(base_ptr + 2 * HC + jk)
+        cm = tl.exp(cm - tl.max(cm, 1)[:, None])
+        cm = cm / tl.sum(cm, 1)[:, None] + sk_eps
+        cm = cm / (tl.sum(cm, 0)[None, :] + sk_eps)
+        for _ in range(sk_repeat - 1):
+            cm = cm / (tl.sum(cm, 1)[:, None] + sk_eps)
+            cm = cm / (tl.sum(cm, 0)[None, :] + sk_eps)
+    return pre, post, cm
+
+
+@triton.jit
+def _big_fuse_loop_kernel(
+    mul_ptr, sqr_ptr, scale_ptr, base_ptr, res_ptr, post_ptr, comb_ptr, out_ptr,
+    num_tokens, n_splits, sk_repeat, stride_rt, stride_rm, inv_k,
+    rms_eps, pre_eps, sk_eps, post_mult,
+    H: tl.constexpr, HC: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """mhc_fix's big fuse with runtime loops over the splits and the Sinkhorn iterations
+    instead of unrolled ones. Block 0 also writes post and comb."""
+    t = tl.program_id(0).to(tl.int64)
+    hb = tl.program_id(1)
+    j = tl.arange(0, HC)
+    jk = j[:, None] * HC + j[None, :]
+    if hb == 0:
+        pre, post, cm = _gates(mul_ptr, sqr_ptr, scale_ptr, base_ptr, t, num_tokens, n_splits,
+                               sk_repeat, inv_k, rms_eps, pre_eps, sk_eps, post_mult, HC, True)
+        tl.store(post_ptr + t * HC + j, post)
+        tl.store(comb_ptr + t * HC * HC + jk, cm)
+    else:
+        pre, post, cm = _gates(mul_ptr, sqr_ptr, scale_ptr, base_ptr, t, num_tokens, n_splits,
+                               sk_repeat, inv_k, rms_eps, pre_eps, sk_eps, post_mult, HC, False)
+    offs = hb * BLOCK + tl.arange(0, BLOCK)
+    x = tl.load(res_ptr + t * stride_rt + j[:, None] * stride_rm + offs[None, :]).to(tl.float32)
+    tl.store(out_ptr + t * H + offs, tl.sum(pre[:, None] * x, 0).to(tl.bfloat16))
+
+
+@triton.jit
+def _gates_kernel(
+    mul_ptr, sqr_ptr, scale_ptr, base_ptr, pre_ptr, post_ptr, comb_ptr,
+    num_tokens, n_splits, sk_repeat, inv_k, rms_eps, pre_eps, sk_eps, post_mult,
+    HC: tl.constexpr,
+):
+    """One program per token: pre, post and comb (split variant, step 1)."""
+    t = tl.program_id(0).to(tl.int64)
+    j = tl.arange(0, HC)
+    jk = j[:, None] * HC + j[None, :]
+    pre, post, cm = _gates(mul_ptr, sqr_ptr, scale_ptr, base_ptr, t, num_tokens, n_splits,
+                           sk_repeat, inv_k, rms_eps, pre_eps, sk_eps, post_mult, HC, True)
+    tl.store(pre_ptr + t * HC + j, pre)
+    tl.store(post_ptr + t * HC + j, post)
+    tl.store(comb_ptr + t * HC * HC + jk, cm)
+
+
+@triton.jit
+def _collapse_kernel(pre_ptr, res_ptr, out_ptr, stride_rt, stride_rm,
+                     H: tl.constexpr, HC: tl.constexpr, BLOCK: tl.constexpr):
+    """layer_input[t, h] = sum_j pre[t, j] * res[t, j, h] (split variant, step 2)."""
+    t = tl.program_id(0).to(tl.int64)
+    hb = tl.program_id(1)
+    j = tl.arange(0, HC)
+    pre = tl.load(pre_ptr + t * HC + j)
+    offs = hb * BLOCK + tl.arange(0, BLOCK)
+    x = tl.load(res_ptr + t * stride_rt + j[:, None] * stride_rm + offs[None, :]).to(tl.float32)
+    tl.store(out_ptr + t * H + offs, tl.sum(pre[:, None] * x, 0).to(tl.bfloat16))
+
+
+# Big-fuse step: "static" (mhc_fix's kernel, splits and Sinkhorn unrolled), "loop" (the same
+# with runtime loops), "split" (a per-token gates kernel, then the collapse).
+BF_KERNEL = "static"
+
+
 # Per decode-sized token count (first row with m_max >= T): how to run the prenorm GEMM.
 #   ("rows", CHUNK, BK, warps)            post kernel, then the per-token split-K GEMM
 #   ("tiled", BLOCK_M, BLOCK_K, CHUNK, warps)  post kernel, then the tiled split-K GEMM
@@ -218,6 +316,23 @@ def _big_fuse(mix, sqr, hc_scale, hc_base, residual, hidden, rms_eps, hc_pre_eps
     post = torch.empty(t, HC, dtype=torch.float32, device=dev)
     comb = torch.empty(t, HC * HC, dtype=torch.float32, device=dev)
     layer_input = torch.empty(t, hidden, dtype=torch.bfloat16, device=dev)
+    inv_k = 1.0 / (HC * hidden)
+    if BF_KERNEL == "loop":
+        _big_fuse_loop_kernel[(t, hidden // BLOCK_H)](
+            mix, sqr, hc_scale, hc_base, residual, post, comb, layer_input, t, mix.shape[0],
+            sinkhorn_repeat, residual.stride(0), residual.stride(1), inv_k, rms_eps, hc_pre_eps,
+            hc_sinkhorn_eps, hc_post_mult_value, H=hidden, HC=HC, BLOCK=BLOCK_H,
+            num_warps=warps)
+        return post, comb, layer_input
+    if BF_KERNEL == "split":
+        pre = torch.empty(t, HC, dtype=torch.float32, device=dev)
+        _gates_kernel[(t,)](
+            mix, sqr, hc_scale, hc_base, pre, post, comb, t, mix.shape[0], sinkhorn_repeat,
+            inv_k, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value, HC=HC, num_warps=1)
+        _collapse_kernel[(t, hidden // BLOCK_H)](
+            pre, residual, layer_input, residual.stride(0), residual.stride(1), H=hidden, HC=HC,
+            BLOCK=BLOCK_H, num_warps=warps)
+        return post, comb, layer_input
     _pre_big_fuse_kernel[(t, hidden // BLOCK_H)](
         mix, sqr, hc_scale, hc_base, residual, post, comb, layer_input, t,
         residual.stride(0), residual.stride(1), rms_eps, hc_pre_eps, hc_sinkhorn_eps,

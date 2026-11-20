@@ -19,5 +19,5 @@ module load Local-LAIF lumi-aif-singularity-bindings
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 # As served (hc_head_triton is a Triton kernel); TileLang does not use this knob.
 export AMDGCN_USE_BUFFER_OPS=0
-singularity exec "${CONTAINER}" python "${REPO}/repro/dsv4_flash_debug/test_mhc_fast.py" "${SNAPSHOT}" 2>&1 \
+MHC_PARTS="${MHC_PARTS:-1234}" singularity exec "${CONTAINER}" python "${REPO}/repro/dsv4_flash_debug/test_mhc_fast.py" "${SNAPSHOT}" 2>&1 \
   | grep -vE 'amdsmi|raw_cnt'
