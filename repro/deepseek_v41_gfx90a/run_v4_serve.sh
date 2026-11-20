@@ -58,6 +58,7 @@
 #                            superseded there by SPARSE_DECODE=1)
 #   SPARSE_SPLIT_MAX=16      ... (V4) for decode batches of at most this many queries
 #   CUSTOM_AR=copy|fence     vLLM custom all-reduce instead of RCCL (vLLM gates it to gfx94x/95x; 1 = copy)
+#   CUSTOM_AR_MAX_MB=N       largest message for it (vLLM: 8 MB; V4.1 prefill chunks are ~20 MB)
 #   SCORE_GEMM=1             compressor score GEMMs in Triton instead of hipBLASLt's fp32-MFMA kernel (plugin score_gemm.py)
 #   MOE_SMALL=1              MoE at decode sizes: pack_bitmatrix row block, expert GEMM tiles (plugin moe_small.py)
 #   GATE_GEMM=1              MoE router GEMM in Triton with fp32 logits (plugin moe_small.py)
@@ -139,7 +140,7 @@ fi
 if [ "${PLUGIN}" = 1 ]; then
   export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
-  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_SPARSE_SPLIT_MAX="${SPARSE_SPLIT_MAX:-16}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}" DSV4_MOE_SMALL="${MOE_SMALL:-0}" DSV4_GATE_GEMM="${GATE_GEMM:-0}"
+  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_SPARSE_SPLIT_MAX="${SPARSE_SPLIT_MAX:-16}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_CUSTOM_AR_MAX_MB="${CUSTOM_AR_MAX_MB:-}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}" DSV4_MOE_SMALL="${MOE_SMALL:-0}" DSV4_GATE_GEMM="${GATE_GEMM:-0}"
   PP_DIRS="${REPO}/repro/dsv4_flash_debug/plugin"
   [ "${V41:-0}" = 1 ] && PP_DIRS="${REPO}/repro/deepseek_v41_gfx90a:${PP_DIRS}"
   RUN+=(--env "PYTHONPATH=${PP_DIRS}:/opt/venv/lib/python3.12/site-packages")
