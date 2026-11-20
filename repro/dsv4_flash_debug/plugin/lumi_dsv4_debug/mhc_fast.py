@@ -15,6 +15,8 @@ all four streams, stores it, and multiplies the bf16-rounded result by the same 
 fn, as the reference does (mhc_post_torch, then mhc_pre_torch on its bf16 output).
 """
 
+import os
+
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -250,8 +252,15 @@ def _collapse_kernel(pre_ptr, res_ptr, out_ptr, stride_rt, stride_rm,
 
 
 # Big-fuse step: "static" (mhc_fix's kernel, splits and Sinkhorn unrolled), "loop" (the same
-# with runtime loops), "split" (a per-token gates kernel, then the collapse).
-BF_KERNEL = "static"
+# with runtime loops), "split" (a per-token gates kernel, then the collapse). In a decode step
+# other kernels run between calls and evict the instruction cache, and one program per token
+# then executes ~3,400 lines of unrolled code cold: served, the static kernel took 33 us a
+# call against 12 alone (graph profiles 23900445/6). With a GEMM, softmax and top-k between
+# calls (test_mhc_fast.py part 4, job 23900850), a whole fused post+pre call at 1 warp,
+# static -> loop: 47.1 -> 27.8 us at 2 tokens, 66.0 -> 39.6 at 32, 76.5 -> 47.2 at 64,
+# 73.6 -> 55.1 at 128; repeated alone the two are within 1-2 us. "split" is within a few us
+# of "loop" either way and launches one more kernel.
+BF_KERNEL = os.environ.get("DSV4_MHC_BF", "loop")
 
 
 # Per decode-sized token count (first row with m_max >= T): how to run the prenorm GEMM.
@@ -263,11 +272,11 @@ BF_KERNEL = "static"
 # 64, 114.6 -> 44.2 at 128; all three variants within 1e-4 of the torch references (the
 # served path 2e-4 to 1.3e-3). "fused" lost at every size (too few programs) and is unused.
 # Above 128 tokens (prefill chunks) vLLM's path.
+# Big-fuse warps: 1 for "loop", best at every size with other kernels between calls.
 CONFIGS = [
-    (8, ("rows", 1024, 256, 4), 2),
     (16, ("rows", 1024, 256, 4), 1),
-    (32, ("tiled", 16, 128, 512, 4), 2),
-    (48, ("tiled", 16, 64, 512, 4), 2),
+    (32, ("tiled", 16, 128, 512, 4), 1),
+    (48, ("tiled", 16, 64, 512, 4), 1),
     (96, ("tiled", 16, 128, 512, 4), 1),
     (128, ("tiled", 64, 64, 512, 4), 1),
 ]

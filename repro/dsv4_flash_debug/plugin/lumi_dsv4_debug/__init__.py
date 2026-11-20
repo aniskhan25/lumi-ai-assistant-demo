@@ -223,7 +223,7 @@ def register() -> None:
         from . import mhc_fast
 
         mhc_fast.install()
-        _log("DSV4_MHC_FAST=1: mHC post + split-K prenorm GEMM + big fuse in Triton at decode sizes")
+        _log(f"DSV4_MHC_FAST=1: mHC post + split-K prenorm GEMM + big fuse ({mhc_fast.BF_KERNEL}) in Triton at decode sizes")
     if os.environ.get("DSV4_MHC_NATIVE"):
         from . import mhc_fix
 
