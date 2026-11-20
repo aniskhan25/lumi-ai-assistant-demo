@@ -22,6 +22,9 @@ DSV4_MHC_FIX=triton|wave64
                      kernel (mhc_fix.py): a Triton kernel, or the TileLang one at 128 threads
                      split at 64 (it splits a 96-thread block at 32, i.e. inside a wavefront).
                      Exclusive with DSV4_TORCH_MHC.
+DSV4_MHC_FAST=1      With DSV4_MHC_FIX=triton: fused post+pre and pre at decode sizes as Triton
+                     kernels (post, split-K prenorm GEMM, big fuse; mhc_fast.py, from the V4.1
+                     port) instead of TileLang's post and one-split prenorm GEMM.
 DSV4_MHC_CHECK=1     Debug, eager only: log mHC calls whose outputs are non-finite or differ from
                      the torch/Triton reference (mhc_fix.install_check).
 DSV4_ROUTER_GUARD=1  nan_to_num the MoE gate logits before ROCm's top-k (router_guard.py):
@@ -214,6 +217,13 @@ def register() -> None:
 
         mhc_fix.install(mhc_mode)
         _log(f"DSV4_MHC_FIX={mhc_mode}: fused TileLang mHC with a corrected pre big-fuse kernel")
+    if os.environ.get("DSV4_MHC_FAST") == "1":
+        if mhc_mode != "triton":
+            raise ValueError("DSV4_MHC_FAST=1 needs DSV4_MHC_FIX=triton")
+        from . import mhc_fast
+
+        mhc_fast.install()
+        _log("DSV4_MHC_FAST=1: mHC post + split-K prenorm GEMM + big fuse in Triton at decode sizes")
     if os.environ.get("DSV4_MHC_NATIVE"):
         from . import mhc_fix
 

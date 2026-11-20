@@ -20,6 +20,7 @@
 #   EXTRA_VLLM_ARGS="..." sbatch ...                               # override/extend flags
 #   MORE_VLLM_ARGS="..."                                           # append flags, keep defaults
 #   PROBE=0 BENCH=1                                                # speed sweep instead of probe
+#   BENCH_DATA=gsm8k                                               # natural prompts, not random tokens
 #   COMPILE=1                                                      # CUDA graphs, not eager
 #   COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE TRITON_LOGITS=1        # also full decode graphs
 #   NO_ASYNC=1                                                     # --no-async-scheduling
@@ -58,6 +59,7 @@
 #                            sizes (plugin sparse_decode.py); replaces SPARSE_SPLIT
 #   WO_A=1                   attention wo_a GEMM via wvSplitK / Triton, not einsum (wo_a.py)
 #   DENSE_GEMM=1             dense bf16 GEMMs at decode sizes via Triton where faster (dense_gemm.py)
+#   MHC_FAST=1               with MHC_FIX=triton: mHC post + split-K prenorm GEMM in Triton (mhc_fast.py)
 #   CUSTOM_AR=copy|fence     vLLM custom all-reduce instead of RCCL (vLLM gates it to gfx94x/95x; 1 = copy)
 #   SCORE_GEMM=1             compressor score GEMMs in Triton instead of hipBLASLt's fp32-MFMA kernel (plugin score_gemm.py)
 #   MOE_SMALL=1              MoE at decode sizes: pack_bitmatrix row block, expert GEMM tiles (plugin moe_small.py)
@@ -88,13 +90,13 @@ PLUGIN=0; { [ "${TORCH_MHC:-0}" = 1 ] || [ -n "${MHC_FIX:-}" ]; } && PLUGIN=1
 if [ "${PLUGIN}" = 1 ]; then
   export DSV4_TORCH_MHC="${TORCH_MHC:-0}" DSV4_MHC_FIX="${MHC_FIX:-}" DSV4_MHC_CHECK="${MHC_CHECK:-0}" DSV4_MHC_NATIVE="${MHC_NATIVE:-}" DSV4_MHC_META="${MHC_META:-0}" DSV4_MHC_NANTRACE="${MHC_NANTRACE:-0}" DSV4_NANFILL="${NANFILL:-0}" DSV4_STACK_DIR="${LOG}/stacks" DSV4_INDEXER_GATE="${INDEXER_GATE:-0}"
   export DSV4_TRITON_PAGED_LOGITS="${TRITON_LOGITS:-0}" DSV4_PAGED_LOGITS_CHECK="${LOGITS_CHECK:-0}"
-  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_SPARSE_SPLIT_MAX="${SPARSE_SPLIT_MAX:-16}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}" DSV4_MOE_SMALL="${MOE_SMALL:-0}" DSV4_GATE_GEMM="${GATE_GEMM:-0}" DSV4_SPARSE_DECODE="${SPARSE_DECODE:-0}" DSV4_WO_A="${WO_A:-0}" DSV4_DENSE_GEMM="${DENSE_GEMM:-0}"
+  export DSV4_BF16_LINEAR="${BF16_LINEAR:-0}" DSV4_BF16_LINEAR_ACT="${BF16_ACT:-fp8}" DSV4_FP8_ROUND="${FP8_ROUND:-triton}" DSV4_ROUTER_GUARD="${ROUTER_GUARD:-1}" DSV4_GRAPH_DIFF="${GRAPH_DIFF:-0}" DSV4_SPARSE_SPLIT="${SPARSE_SPLIT:-0}" DSV4_SPARSE_SPLIT_MAX="${SPARSE_SPLIT_MAX:-16}" DSV4_CUSTOM_AR="${CUSTOM_AR:-0}" DSV4_SCORE_GEMM="${SCORE_GEMM:-0}" DSV4_MOE_SMALL="${MOE_SMALL:-0}" DSV4_GATE_GEMM="${GATE_GEMM:-0}" DSV4_SPARSE_DECODE="${SPARSE_DECODE:-0}" DSV4_WO_A="${WO_A:-0}" DSV4_DENSE_GEMM="${DENSE_GEMM:-0}" DSV4_MHC_FAST="${MHC_FAST:-0}"
   RUN+=(--env "PYTHONPATH=${REPO}/repro/dsv4_flash_debug/plugin:/opt/venv/lib/python3.12/site-packages")
 elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} SPARSE_DECODE=${SPARSE_DECODE:-0} WO_A=${WO_A:-0} DENSE_GEMM=${DENSE_GEMM:-0} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0} GATE_GEMM=${GATE_GEMM:-0} MTP=${MTP:-0} NUMA_BIND=${NUMA_BIND:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} SPARSE_DECODE=${SPARSE_DECODE:-0} WO_A=${WO_A:-0} DENSE_GEMM=${DENSE_GEMM:-0} MHC_FAST=${MHC_FAST:-0} BENCH_DATA=${BENCH_DATA:-random} CUSTOM_AR=${CUSTOM_AR:-0} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0} GATE_GEMM=${GATE_GEMM:-0} MTP=${MTP:-0} NUMA_BIND=${NUMA_BIND:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
@@ -174,12 +176,29 @@ fi
 # BENCH=1: streaming `vllm bench serve` sweep, as for Qwen3.8-Flash (repro/qwen38_flash_gfx90a)
 # so the numbers compare. Warm-up first: the first requests of an allocation pay one-time
 # kernel compilation. PROMPTS_PER_SLOT is small because eager V4 is slow (~37 tok/s at c=16).
+# BENCH_DATA=gsm8k (from the V4.1 branch): natural prompts instead of random tokens (GSM8K
+# test questions after the probe's, "solve step by step"), output capped at the workload's
+# length but allowed to end at EOS. Random-token prompts make MTP acceptance swing with any
+# numerical change (1.2-1.8 at 1 user between runs, jobs 23880589/90).
+if [ "${BENCH_DATA:-random}" = gsm8k ]; then
+  "${RUN[@]}" python -c "
+import json, sys, pandas as pd
+q = pd.read_parquet(sys.argv[1])['question'].tolist()[500:1012]
+with open(sys.argv[2], 'w') as f:
+    for x in q:
+        f.write(json.dumps({'prompt': x + ' Solve it step by step.'}) + '\n')
+" "${GSM8K}" "${LOG}/bench_gsm8k.jsonl"
+fi
 if [ "${BENCH:-0}" = 1 ]; then
   bench() {  # concurrency, prompts, input len, output len, result name
+    if [ "${BENCH_DATA:-random}" = gsm8k ]; then
+      DATA=(--dataset-name custom --dataset-path "${LOG}/bench_gsm8k.jsonl" --custom-output-len "$4")
+    else
+      DATA=(--dataset-name random --random-input-len "$3" --random-output-len "$4" --ignore-eos)
+    fi
     "${RUN[@]}" vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
       --base-url "http://127.0.0.1:${PORT}" --model dsv4 --tokenizer "${SNAPSHOT}" \
-      --tokenizer-mode deepseek_v4 --dataset-name random --random-input-len "$3" \
-      --random-output-len "$4" --ignore-eos --num-prompts "$2" --max-concurrency "$1" \
+      --tokenizer-mode deepseek_v4 "${DATA[@]}" --num-prompts "$2" --max-concurrency "$1" \
       --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
       --save-result --result-dir "${LOG}" --result-filename "$5.json" \
       | grep -E "Output token throughput|Mean TTFT|Median TPOT|P99 TPOT|Successful|Error" || true
