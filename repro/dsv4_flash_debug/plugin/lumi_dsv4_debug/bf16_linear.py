@@ -67,7 +67,9 @@ def _fp8_round_block_kernel(x_ptr, out_ptr, stride_xm, stride_om, eps, K,
     tl.store(out_ptr + m * stride_om + offs, y.to(tl.bfloat16), mask=mask)
 
 
-FP8_ROUND_BLOCK = 0  # columns per program in the blocked kernel; 0: per-group kernel (off until tested)
+FP8_ROUND_BLOCK = 2048  # columns per program in the blocked kernel; 0: per-group kernel
+# (test_fp8_round.py, job 23900869: bit-identical; 32-col groups at K=5120: 438 -> 45 us at
+# 2048 rows, 84 -> 11 at 384, 8.9 -> 2.8 at 32; 128-col groups 115 -> 46 at 2048)
 
 
 def fp8_round_triton(x2d: torch.Tensor, group: int, eps: float = 1e-10,
