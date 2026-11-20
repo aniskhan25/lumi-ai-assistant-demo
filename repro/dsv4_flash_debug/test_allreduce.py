@@ -45,16 +45,21 @@ if rank == 0:
     print("fence kernel:", "; ".join(ops))
 
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce  # noqa: E402
+
+HIDDEN_ENV = int(os.environ.get("AR_HIDDEN", 4096))
+SIZES_ENV = [int(x) for x in os.environ.get("AR_TOKENS", "1 4 16 32 64 128").split()]
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator  # noqa: E402
 
 nccl = PyNcclCommunicator(group=cpu_group, device=dev)
 type(current_platform).is_fully_connected = classmethod(lambda cls, ids: True)
-ca = CustomAllreduce(group=cpu_group, device=dev)
+ca = CustomAllreduce(group=cpu_group, device=dev,
+                     max_size=max(8 << 20, max(SIZES_ENV) * HIDDEN_ENV * 2 + (1 << 20)))
 assert not ca.disabled, "custom all-reduce did not initialise"
 xgmi_fence(fence_buf)  # compile before any capture
 
-HIDDEN, ITERS, STEPS = 4096, 20, 8
-SIZES = (1, 4, 16, 32, 64, 128)
+# AR_HIDDEN / AR_TOKENS: V4.1 is 5120 wide, and DSpark's verify batches reach 96-768 tokens.
+HIDDEN, ITERS, STEPS = int(os.environ.get("AR_HIDDEN", 4096)), 20, 8
+SIZES = tuple(int(x) for x in os.environ.get("AR_TOKENS", "1 4 16 32 64 128").split())
 
 
 def rccl(x):
@@ -75,7 +80,7 @@ def copied(x):
 
 
 VARIANTS = {"RCCL": rccl, "custom": custom, "fence": fenced, "copy": copied}
-junk = torch.zeros(8 << 20, device=dev, dtype=torch.bfloat16)  # 16 MB
+junk = torch.zeros(16 << 20, device=dev, dtype=torch.bfloat16)  # 32 MB, > the largest message
 
 
 def none(x):

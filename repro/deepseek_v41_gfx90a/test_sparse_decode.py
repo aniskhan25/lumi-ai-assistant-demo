@@ -123,11 +123,13 @@ for B, extra, vary, use_sink in itertools.product((1, 7, 32, 128), (0, 512), (Fa
             bad.append((B, extra, vary, use_sink, S, err))
     print(f"  B={B:3d} extra={extra:3d} ragged={vary:d} sink={use_sink:d}: last err {err:.1e}")
 
+# SD_SWEEP_B: DSpark verifies 6 tokens per sequence, so 16-128 users give 96-768 queries.
+SWEEP_B = [int(x) for x in os.environ.get("SD_SWEEP_B", "1 4 8 16 24 32 48 64 96 128").split()]
 print("2. GPU us per call (graph replay); config = (splits, BLOCK_K, warps, stages)")
 CONFIGS = list(itertools.product((1, 2, 4, 8, 16), (16,), (4,), (1,)))
 results = {}
 for layer, extra in (("SWA", 0), ("top-k", 512)):
-    for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
+    for B in SWEEP_B:
         q = torch.randn(B, H, HD, device=dev).bfloat16()
         mi, mp = ragged(B, 128, swa.shape[0] * BS)
         args = [q, swa, mi, mp, SCALE, sink, NOPE, ROPE]
@@ -159,7 +161,7 @@ for layer, extra in (("SWA", 0), ("top-k", 512)):
                             block_k=c[1], num_warps=c[2], num_stages=c[3], deq=1, **kw))
             print(f"         ablation at {c}: without the FP8 decode {t_nodeq:.1f} us")
 print("per-split-count best (top-k): for each B, the best time with S fixed")
-for B in (1, 4, 8, 16, 24, 32, 48, 64, 96, 128):
+for B in SWEEP_B:
     t = results[("top-k", B)]
     row = []
     for S in (1, 2, 4, 8, 16):
