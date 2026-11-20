@@ -181,6 +181,10 @@ def num_splits(num_queries: int, has_extra: bool) -> int:
     SWA-only layers (128), as a power of two. From test_sparse_decode.py's sweep (job
     23707915, BLOCK_K 16, 4 warps); within 10 % of the best split count at 1-128 queries."""
     target, cap = (512, 16) if has_extra else (256, 8)
+    if has_extra and num_queries > 128:
+        # DSpark verify batches (job 23896112): best 4 splits at 192 queries (473 vs 504 us
+        # with 2), 2 at 384 (874 vs 985 with 1), 1-2 from 512 on; ~1024 workgroups.
+        target = 1024
     s = max(1, min(cap, target // max(1, num_queries)))
     return 1 << (s.bit_length() - 1)
 
