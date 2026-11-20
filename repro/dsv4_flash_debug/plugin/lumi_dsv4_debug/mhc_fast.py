@@ -160,9 +160,18 @@ def _fused_post_prenorm_kernel(
 #   ("rows", CHUNK, BK, warps)            post kernel, then the per-token split-K GEMM
 #   ("tiled", BLOCK_M, BLOCK_K, CHUNK, warps)  post kernel, then the tiled split-K GEMM
 #   ("fused", BLOCK_M, CH, warps)         post and GEMM in one kernel
-# and the big-fuse kernel's warps. Filled from test_mhc_fast.py; None: vLLM's path.
+# and the big-fuse kernel's warps. From test_mhc_fast.py (job 23898369): one fused post+pre
+# call, served -> this, 19.2 -> 14.6 us at 2 tokens, 41.6 -> 25.1 at 32, 65.5 -> 34.7 at
+# 64, 114.6 -> 44.2 at 128; all three variants within 1e-4 of the torch references (the
+# served path 2e-4 to 1.3e-3). "fused" lost at every size (too few programs) and is unused.
+# Above 128 tokens (prefill chunks) vLLM's path.
 CONFIGS = [
-    (128, ("fused", 16, 128, 4), 4),
+    (8, ("rows", 1024, 256, 4), 2),
+    (16, ("rows", 1024, 256, 4), 1),
+    (32, ("tiled", 16, 128, 512, 4), 2),
+    (48, ("tiled", 16, 64, 512, 4), 2),
+    (96, ("tiled", 16, 128, 512, 4), 1),
+    (128, ("tiled", 64, 64, 512, 4), 1),
 ]
 
 
