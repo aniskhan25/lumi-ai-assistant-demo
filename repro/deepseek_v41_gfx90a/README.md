@@ -5,10 +5,10 @@ Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, b
 port work and before downloading its 475 GiB.
 
 > **Status (2026-11-20): with DSpark speculative decoding (`DSPARK=5`, V4.1's own drafter)
-> and kernels retuned for its 6-token verify batches: 64.5 / 446.3 / 621.5 / 754.4 tok/s at
-> 1 / 16 / 32 / 64 users on natural prompts (job 23871589), 1.7–2.0× the recipe without
-> DSpark (37.2 / 220.5 / 349.5 / 514.6, job 23864381); 970 tok/s at 128 users with
-> `--max-num-seqs 128`. GSM8K 98–99 %, needles. KV cache 2.24M tokens.**
+> and kernels retuned for its 6-token verify batches: 64.5 tok/s at 1 user (job 23871589);
+> 501.3 / 684.2 / 876.7 at 16 / 32 / 64 users in steady state (4 prompts per slot, job
+> 23895024); 970 at 128 users with `--max-num-seqs 128`. Natural prompts (GSM8K questions),
+> 1.7–2.0× the recipe without DSpark. GSM8K 98–99 %, needles. KV cache 2.24M tokens.**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -533,6 +533,21 @@ at 192, equal at 384). With `MOE_TILES` to 1024 tokens and mHC split-K to 256 (j
 23871589): **64.5 / 446.3 / 621.5 / 754.4 tok/s** at 1 / 16 / 32 / 64 users (−2 / **+19** /
 **+12** / 0 %), GSM8K 98.0 %, sanity 5/5, needles. 64 users did not move, although the
 gate/up sweep promised ~10 ms a step there; not investigated.
+
+**64 users, steady state, and a tiled mHC prenorm GEMM.** Graph profile at 64 users with
+DSpark (job 23880494): the extended MoE tile is in use (`matmul_ogs ...64x128x128`, 657 µs a
+call); a step is ~195 ms and yields ~211 tokens (~1,080 tok/s at full occupancy), while the
+sweep with 2 prompts per slot measured 754: requests ending at different lengths leave a long
+tail with fewer than 64 active. With `PROMPTS_PER_SLOT=4` (job 23882337): 560.5 / 830.2
+tok/s at 32 / 64 users. At 384 rows the mHC prenorm GEMM was back on the torch fallback
+(~12 ms a step): the split-K kernel is a vector sum per token. `_prenorm_gemm_tiled_kernel`
+(`mhc_triton.py`, from 96 tokens) does a token block per program with an fp32 matrix-core
+dot (IEEE, fn not rounded): exact against the reference (≤ 5e-7, layer-0 form included),
+whole delayed-pre call 0.154 → 0.100 ms at 192 tokens, 0.293 → 0.163 at 384, 0.548 → 0.293
+at 768 (job 23882347). Serving, 4 prompts per slot (job 23895024): **501.3 / 684.2 / 876.7
+tok/s at 16 / 32 / 64 users**, GSM8K 99.0 %, sanity 5/5, needles. +5.6 % at 64; the +22 % at
+32 overstates it (the baseline's 32-user phase ran first after warm-up, mean TTFT 2.8 s vs
+0.6 s here).
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
