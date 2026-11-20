@@ -96,7 +96,7 @@ import lumi_dsv41.mhc_triton as mt  # noqa: E402
 print("4. prenorm GEMM paths inside the delayed pre (whole call, ms): per-token split-K, "
       "torch GEMM, tiled fp32-MFMA (best config)")
 TILED = list(itertools.product((16, 32, 64), (32, 64, 128), (512, 1024, 2048, 4096), (4, 8)))
-for t in (16, 32, 96, 192, 384, 768):
+for t in [int(x) for x in __import__('os').environ.get('MHC_SWEEP_T', '16 32 96 192 384 768').split()]:
     residual = torch.randn(t, HC, H, device=dev).bfloat16()
     fn = torch.randn(HC3, HC * H, device=dev) * 0.02
     scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5

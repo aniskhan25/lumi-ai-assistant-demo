@@ -45,12 +45,45 @@ def _fp8_round_kernel(x_ptr, out_ptr, stride_xm, stride_om, eps, GROUP: tl.const
     tl.store(out_ptr + m * stride_om + offs, (q * s).to(tl.bfloat16))
 
 
-def fp8_round_triton(x2d: torch.Tensor, group: int, eps: float = 1e-10) -> torch.Tensor:
+@triton.jit
+def _fp8_round_block_kernel(x_ptr, out_ptr, stride_xm, stride_om, eps, K,
+                            GROUP: tl.constexpr, BLOCK: tl.constexpr):
+    """As _fp8_round_kernel, for BLOCK // GROUP groups of one row per program: one program
+    per (row, group) is mostly launch overhead with 32-column groups (V4.1's 32x32 blocks):
+    ~190 us for a 2048-row prefill chunk (job 23898197) where moving the data takes ~26."""
+    m = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < K
+    x = tl.load(x_ptr + m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
+    xg = tl.reshape(x, (BLOCK // GROUP, GROUP))
+    s = tl.maximum(tl.max(tl.abs(xg), 1), eps) / 448.0
+    v = tl.minimum(tl.maximum(xg / s[:, None], -448.0), 448.0)
+    bits = v.to(tl.int32, bitcast=True)
+    bits = (bits + 0x7FFFF + ((bits >> 20) & 1)) & -1048576
+    normal = bits.to(tl.float32, bitcast=True)
+    sub = ((v * 512.0 + 12582912.0) - 12582912.0) / 512.0
+    q = tl.where(tl.abs(v) < 0.015625, sub, normal)
+    y = tl.reshape(q * s[:, None], (BLOCK,))
+    tl.store(out_ptr + m * stride_om + offs, y.to(tl.bfloat16), mask=mask)
+
+
+FP8_ROUND_BLOCK = 0  # columns per program in the blocked kernel; 0: per-group kernel (off until tested)
+
+
+def fp8_round_triton(x2d: torch.Tensor, group: int, eps: float = 1e-10,
+                     block: int | None = None) -> torch.Tensor:
     """x2d (M, K) bf16 -> bf16 rounded through FP8 e4m3 per `group` columns, in one kernel."""
     m, k = x2d.shape
     assert k % group == 0 and x2d.stride(-1) == 1
     out = torch.empty(m, k, dtype=torch.bfloat16, device=x2d.device)
-    if m:
+    block = FP8_ROUND_BLOCK if block is None else block
+    if m and block:
+        blk = min(block, triton.next_power_of_2(k))
+        blk = max(blk, group)
+        _fp8_round_block_kernel[(m, triton.cdiv(k, blk))](
+            x2d, out, x2d.stride(0), out.stride(0), eps, k, GROUP=group, BLOCK=blk,
+            num_warps=4 if blk >= 512 else 1)
+    elif m:
         _fp8_round_kernel[(m, k // group)](x2d, out, x2d.stride(0), out.stride(0), eps,
                                            GROUP=group, num_warps=1)
     return out

@@ -22,7 +22,10 @@ from lumi_dsv4_debug.bf16_linear import fp8_round_torch, fp8_round_triton  # noq
 
 dev = torch.device("cuda")
 torch.manual_seed(0)
-GROUP = 128
+import os  # noqa: E402
+
+GROUPS = [int(g) for g in os.environ.get("FP8_GROUPS", "128").split()]
+GROUP = GROUPS[0]
 
 
 def graph_us(fn, reps=20):
@@ -74,6 +77,29 @@ for k in (4096, 1024, 256):
                 bad += 1
                 print(f"  FAIL K={k} M={m} {kind}: {n} of {got.numel()} differ, max abs diff "
                       f"{diff.nan_to_num(0).max().item():.3g}")
+print(f"  {'all identical' if not bad else f'{bad} cases differ'}")
+
+# Blocked kernel (several groups per program) vs the served path, every group size, the
+# widths of V4 (4096) and V4.1 (5120), decode and prefill rows; then time per call.
+print("\nblocked kernel: bit-exactness and us per call, per-group kernel vs blocked")
+for group in GROUPS:
+    for k in (5120, 4096, 1024):
+        for m in (1, 32, 384, 2048):
+            for kind in ("normal", "outliers", "tiny", "zeros", "wide"):
+                if k % group or (kind == "zeros" and k < group):
+                    continue
+                x = inputs(m, k, kind)
+                want = fp8_round_torch(x.contiguous(), group)
+                got = fp8_round_triton(x, group, block=1024)
+                n = int((got != want).sum()) - int((torch.isnan(got) & torch.isnan(want)).sum())
+                if n:
+                    bad += 1
+                    print(f"  FAIL blocked group={group} K={k} M={m} {kind}: {n} differ")
+            x = inputs(m, k, "normal")
+            t0 = graph_us(lambda: fp8_round_triton(x, group, block=0))
+            tb = {b: graph_us(lambda: fp8_round_triton(x, group, block=b)) for b in (256, 1024, 2048)}
+            print(f"  group={group:<4} K={k:<5} M={m:<5} per-group {t0:8.1f}  blocked "
+                  + "  ".join(f"{b}:{t:7.1f}" for b, t in tb.items()))
 print(f"  {'all identical' if not bad else f'{bad} cases differ'}")
 
 print("\ntime per call (us, graph replay): served path (2 kernels) vs fused")
