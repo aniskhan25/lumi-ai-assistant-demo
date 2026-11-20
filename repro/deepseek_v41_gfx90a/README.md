@@ -8,7 +8,8 @@ port work and before downloading its 475 GiB.
 > and kernels retuned for its 6-token verify batches: 64.5 tok/s at 1 user (job 23871589);
 > 501.3 / 684.2 / 876.7 at 16 / 32 / 64 users in steady state (4 prompts per slot, job
 > 23895024); 970 at 128 users with `--max-num-seqs 128`. Natural prompts (GSM8K questions),
-> 1.7–2.0× the recipe without DSpark. GSM8K 98–99 %, needles. KV cache 2.24M tokens.**
+> 1.7–2.0× the recipe without DSpark. GSM8K 98–99 %, needles. KV cache 2.24M tokens. Prefill (time to first token) 1.32 / 4.86 / 9.16 s at 4k / 16k / 30k
+> tokens after the Triton indexer logits and `SPARSE_PREFILL=1` (job 23900437).**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -561,6 +562,42 @@ spread), GSM8K 98.5 %. `NUMA_BIND=1` on top (job 23897203; workers bound to thei
 and NUMA node, confirmed in the log): 479.0 / 697.6 / 882.4 (−6 / −2 / +3 %), GSM8K 97.5 %:
 no gain; left off.
 
+**Prefill (time to first token).** Agentic turns resend 10–30k-token contexts, and nothing
+so far had touched prefill. One user, 16 output tokens (job 23898195): TTFT 1.66 / 6.83 /
+13.93 s at 4k / 16k / 30k prompt tokens (~2,400 tokens/s). Prefill profile of one 16.5k
+prompt (job 23898197, `PROFILE_PREFILL=16384`, new `profile_prefill.py`; ~547 ms per
+2048-token chunk, GPU busy 99 %): sparse-attention prefill 156 ms (upstream's ROCm kernel,
+4.65 ms a call), the indexer's prefill logits in torch ~85 ms (`fp8_mqa_logits_torch`:
+FP8 casts, fp32-output GEMM, elementwise, reduction), RCCL all-reduce 70 ms (20 MB
+messages), MoE 75 ms, mHC ~50 ms, FP8 rounding 30 ms.
+
+- **Indexer prefill logits in Triton** (`lumi_dsv41/mqa_logits.py`, `PREFILL_LOGITS=1`): a
+  [32 rows × 128 keys] tile per program, the key block loaded once and reused across the 32
+  heads (bf16 MFMA, rounded to bf16 like the einsum), tiles outside every row's causal
+  range written as -inf without computing. `test_mqa_logits.py` (job 23900362), 2048 rows:
+  4.52 / 18.17 / 37.80 / 68.11 ms → 0.33 / 1.90 / 4.03 / 7.50 ms at 2k / 8k / 16k / 30k keys;
+  same mask, max rel err 2e-7, top-512 overlap ≥ 99.96 %.
+- **Sparse-attention prefill without software pipelining** (`SPARSE_PREFILL=1`,
+  `hooks.py:_prefill_stages`): upstream's wrapper leaves Triton's default `num_stages=2`;
+  with 1, same tile, the same output: 5.98 → 2.73 ms per 2048-query chunk at 4k, 5.99 →
+  2.87 at 16k (`test_sparse_prefill.py`, job 23900392; every pipelined setting ~5.8 ms).
+- All-reduce at prefill sizes (job 23900284): RCCL 236 / 381 µs vs the custom kernel
+  347 / 657 µs at 1024 / 2048 tokens, so vLLM's 8 MB limit already routes them right
+  (`CUSTOM_AR_MAX_MB` added, left unset).
+
+| prompt tokens | 4k | 16k | 30k |
+|---|---|---|---|
+| before (job 23898195) | 1.66 s | 6.83 s | 13.93 s |
+| `PREFILL_LOGITS=1` (job 23900387) | 1.51 s | 5.90 s | 10.92 s |
+| **+ `SPARSE_PREFILL=1`** (job 23900437) | **1.32 s** | **4.86 s** | **9.16 s** |
+
+−21 / −29 / −34 %; GSM8K 98.5 %, sanity 5/5, needles at 2.1k and 16.8k.
+
+Decode at 1 user with DSpark (profile job 23898196) is host/rank-skew bound rather than
+GPU bound: all-reduces wait ~2 ms each in the draft step (12 a step) and ~0.2 ms in the
+verify step (81), against ~27 µs of kernel; the profiler's own host overhead (37 tokens in
+3 s) exaggerates it.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
@@ -597,7 +634,7 @@ AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton TRITON_LOGITS=1 NO_ASYNC=1
   sbatch --nodes=2 --time=03:00:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
 # V4.1 on one node through the plugin: stage the checkpoint on LUMI-F once, then serve
 sbatch --account=project_462000131 repro/deepseek_v41_gfx90a/stage_flash.sh
-V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 MOE_SMALL=1 MOE_TILES=1 DSPARK=5 \
+V41=1 AMDGCN_USE_BUFFER_OPS=0 BF16_LINEAR=1 COMPILE=1 TRITON_LOGITS=1 MHC_TRITON=1 CUSTOM_AR=1 SPARSE_DECODE=1 MOE_SMALL=1 MOE_TILES=1 DSPARK=5 PREFILL_LOGITS=1 SPARSE_PREFILL=1 \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" PROBE_GSM8K_N=200 BENCH=1 BENCH_DATA=gsm8k CONCURRENCIES="1 16 32 64" \
   READY_TIMEOUT=5400 \
   sbatch --time=02:30:00 repro/deepseek_v41_gfx90a/run_v4_serve.sh
