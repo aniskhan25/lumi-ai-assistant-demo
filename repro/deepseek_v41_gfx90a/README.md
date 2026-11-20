@@ -549,6 +549,18 @@ tok/s at 16 / 32 / 64 users**, GSM8K 99.0 %, sanity 5/5, needles. +5.6 % at 64; 
 32 overstates it (the baseline's 32-user phase ran first after warm-up, mean TTFT 2.8 s vs
 0.6 s here).
 
+**All-reduce, sparse-decode splits and NUMA binding at verify sizes** (4 prompts per slot,
+16 / 32 / 64 users). `test_allreduce.py` on 8 GCDs at hidden 5120 (job 23896111): the custom
+kernel (copy mode, exact) beats RCCL at every DSpark size, 26.9 vs 95.9 µs at 32 tokens,
+142.7 vs 193.5 at 384, 264.9 vs 302.2 at 768; no switch. In serving a call takes ~279 µs at
+384 tokens, so about half of it is ranks waiting for the slowest. Sparse decode beyond 128
+queries (job 23896112): 4 splits at 192 (473 vs 504 µs), 2 at 384 (874 vs 985); the rule now
+aims at ~1024 workgroups there (`sparse_decode.num_splits`). Serving (job 23897202): 511.6 /
+711.0 / 855.3 tok/s (+2 / +4 / −2 % against 501.3 / 684.2 / 876.7, job 23895024; within run
+spread), GSM8K 98.5 %. `NUMA_BIND=1` on top (job 23897203; workers bound to their GCD's CCD
+and NUMA node, confirmed in the log): 479.0 / 697.6 / 882.4 (−6 / −2 / +3 %), GSM8K 97.5 %:
+no gain; left off.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
