@@ -4,11 +4,11 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
-> **Status (2026-11-19): with DSpark speculative decoding (`DSPARK=5`, V4.1's own drafter),
-> 66.0 / 376.4 / 553.5 / 755.6 tok/s at 1 / 16 / 32 / 64 users on natural prompts, 1.5–1.8×
-> the recipe without it (37.2 / 220.5 / 349.5 / 514.6 on the same prompts), GSM8K 99.0 %,
-> needles (jobs 23863557 / 23864381). Without DSpark, on the random-token sweep used so far:
-> 35.8 / 263.4 / 395.0 / 542.5 (job 23857167). KV cache 2.24M tokens.**
+> **Status (2026-11-20): with DSpark speculative decoding (`DSPARK=5`, V4.1's own drafter)
+> and kernels retuned for its 6-token verify batches: 64.5 / 446.3 / 621.5 / 754.4 tok/s at
+> 1 / 16 / 32 / 64 users on natural prompts (job 23871589), 1.7–2.0× the recipe without
+> DSpark (37.2 / 220.5 / 349.5 / 514.6, job 23864381); 970 tok/s at 128 users with
+> `--max-num-seqs 128`. GSM8K 98–99 %, needles. KV cache 2.24M tokens.**
 >
 > **Status (2026-11-12): V4.1-Flash serves correctly and at V4's speed on one node: 14.0 /
 > 264 / 400 tok/s at 1 / 32 / 64 users with `--max-num-seqs 64`, GSM8K 98.5 % (200), both
@@ -518,6 +518,21 @@ speculative decoding:
 GSM8K 99.0 % with DSpark (98.0 % without), sanity 5/5, needles at 2.1k and 16.8k. Mean
 acceptance length 3.2–3.9 of 6 over the sweep (45–57 % of drafts accepted). KV cache
 2.24M tokens with the drafter's layers, 2.43M without.
+
+**Tuning for DSpark's verify batches** (6 tokens per sequence, so 96–384 rows at 16–64
+users). Graph profile at 32 users with DSpark (job 23871174, `BENCH_DATA=gsm8k` prompts;
+`analyze_trace.py` now marks spec-decode launches `[draft]`): GPU busy 95 %, the draft step
+~9 ms of ~118 ms; MoE experts 35.5 ms (`matmul_ogs` on the library's default tile, since
+192 tokens was past `MOE_TILES`'s table), dense GEMMs 18.7, all-reduce 14.3 (custom kernel,
+172 µs per 2 MB call), elementwise 13.0, sparse attention 10.3; and the mHC prenorm GEMM in
+torch above 64 tokens (fp32 copy + fp32 GEMM + square-sum + split-K reduce, ~99 µs per
+call, 80 calls). Sweeps: gate/up with block_n 128 / split_k 1 is 13–16 % faster from 96 to
+768 tokens, exact (job 23871479: 1068 → 933 µs at 192, 1722 → 1458 at 384); mHC split-K
+beats the torch GEMM to ~256 tokens (job 23871480: 0.195 → 0.099 ms at 96, 0.197 → 0.155
+at 192, equal at 384). With `MOE_TILES` to 1024 tokens and mHC split-K to 256 (job
+23871589): **64.5 / 446.3 / 621.5 / 754.4 tok/s** at 1 / 16 / 32 / 64 users (−2 / **+19** /
+**+12** / 0 %), GSM8K 98.0 %, sanity 5/5, needles. 64 users did not move, although the
+gate/up sweep promised ~10 ms a step there; not investigated.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
