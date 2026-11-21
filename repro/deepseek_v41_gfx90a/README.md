@@ -4,6 +4,11 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-21): prefix caching works (`PREFIX_CACHING=1`, opt-in): a resent
+> context's time to first token falls from 4.5 s to 0.13–0.19 s at 17k tokens and from 2.6 s
+> to 0.19 s at 9k (agentic turns). Hits match cold prefills within run-to-run noise over 24
+> prompts; decode throughput unchanged (744 / 943 tok/s at 32 / 64 users, job 23908978).**
+>
 > **Status (2026-11-20): with DSpark speculative decoding (`DSPARK=5`, V4.1's own drafter)
 > and kernels retuned for its 6-token verify batches: 64.5 tok/s at 1 user (job 23871589);
 > 484.7 / 732.1 / 932.3 at 16 / 32 / 64 users in steady state (4 prompts per slot, job
@@ -630,6 +635,35 @@ Plan: a neutral ring manager (hit = the candidate length, rounded to its alignme
 refusal behind an opt-in switch, an assert that hits are even, and a test of hit vs no-hit
 outputs (chunked prefill, preemption, DSpark). Open risk: whether 0.26's DSpark speculator
 writes the drafter's context KV for every prefilled prompt token.
+
+**Prefix caching: done (`PREFIX_CACHING=1`, jobs 23908822 and 23908978).** The ring's
+manager no longer vetoes hits: it returns the hit length the other groups agreed on (it
+scans last), minus the DSpark lookahead block the coordinator adds, kept even
+(`circular_buffer.py`). The plugin's refusal stays unless `DSV41_PREFIX_CACHING=1`; the
+switch also adds `--enable-prompt-tokens-details`. One side effect: 0.26 hashes prompts at
+the GCD of the group block sizes, and the ring's block is 8 tokens, so block hashes are per
+8 tokens (no measurable cost). `prefix_cache_check.py` (`PREFIX_CHECK=1`):
+
+| | cold | hit |
+|---|---|---|
+| time to first token, ~17.3k-token prompt (the last 33–95 tokens recomputed) | 4.5 s | 0.13–0.19 s |
+| time to first token, agentic turn at ~9.5k tokens | 2.6 s | 0.19 s |
+| first token's top-5 logprobs, mean gap to a cold run (24 prompts) | 0.267 | 0.266 |
+| tokens shared with a cold run from the start, mean | 39.5 | 36.9 |
+| GSM8K answers right (24 long-context prompts) | 24 / 24 | 23 / 24 |
+| DSpark acceptance length | 2.91 | 2.96 |
+
+Greedy output is not repeatable run to run here: two cold prefills of the same prompt can
+part at the first token, so hits are judged against the cold runs' spread, not token by
+token (the first job's per-prompt rule flagged one such split). Agentic conversations (2 ×
+6 turns from ~9k tokens, each turn resending the context, question and previous answer):
+every turn after the first reuses all but the last 80–150 tokens, answers 11/12 and 10/12
+right in the two jobs. The DSpark drafter's KV is reused correctly (acceptance unchanged), so the open
+risk above did not materialise. Decode with caching on (job 23908978, natural prompts, same
+sweep as job 23902280): 59.3 / 743.9 / 943.3 tok/s at 1 / 32 / 64 users against 64.9 /
+732.1 / 932.3 (c=1: 4 prompts, TPOT 15.5 against 14.7 ms, +5 %; not retested, so unclear whether
+the 8-token hashing or noise). GSM8K probe 97.5 % (200), sanity 5/5, needles 2/2 with
+caching on. Not covered: preemption of a request that started from a hit.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
