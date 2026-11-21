@@ -942,6 +942,32 @@ prompt (~90 tokens with the chat template) is past that and runs eager. With 64 
 the limit is 256. Random 1024-token prompts never fit a graph when they arrive, so this did
 not show before. `--max-num-seqs 64` is the setting for every load.
 
+**Where the rest went: a cold instruction cache.** Graph profiles of this recipe (jobs
+23900445/6, GSM8K prompts, all users decoding) show the post (6.2 µs) and prenorm GEMM
+(19.1 µs at 32 users) at their one-GCD speed. The big fuse took 33 µs a call at both 32 and
+64 users, against 12 µs alone; the pre-`MHC_FAST` profile had 18 against ~8. mhc_fix's
+kernel unrolls the 20 Sinkhorn iterations and every split sum: ~3,400 lines of machine code,
+run by one program per token. Alone, the code stays cached; in a decode step the kernels
+in between evict it. `test_mhc_fast.py` part 4 (job 23900850) puts a GEMM, a softmax and a
+top-k between calls. A whole fused post+pre call then costs 47 / 57 / 64 / 70 µs at 2 / 32 /
+64 / 128 tokens with the unrolled kernel. With the same arithmetic in runtime loops (~1,400
+lines, now the default; `MHC_BF=static` restores the old kernel) it costs 28 / 40 / 47 /
+55 µs. Profiles with the loop kernel (jobs 23901341/2): **big fuse 14.1 µs at 32 users and
+14.9 at 64** (from 33). GPU time per step falls 1.6 ms at 32 users and 1.9 at 64, so mHC is
+3.5 ms a step at 32 users (7.1 before `MHC_FAST`). The serving A/B (23900889 loop vs
+23900890 static, same day) is within run-to-run spread: TPOT 0.5–1.1 ms lower at 1–32 users,
+0.5 higher at 64, GSM8K 97.4 vs 97.0 %. Any long unrolled Triton kernel served this way pays
+the same, so time candidates with other kernels between calls.
+
+| per decode step, GSM8K prompts | 32 users | 64 users |
+|---|---|---|
+| GPU busy (loop big fuse) | 55.6 ms | 69.4 ms |
+| MoE expert GEMMs (`matmul_ogs`, gate/up + down) | 16.5 | 21.2 |
+| Triton dense GEMMs (`score_mm`, 370 calls) | 7.1 | 9.9 |
+| sparse attention (partial + reduce) | 4.7 | 6.5 |
+| all-reduce (custom kernel, 90 calls) | 3.4 | 5.4 |
+| mHC (prenorm GEMM + big fuse + post) | 3.5 | 4.3 |
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -987,7 +1013,10 @@ not show before. `--max-num-seqs 64` is the setting for every load.
       lower from 4 users up (above). Left at 32 users: MXFP4 expert GEMMs (`matmul_ogs`,
       ~10 ms of 54), mHC `hc_prenorm` (3.8 ms), all-reduce (3.8 ms).
   14. ~~Hyper-connections at decode sizes~~: done, `MHC_FAST=1` (V4.1's Triton post and
-      split-K prenorm GEMM), 1.3–2.6× per call, TPOT 0.4–1.2 ms lower from 4 users up.
+      split-K prenorm GEMM), 1.3–2.6× per call, TPOT 0.4–1.2 ms lower from 4 users up;
+      big fuse with runtime loops (cold instruction cache), mHC 7.1 → 3.5 ms a step at 32
+      users. Next by size: MoE expert GEMMs (~30 % of the step), the 370 dense-GEMM calls,
+      sparse attention, all-reduce.
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
