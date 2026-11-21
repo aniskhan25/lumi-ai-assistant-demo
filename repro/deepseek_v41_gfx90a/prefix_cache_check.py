@@ -2,9 +2,11 @@
 
 1. Hit vs cold. Each prompt is a long few-shot document (GSM8K test questions with their
    worked answers, ~CTX tokens) and one more question. Each is sent three times, greedy,
-   128 tokens, with logprobs: with a fresh cache_salt (hashes match nothing, so a cold
-   prefill), without salt (cold too, and it fills the cache), and without salt again (the
-   hit). The two cold runs give the run-to-run noise; the hit is compared with them.
+   with logprobs: with a fresh cache_salt (hashes match nothing, so a cold prefill),
+   without salt (cold too, and it fills the cache), and without salt again (the hit).
+   Greedy output is not repeatable here (two cold runs can part at the first token, job
+   23908822), so the hit is judged against the two cold runs' spread, over all prompts:
+   the first token's top-5 logprobs, the tokens shared from the start, and accuracy.
 2. Agentic turns. Conversations that resend their growing context each turn (document,
    question, the model's answer, next question, ...): per turn the prompt tokens, cached
    tokens, TTFT and whether the answer is right; the last turn is also sent cold.
@@ -24,7 +26,7 @@ import pandas as pd
 
 base, model, parquet = sys.argv[1:4]
 CTX = int(sys.argv[4]) if len(sys.argv) > 4 else 16000
-PROMPTS = int(sys.argv[5]) if len(sys.argv) > 5 else 6
+PROMPTS = int(sys.argv[5]) if len(sys.argv) > 5 else 24
 TURNS = int(sys.argv[6]) if len(sys.argv) > 6 else 6
 CHARS_PER_TOKEN = 3.6  # GSM8K text with this tokenizer, roughly; actual counts are printed
 
@@ -67,7 +69,7 @@ def spec_counters() -> tuple[float, float]:
 
 def complete(prompt: str, max_tokens: int, salt: str | None = None) -> dict:
     body = {"model": model, "prompt": prompt, "max_tokens": max_tokens, "temperature": 0.0,
-            "logprobs": 1, "stop": ["\n\nQuestion:"], "stream": True,
+            "logprobs": 5, "stop": ["\n\nQuestion:"], "stream": True,
             "stream_options": {"include_usage": True}}
     if salt:
         body["cache_salt"] = salt
@@ -75,7 +77,7 @@ def complete(prompt: str, max_tokens: int, salt: str | None = None) -> dict:
                                  {"Content-Type": "application/json"})
     acc0, drafts0 = spec_counters()
     t0 = time.time()
-    ttft, text, tokens, logprobs, usage = None, [], [], [], {}
+    ttft, text, tokens, logprobs, top, usage = None, [], [], [], [], {}
     with urllib.request.urlopen(req, timeout=3600) as resp:
         for raw in resp:
             line = raw.strip()
@@ -90,9 +92,11 @@ def complete(prompt: str, max_tokens: int, salt: str | None = None) -> dict:
                 lp = choice.get("logprobs") or {}
                 tokens += lp.get("tokens") or []
                 logprobs += lp.get("token_logprobs") or []
+                top += lp.get("top_logprobs") or []
     acc1, drafts1 = spec_counters()
     details = usage.get("prompt_tokens_details") or {}
     return {"text": "".join(text), "tokens": tokens, "logprobs": logprobs, "ttft": ttft,
+            "first": top[0] if top else {},
             "prompt_tokens": usage.get("prompt_tokens"),
             "cached": details.get("cached_tokens"),
             "accepted": acc1 - acc0, "drafts": drafts1 - drafts0}
@@ -111,6 +115,16 @@ def agree(a: dict, b: dict) -> tuple[int, int, float]:
     return n, min(len(a["tokens"]), len(b["tokens"])), dlp
 
 
+def first_token_gap(a: dict, b: dict) -> float:
+    """Mean |logprob difference| of the first token's top-5 candidates both runs list."""
+    shared = [t for t in a["first"] if t in b["first"]]
+    return sum(abs(a["first"][t] - b["first"][t]) for t in shared) / max(len(shared), 1)
+
+
+def mean(xs) -> float:
+    return sum(xs) / max(len(xs), 1)
+
+
 def acceptance(runs: list[dict]) -> str:
     acc = sum(r["accepted"] for r in runs)
     drafts = sum(r["drafts"] for r in runs)
@@ -119,28 +133,44 @@ def acceptance(runs: list[dict]) -> str:
 
 complete("Warm-up.", 8)
 print(f"=== 1. hit vs cold: {PROMPTS} prompts of ~{CTX} tokens ===", flush=True)
-colds, hits, bad = [], [], 0
+colds, hits = [], []
+stats = {"cc": [], "ch": [], "gap_cc": [], "gap_ch": [], "right_cold": 0, "right_hit": 0}
 for k in range(PROMPTS):
     q, a = QUESTIONS[k]
     prompt = document(37 * k, CTX) + f"Question: {q}\nAnswer:"
-    cold_a = complete(prompt, 128, salt=uuid.uuid4().hex)
-    cold_b = complete(prompt, 128)
-    hit = complete(prompt, 128)
+    cold_a = complete(prompt, 192, salt=uuid.uuid4().hex)
+    cold_b = complete(prompt, 192)
+    hit = complete(prompt, 192)
     colds += [cold_a, cold_b]
     hits.append(hit)
-    n_cc, len_cc, d_cc = agree(cold_a, cold_b)
-    n_ch, len_ch, d_ch = agree(cold_b, hit)
-    # The hit should follow the cold output at least as far as the two cold runs follow
-    # each other (capped at 32 tokens: past that, bf16 noise picks the branch).
-    ok = n_ch >= min(n_cc, len_ch, 32)
-    bad += not ok
-    print(f"prompt {k}: {cold_b['prompt_tokens']} tokens, cached cold/cold/hit "
-          f"{cold_a['cached']}/{cold_b['cached']}/{hit['cached']}; "
+    n_cc, len_cc, _ = agree(cold_a, cold_b)
+    n_ch, len_ch, _ = agree(cold_b, hit)
+    g_cc, g_ch = first_token_gap(cold_a, cold_b), first_token_gap(cold_b, hit)
+    stats["cc"].append(n_cc)
+    stats["ch"].append(n_ch)
+    stats["gap_cc"].append(g_cc)
+    stats["gap_ch"].append(g_ch)
+    stats["right_cold"] += predicted(cold_b["text"]) == gold(a)
+    stats["right_hit"] += predicted(hit["text"]) == gold(a)
+    print(f"prompt {k}: {cold_b['prompt_tokens']} tokens, cached {hit['cached']}; "
           f"TTFT cold {cold_a['ttft']:.2f}/{cold_b['ttft']:.2f} s, hit {hit['ttft']:.2f} s; "
-          f"same tokens cold-cold {n_cc}/{len_cc} (max dlogprob {d_cc:.3f}), "
-          f"cold-hit {n_ch}/{len_ch} (max dlogprob {d_ch:.3f}); "
-          f"answers {predicted(cold_b['text'])}/{predicted(hit['text'])} gold {gold(a)}"
-          f"{'' if ok else '  <-- HIT DIVERGES EARLIER'}", flush=True)
+          f"shared tokens cold-cold {n_cc}/{len_cc}, cold-hit {n_ch}/{len_ch}; "
+          f"first-token gap cold-cold {g_cc:.3f}, cold-hit {g_ch:.3f}; "
+          f"answers {predicted(cold_b['text'])}/{predicted(hit['text'])} gold {gold(a)}",
+          flush=True)
+print(f"over {PROMPTS} prompts: shared tokens from the start, mean cold-cold "
+      f"{mean(stats['cc']):.1f}, cold-hit {mean(stats['ch']):.1f}; first-token top-5 gap "
+      f"cold-cold {mean(stats['gap_cc']):.3f}, cold-hit {mean(stats['gap_ch']):.3f}; "
+      f"right cold {stats['right_cold']}/{PROMPTS}, hit {stats['right_hit']}/{PROMPTS}")
+# A hit that reads wrong state shifts the first token's distribution and loses answers;
+# noise does neither beyond the cold runs' own spread.
+fails = []
+if mean(stats["gap_ch"]) > 2 * mean(stats["gap_cc"]) + 0.05:
+    fails.append("first-token logprobs")
+if stats["right_hit"] < stats["right_cold"] - max(2, PROMPTS // 10):
+    fails.append("accuracy")
+if mean(stats["ch"]) < 0.5 * mean(stats["cc"]):
+    fails.append("shared tokens")
 print(f"DSpark acceptance length: cold {acceptance(colds)}, hit {acceptance(hits)}")
 
 print(f"=== 2. agentic: 2 conversations x {TURNS} turns from ~{CTX // 2} tokens ===",
@@ -168,6 +198,5 @@ for conv in range(2):
           f"with the cache; same tokens {n}/{length} (max dlogprob {dlp:.3f})", flush=True)
 print(f"agentic answers right: {right}/{total}; DSpark acceptance length "
       f"{acceptance(turn_runs)}")
-print("PREFIX_CHECK", "FAILED" if bad else "OK", f"({bad} prompts where the hit diverges "
-      "earlier than two cold runs do)")
-sys.exit(1 if bad else 0)
+print("PREFIX_CHECK", f"FAILED: {', '.join(fails)}" if fails else "OK")
+sys.exit(1 if fails else 0)
