@@ -271,6 +271,13 @@ if [ "${PREFIX_CHECK:-0}" = 1 ]; then
     "http://127.0.0.1:${PORT}" dsv4 "${GSM8K}" ${PREFIX_CHECK_ARGS:-} || STATUS=1
 fi
 
+# AGENTIC=1: concurrent conversations resending a growing context (agentic_bench.py);
+# AGENTIC_CONVS (default "32 64") conversations at once, AGENT_* env for lengths and time
+if [ "${AGENTIC:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/agentic_bench.py" \
+    "http://127.0.0.1:${PORT}" dsv4 "${GSM8K}" "${LOG}/agentic.jsonl" ${AGENTIC_CONVS:-32 64} || STATUS=1
+fi
+
 # BENCH=1: streaming `vllm bench serve` sweep, as for Qwen3.8-Flash (repro/qwen38_flash_gfx90a)
 # so the numbers compare. Warm-up first: the first requests of an allocation pay one-time
 # kernel compilation. PROMPTS_PER_SLOT is small because eager V4 is slow (~37 tok/s at c=16).
