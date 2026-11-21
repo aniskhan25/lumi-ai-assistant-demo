@@ -120,6 +120,9 @@ if [ "${V41:-0}" = 1 ]; then
   export DSV41_PREFILL_LOGITS="${PREFILL_LOGITS:-0}"
   # SPARSE_PREFILL=1: the sparse-attention prefill kernel without software pipelining (2.2x)
   export DSV41_SPARSE_PREFILL="${SPARSE_PREFILL:-0}"
+  # PREFIX_CACHING=1: prefix caching without replay (lumi_dsv41/circular_buffer.py);
+  # PREFIX_CHECK=1 then compares hit and cold outputs (prefix_cache_check.py)
+  export DSV41_PREFIX_CACHING="${PREFIX_CACHING:-0}"
   # CUSTOM_AR=1 comes from the V4 plugin (custom_ar.py): model-independent.
   # MOE_SMALL=1: only moe_small's pack_bitmatrix row blocks (shape-free); its expert GEMM
   # tiles are for V4's TP shapes (N 512 per rank), V4.1 runs whole experts under EP.
@@ -182,7 +185,7 @@ PROF_DIR="${LOG}/profile"
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
-       --no-enable-prefix-caching --kv-cache-dtype fp8
+       $([ "${PREFIX_CACHING:-0}" = 1 ] && echo --enable-prefix-caching --enable-prompt-tokens-details || echo --no-enable-prefix-caching) --kv-cache-dtype fp8
        ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}} ${MORE_VLLM_ARGS:-})
 NODES="${SLURM_JOB_NUM_NODES:-1}"
 echo "Serving on ${NODES} node(s): ${SERVE[*]}"
@@ -260,6 +263,12 @@ if [ "${PROBE:-1}" = 1 ]; then
     --base-url "http://127.0.0.1:${PORT}" --model dsv4 \
     --gsm8k-parquet "${GSM8K}" --gsm8k-n "${PROBE_GSM8K_N:-200}" --out "${LOG}/probe.json" \
     || STATUS=1
+fi
+
+# PREFIX_CHECK=1: prefix-cache hits against cold prefills, and agentic turns
+if [ "${PREFIX_CHECK:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/prefix_cache_check.py" \
+    "http://127.0.0.1:${PORT}" dsv4 "${GSM8K}" ${PREFIX_CHECK_ARGS:-} || STATUS=1
 fi
 
 # BENCH=1: streaming `vllm bench serve` sweep, as for Qwen3.8-Flash (repro/qwen38_flash_gfx90a)

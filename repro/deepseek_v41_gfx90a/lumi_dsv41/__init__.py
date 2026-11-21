@@ -101,9 +101,15 @@ def _config_class(model_configs):
                 raise NotImplementedError(
                     f"DeepSeek-V4.1 on vLLM 0.26: speculative method {spec.method!r}; "
                     "only its DSpark drafter (method dspark) is ported")
-            if vllm_config.cache_config.enable_prefix_caching:
+            import os
+
+            if (vllm_config.cache_config.enable_prefix_caching
+                    and os.environ.get("DSV41_PREFIX_CACHING") != "1"):
+                # Works without replay (see circular_buffer.py), but opt-in until
+                # tested under load: DSV41_PREFIX_CACHING=1.
                 raise NotImplementedError(
-                    "DeepSeek-V4.1 on vLLM 0.26: pass --no-enable-prefix-caching")
+                    "DeepSeek-V4.1 on vLLM 0.26: pass --no-enable-prefix-caching, or "
+                    "DSV41_PREFIX_CACHING=1 to use it")
             if not vllm_config.use_v2_model_runner:
                 # Engram reads each request's previous tokens from the model state,
                 # which only Model Runner V2 calls.
