@@ -65,8 +65,8 @@ def _record(*a, **k):
 
 
 of.make_opt_flags = _record
-for mod in list(sys.modules.values()):  # matmul_ogs imported the name directly
-    if getattr(mod, "make_opt_flags", None) is _make and mod is not of:
+for name, mod in list(sys.modules.items()):  # matmul_ogs imported the name directly
+    if "triton_kernels" in name and mod is not of and mod.__dict__.get("make_opt_flags") is _make:
         mod.make_opt_flags = _record
 
 
@@ -148,8 +148,7 @@ def calls(M, which, weights):
 
 def served(M, which):
     table = moe_small.GATE_UP if which == "gate_up" else moe_small.DOWN
-    cfg = moe_small._pick(table, M)
-    return {"block_n": cfg[0], "split_k": cfg[1]} if cfg else None
+    return moe_small._pick(table, M)  # {"block_n", "split_k"} or None
 
 
 buf = torch.empty(512 << 20, dtype=torch.uint8, device=dev).view(torch.float32)
