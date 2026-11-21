@@ -55,7 +55,7 @@ _, c = send(a)
 for f in futs:
     f.result()
 print(f"repeat alongside 8 concurrent cold prompts: cached {c}", flush=True)
-for filler in (20_000, 50_000, 100_000, 200_000, 400_000):
+for filler in (20_000, 100_000, 200_000, 400_000, 800_000, 1_600_000):
     a = prompt(9000)
     n, _ = send(a)
     t0 = time.time()
