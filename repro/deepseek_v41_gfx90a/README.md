@@ -612,6 +612,25 @@ GPU bound: all-reduces wait ~2 ms each in the draft step (12 a step) and ~0.2 ms
 verify step (81), against ~27 µs of kernel; the profiler's own host overhead (37 tokens in
 3 s) exaggerates it.
 
+**Prefix caching: scoping (2026-11-21).** An agent resends its growing context each turn, so
+every turn re-prefills it (8 s at 30k tokens). The block is ours, not 0.26's:
+`lumi_dsv41/__init__.py` refuses `--enable-prefix-caching`, and the compressor ring's
+manager (`circular_buffer.py`) always reports a 0-token hit, which the hybrid coordinator
+takes as the minimum over all groups. Upstream V4.1 rebuilds sliding-window and compressor
+state on a hit by replaying the window before it (`swa_bounded_replay`, decoder replay):
+engine-side work 0.26 lacks, but upstream itself turns replay off on ROCm below CDNA3
+(`vendor/.../deepseek_v41/attention.py:605-614`, "the sliding-window cache takes part in
+prefix caching instead"), which is the mode 0.26 implements. Per-request state at a
+block-aligned hit: compressed KV and indexer K (`MLAAttentionSpec`, 0.26's
+`FullAttentionManager`) reusable; SWA KV (`SlidingWindowMLASpec`) reusable from 0.26's
+retained tails; the ratio-2 compressor ring is only read at odd positions
+(`fused_compress_quant_cache.py:174`), so an even, block-aligned hit needs a fresh ring;
+Engram lookback is rebuilt from the token history each step; mHC has no cross-token state.
+Plan: a neutral ring manager (hit = the candidate length, rounded to its alignment), the
+refusal behind an opt-in switch, an assert that hits are even, and a test of hit vs no-hit
+outputs (chunked prefill, preemption, DSpark). Open risk: whether 0.26's DSpark speculator
+writes the drafter's context KV for every prefilled prompt token.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
