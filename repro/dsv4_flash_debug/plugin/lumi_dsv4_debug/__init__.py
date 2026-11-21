@@ -41,7 +41,8 @@ DSV4_CUSTOM_AR=copy|fence (1 = copy)
 DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel with bf16 MFMA;
                      hipBLASLt picks an fp32-MFMA kernel for them on gfx90a (score_gemm.py).
 DSV4_MOE_SMALL=1     MoE at decode sizes: pack_bitmatrix with 16-row blocks, expert GEMM
-                     block_n / split_k by token count (moe_small.py).
+                     tiles, warps and stages by token count (moe_small.py; DSV4_MOE_TABLE=v1
+                     for the earlier block_n / split_k table).
 DSV4_GATE_GEMM=1     MoE router GEMM (fp32 logits) via score_gemm.score_mm (moe_small.py).
 DSV4_DENSE_GEMM=1    Dense bf16 GEMMs at decode sizes via score_gemm's Triton kernel (bf16 out)
                      where it beats vLLM's ROCm dispatch, per shape and size (dense_gemm.py).
