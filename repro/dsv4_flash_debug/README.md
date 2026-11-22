@@ -968,6 +968,43 @@ the same, so time candidates with other kernels between calls.
 | all-reduce (custom kernel, 90 calls) | 3.4 | 5.4 |
 | mHC (prenorm GEMM + big fuse + post) | 3.5 | 4.3 |
 
+### MXFP4 expert GEMMs: what bounds them, and a second tile table (Nov 21–22)
+
+The two `matmul_ogs` GEMMs were 16.5 ms of a 55.6 ms step at 32 users. `test_moe_roofline.py`
+(job 23908569, one GCD, 8 cold routings of uniform random experts) puts them against the
+GCD's practical HBM read (1.25 TB/s, a sum over 512 MiB) and against the same GEMMs with
+bf16 weights. **The FP4 → bf16 conversion bounds them, not memory.** gfx90a has no FP4 math,
+so every weight is converted in software before the bf16 matrix cores. With bf16 weights the
+GEMMs move 4× the bytes at 1.0–1.3 TB/s; with MXFP4 they reach 0.5–0.7 TB/s on the routed
+experts' weights. The sweep also covers what the first table (`test_moe_matmul.py`) left
+fixed: block_m, block_k, and num_warps / num_stages, which are overridden on the library's
+returned flags. With a token or two per expert, block_m 16 instead of 32, 4 warps instead of
+8, and one stage:
+
+| µs per call | 2 tokens | 8 | 32 | 64 | 128 |
+|---|---|---|---|---|---|
+| gate/up, table v1 → **v2** | 37.5 → **30.1** | 98.7 → **84.9** | 260 → **220** | 390 → **326** | 469 → **391** |
+| down, table v1 → **v2** | 27.8 → **21.1** | 64.3 → **49.9** | 163 → **126** | 235 → **178** | 293 → **225** |
+
+Errors stay within bf16 rounding (≤ 3e-3). v2 is now `MOE_SMALL`'s table; `MOE_TABLE=v1`
+keeps the old one. Graph profile at 32 users (job 23908712 vs 23901341): gate/up 223 →
+214 µs, **down 153 → 130 µs**, GPU busy per step 55.6 → 54.3 ms. Gate/up gains less in
+serving than in the test. Real routing reaches fewer experts than uniform: at 214 µs, 64
+tokens behave like the test's 32 (~130 experts, not ~200).
+
+| 64 seqs, GSM8K prompts, same day | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 4 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| `MOE_TABLE=v1` | 23908710 | 97.4 % | 58.7 / 202.1 / 530.7 / 727.3 / 1070.8 | 16.7 / 18.0 / 25.8 / 33.4 / 51.4 ms |
+| **`MOE_TABLE=v2`** (recipe) | 23908709 | 97.0 % | **64.1 / 208.8 / 531.1 / 769.7 / 1090.1** | **14.9 / 17.9 / 25.0 / 32.7 / 49.6** ms |
+
+TPOT is lower at every load, by 0.1–1.8 ms. Sanity 5/5, needles 2/2, no garbage in either
+run. MTP acceptance is 1.91 vs 1.88.
+
+What is left is the conversion. Reading the ~130 routed experts' weights at 1.2 TB/s would
+take ~120 µs for gate/up and ~60 µs for down, against 214 and 130. That is ~7 ms a step at
+32 users, the largest single item now. It needs a cheaper e2m1 → bf16 upcast in the kernel
+(bit operations and an exponent add for the ue8m0 scale), not tiles.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -1017,6 +1054,9 @@ the same, so time candidates with other kernels between calls.
       big fuse with runtime loops (cold instruction cache), mHC 7.1 → 3.5 ms a step at 32
       users. Next by size: MoE expert GEMMs (~30 % of the step), the 370 dense-GEMM calls,
       sparse attention, all-reduce.
+  15. ~~Expert GEMM tiles, second pass~~: done, `MOE_SMALL` table v2 (block_m 16, 4 warps,
+      one stage), down −15 % in serving, TPOT 0.1–1.8 ms lower. Open: the FP4 → bf16
+      conversion bounds both GEMMs (0.5–0.7 TB/s against 1.25), ~7 ms a step at 32 users.
       (~~DP2×TP4 with the custom all-reduce~~: ties TP8 at 128 users, above.)
 - **FP4 indexer cache:** vLLM's FP4 indexer-cache kernels crash silently on gfx90a
   (`../deepseek_v41_gfx90a`). V4-Flash uses the FP8 cache, so this run doesn't touch them.
@@ -1083,4 +1123,5 @@ the same, so time candidates with other kernels between calls.
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
+| `test_moe_roofline.py`, `run_moe_roofline_test.sh` | expert GEMMs against HBM bandwidth and bf16 weights; block_m/n/k, split_k, warps/stages sweep |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
