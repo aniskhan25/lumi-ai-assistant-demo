@@ -24,9 +24,15 @@ import triton.language as tl
 @triton.jit
 def _score_mm_kernel(x_ptr, w_ptr, o_ptr, M, N, K, sxm, swn, som,
                      BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                     SPLIT_K: tl.constexpr, ATOMIC: tl.constexpr):
-    pid_n = tl.program_id(0)
-    pid_m = tl.program_id(1)
+                     SPLIT_K: tl.constexpr, ATOMIC: tl.constexpr, M_FAST: tl.constexpr = False):
+    # M_FAST: the token blocks of one weight tile are adjacent programs, so they run together
+    # and the weight tile comes from HBM once (n-major order re-reads it per token block).
+    if M_FAST:
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+    else:
+        pid_n = tl.program_id(0)
+        pid_m = tl.program_id(1)
     pid_k = tl.program_id(2)
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -62,7 +68,8 @@ def _splitk_sum_kernel(part_ptr, out_ptr, MN, SPLIT_K: tl.constexpr, BLOCK: tl.c
     tl.store(out_ptr + i, acc.to(out_ptr.dtype.element_ty), mask=mask)
 
 
-# (BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps) per N and largest M; from the sweep.
+# (BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps[, num_stages, m_fast]) per N and largest M;
+# from the sweep.
 CONFIGS: dict[int, list[tuple[int, tuple[int, int, int, int, int]]]] = {
     2048: [(16, (16, 64, 128, 4, 4)), (48, (16, 64, 128, 2, 4)), (64, (64, 64, 128, 2, 4)),
            (96, (16, 64, 128, 1, 4)), (128, (64, 64, 64, 2, 4))],
@@ -97,22 +104,24 @@ def score_mm(x: torch.Tensor, w: torch.Tensor, cfg=None, atomic: bool = False,
     cfg = cfg or pick(M, N)
     if cfg is None or x.stride(1) != 1 or w.stride(1) != 1:
         return torch.mm(x, w.T, out_dtype=out_dtype)
-    bm, bn, bk, sk, warps = cfg
+    bm, bn, bk, sk, warps = cfg[:5]
+    stages, m_fast = (cfg[5], cfg[6]) if len(cfg) > 5 else (2, False)
     assert N % bn == 0 and K % (bk * sk) == 0, (M, N, K, cfg)
-    grid = (N // bn, triton.cdiv(M, bm), sk)
+    grid = ((triton.cdiv(M, bm), N // bn, sk) if m_fast else (N // bn, triton.cdiv(M, bm), sk))
+    kw = dict(M_FAST=m_fast, num_warps=warps, num_stages=stages)
     if sk == 1:
         out = torch.empty(M, N, dtype=out_dtype, device=x.device)
         _score_mm_kernel[grid](x, w, out, M, N, K, x.stride(0), w.stride(0), out.stride(0),
-                               bm, bn, bk, sk, False, num_warps=warps)
+                               bm, bn, bk, sk, False, **kw)
         return out
     if atomic:
         out = torch.zeros(M, N, dtype=torch.float32, device=x.device)
         _score_mm_kernel[grid](x, w, out, M, N, K, x.stride(0), w.stride(0), out.stride(0),
-                               bm, bn, bk, sk, True, num_warps=warps)
+                               bm, bn, bk, sk, True, **kw)
         return out.to(out_dtype)
     part = torch.empty(sk, M, N, dtype=torch.float32, device=x.device)
     _score_mm_kernel[grid](x, w, part, M, N, K, x.stride(0), w.stride(0), N,
-                           bm, bn, bk, sk, False, num_warps=warps)
+                           bm, bn, bk, sk, False, **kw)
     if TORCH_SUM:
         return part.sum(0).to(out_dtype)
     out = torch.empty(M, N, dtype=out_dtype, device=x.device)
