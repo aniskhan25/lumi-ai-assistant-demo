@@ -715,6 +715,13 @@ every step carries a 2048-token prefill chunk and the decode rows wait on it (TP
 throughput at long context. Preemption after a hit is still untested (no preemptions:
 contexts never filled the pool).
 
+*8192-token chunks* (`--max-num-batched-tokens 8192`, 32 conversations, job 23973421):
+153 output tok/s (+6 % on 2048), median TTFT 2.6 / 1.9 / 1.9 s at 8–16k / 16–24k / 24–32k
+(from 8.6 / 4.1 / 4.3), TPOT 181–199 ms (from 164), answers 92.0 % right, 87 % cached. The
+real prefill rate barely moves (~3.3k against ~3.2k tok/s): agentic throughput is bound by
+the prefill compute itself, not per-step overhead. 8192 suits interactive agents (TTFT),
+2048 keeps tokens flowing; either way the next gain is in the long-context prefill path.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
