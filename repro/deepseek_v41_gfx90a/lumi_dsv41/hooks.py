@@ -500,12 +500,63 @@ def _config_replace(module) -> None:
     module.replace = replace
 
 
+def _gc_control(module) -> None:
+    """Python garbage collection in the workers (agentic-turn profile, job 23974033: a
+    27.6 ms and a 7.7 ms stall inside Triton launches with no traced work under them).
+
+    DSV41_GC_LOG=1: time every collection; every 60 s print the count and time of those
+    over 2 ms per generation. DSV41_GC_FREEZE=1: after CUDA-graph capture, collect once
+    and move everything alive to the permanent generation (gc.freeze), so later full
+    collections skip the model's and the engine's long-lived objects."""
+    import gc
+    import os
+    import time
+
+    if os.environ.get("DSV41_GC_LOG") == "1" and not getattr(gc, "_lumi_dsv41_log", False):
+        gc._lumi_dsv41_log = True
+        state = {"t0": 0.0, "last": time.monotonic(), "stats": {}}
+
+        def callback(phase, info):
+            now = time.perf_counter()
+            if phase == "start":
+                state["t0"] = now
+                return
+            ms = (now - state["t0"]) * 1e3
+            if ms >= 2.0:
+                n, tot, mx = state["stats"].get(info["generation"], (0, 0.0, 0.0))
+                state["stats"][info["generation"]] = (n + 1, tot + ms, max(mx, ms))
+            if time.monotonic() - state["last"] >= 60 and state["stats"]:
+                text = ", ".join(f"gen{g}: {n} x, {tot:.0f} ms, max {mx:.1f} ms"
+                                 for g, (n, tot, mx) in sorted(state["stats"].items()))
+                print(f"[DSV41_GC] pid {os.getpid()} collections >= 2 ms in the last "
+                      f"{time.monotonic() - state['last']:.0f} s: {text}", flush=True)
+                state["stats"] = {}
+                state["last"] = time.monotonic()
+
+        gc.callbacks.append(callback)
+
+    if os.environ.get("DSV41_GC_FREEZE") == "1":
+        runner = module.GPUModelRunner
+        stock = runner.capture_model
+
+        def capture_model(self):
+            out = stock(self)
+            gc.collect()
+            gc.freeze()
+            print(f"[DSV41_GC] pid {os.getpid()} froze {gc.get_freeze_count()} objects "
+                  "after graph capture", flush=True)
+            return out
+
+        runner.capture_model = capture_model
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
 HOOKS["vllm.config.utils"].append(_config_replace)
 HOOKS["vllm.model_executor.models.qwen3_dspark"] = [_dspark_confidence_head]
 HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
 HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes, _debug_kv_views]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
+HOOKS.setdefault("vllm.v1.worker.gpu.model_runner", []).append(_gc_control)
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]
