@@ -1018,6 +1018,25 @@ VALU lane-ops a second, so that is ~9 operations per weight for unpacking, scali
 converting. Doubling the rate would mean ≤ 5 operations per weight: packed 16-bit ops or
 `v_perm_b32` byte lookups through inline assembly. That is a hand-tuned kernel, not a flag.
 
+### Dense bf16 GEMMs against the memory bound (Nov 23)
+
+`score_mm` runs every bf16 dense GEMM at 4–128 tokens: 370 calls, 7.1 ms of a 32-user step.
+At 0.2–0.85 TB/s on their weights they looked far from the 1.25 TB/s the GCD streams.
+`test_dense_bw.py` (job 23973727, cold weights) re-swept all ten per-rank shapes at 8 / 32 /
+64 / 128 tokens. It added what earlier sweeps held fixed: grid order (`M_FAST`, a weight
+tile's token blocks side by side so they share L2), and warps × stages. **The served tiles
+are within 3 % of the best.** Per decode step, weighted by calls: 3.97 → 3.91 ms at 8
+tokens, 4.56 → 4.54 at 32, 6.04 → 5.93 at 64, 8.67 → 8.39 at 128. Grid order changes
+nothing: L2 already catches the re-reads. The tables stay as they are; `score_mm` keeps the
+optional `(…, num_stages, m_fast)` config fields.
+
+The gap is not tiling. The weights are small (2–17 MB a call), so fixed costs dominate: the
+launch, the split-K partial pass plus its sum kernel (238 calls, 0.82 ms a step), and few
+programs per call. At 128 tokens there is also MFMA time. The bytes per decode step (~2.7 GB at
+64 tokens) would take ~2.1 ms at 1.25 TB/s, against ~6 ms. Reaching that needs fewer,
+larger calls: GEMMs that share an input fused into one (wq_a+wkv with the compressor score
+GEMMs, the shared expert's w1+w3 with the router), or a split-K that reduces in-kernel.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -1136,6 +1155,7 @@ converting. Doubling the rate would mean ≤ 5 operations per weight: packed 16-
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
+| `test_dense_bw.py`, `run_dense_bw_test.sh` | dense bf16 GEMMs vs the memory bound: tiles, grid order, warps/stages, per-step total |
 | `test_fp4_upcast.py`, `run_fp4_upcast_test.sh` | MXFP4 upcast: `tl.dot_scaled` vs bit-trick conversions vs bf16 weights in one decode-shaped GEMM |
 | `test_moe_roofline.py`, `run_moe_roofline_test.sh` | expert GEMMs against HBM bandwidth and bf16 weights; block_m/n/k, split_k, warps/stages sweep |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
