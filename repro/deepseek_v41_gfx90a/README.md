@@ -741,6 +741,18 @@ sparse attention 156 → 58 ms, indexer logits 85 → 18, all-reduce 70 → 40, 
 About 100 ms of each chunk is now idle (host-late gaps plus waiting for other ranks), the
 largest single item; then mHC pre, sparse attention and MoE.
 
+*Host gaps.* The trace's CPU side (`with_stack`): the two big gaps, 27.6 ms inside the
+Triton launch of `_fp8_round_block_kernel` and 7.7 ms inside Triton's `get_current_target`
+before the MoE routing, have no traced work under them (the HIP launch itself takes
+0.015 ms), i.e. the Python thread was stopped: garbage collection or the GIL. The rest is
+eager launch overhead, ~1,800 Triton launches at a median 19 µs (graphs are captured up
+to 512 tokens; a 2048-token chunk runs eagerly). `GC_LOG=1` (`hooks.py:_gc_control`)
+times collections: the workers hold ~1.2M long-lived objects, so a full collection takes
+330–500 ms (seen during start-up, where vLLM also collects explicitly). `GC_FREEZE=1`
+(`gc.freeze()` after graph capture) leaves serving with full collections of 13–14 ms
+and young ones of 2–3 ms, a few a minute (job 23974650), but agentic throughput does not
+move: 142 against 144 output tok/s at 32 conversations, TTFT and TPOT the same. Not used.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
