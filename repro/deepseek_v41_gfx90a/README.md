@@ -729,17 +729,23 @@ tail under graphs (~50 ms with the drafter). Per 2048-token chunk:
 
 | component | ms | note |
 |---|---|---|
-| decoder-layer kernels | 59 | mHC pre (`_pre_delayed_kernel`) 20, indexer logits (`_mqa_logits_kernel`, 20k keys) 18, mHC prenorm GEMM 7 |
-| sparse-attention prefill | 58 | `_sparse_attn_prefill_ragged_kernel` |
-| MoE experts | 48 | bf16 × MXFP4 `matmul_ogs` 64×128×128 |
-| all-reduce | 40 | mostly waiting: ~46 ms a step for slower ranks (rank skew) |
-| bf16 GEMMs | 21 | hipBLASLt |
+| decoder-layer kernels | 119 | mHC pre (`_pre_delayed_kernel`) 40, indexer logits (`_mqa_logits_kernel`, 20k keys) 37, mHC prenorm GEMM 14 |
+| sparse-attention prefill | 116 | `_sparse_attn_prefill_ragged_kernel`, 2.7 ms × 43 layers (`test_sparse_prefill.py`: 2.87 ms at 16k) |
+| MoE experts | 78–96 | bf16 × MXFP4 `matmul_ogs` 64×128×128; the only component that differs across ranks |
+| all-reduce | 79–99 | ~34 ms of transfer (~90 RCCL calls at ~0.38 ms), the rest waiting for the slowest rank |
+| bf16 GEMMs | 43 | hipBLASLt |
 | host-late gaps | ~60 | GPU idle waiting for launches: one 14 ms gap, 1 ms+ gaps 40 ms in all |
 
-Against the cold 16.5k profile before the prefill work (job 23898197, 547 ms a chunk):
-sparse attention 156 → 58 ms, indexer logits 85 → 18, all-reduce 70 → 40, MoE 75 → 48.
-About 100 ms of each chunk is now idle (host-late gaps plus waiting for other ranks), the
-largest single item; then mHC pre, sparse attention and MoE.
+(`analyze_trace.py` averages its component table over the 4 model steps in the window,
+target and drafter of each scheduler step, so these are its figures × 4; the chunk step
+holds all the eager work.) Against the cold 16.5k profile before the prefill work (job
+23898197): sparse attention now 2.7 ms a call instead of 4.65, indexer logits ~10× faster.
+Per rank (all 8 traces), every component takes the same time except MoE, 78 ms on rank 2
+to 96 ms on rank 0, and all-reduce mirrors it: the wait is expert-parallel load imbalance,
+summed over layers (each all-reduce waits for that layer's busiest rank).
+`--expert-placement-strategy round_robin` is not available (0.26 needs expert groups;
+V4.1 routes top-6 of 384 with `n_group` None), and tensor-parallel MoE does not fit
+(288-wide expert shards padded to 512, the OOM that made EP necessary).
 
 *Host gaps.* The trace's CPU side (`with_stack`): the two big gaps, 27.6 ms inside the
 Triton launch of `_fp8_round_block_kernel` and 7.7 ms inside Triton's `get_current_target`
@@ -752,6 +758,10 @@ times collections: the workers hold ~1.2M long-lived objects, so a full collecti
 (`gc.freeze()` after graph capture) leaves serving with full collections of 13–14 ms
 and young ones of 2–3 ms, a few a minute (job 23974650), but agentic throughput does not
 move: 142 against 144 output tok/s at 32 conversations, TTFT and TPOT the same. Not used.
+Capturing graphs up to 2048 tokens (`MAX_CAPTURE=2048`, job 23975414) so the chunk's
+graphable parts replay: start-up hangs at the first size past 512 (51 of 147), with 3 of
+8 ranks still capturing and 5 already registering graph buffers; stack dumps empty, not
+pursued (launch overhead is ~20 ms of a ~600 ms chunk).
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
