@@ -722,6 +722,25 @@ real prefill rate barely moves (~3.3k against ~3.2k tok/s): agentic throughput i
 the prefill compute itself, not per-step overhead. 8192 suits interactive agents (TTFT),
 2048 keeps tokens flowing; either way the next gain is in the long-context prefill path.
 
+*Profile of one agentic turn* (`PROFILE_SUFFIX=2000 PROFILE_PREFILL=20000`, job 23974033):
+2062 new tokens over 20,032 cached ones, 717 ms to the first token against 554 ms for the
+same length cold at position 0. Two steps: the 2048-token chunk (~600 ms) and a 14-token
+tail under graphs (~50 ms with the drafter). Per 2048-token chunk:
+
+| component | ms | note |
+|---|---|---|
+| decoder-layer kernels | 59 | mHC pre (`_pre_delayed_kernel`) 20, indexer logits (`_mqa_logits_kernel`, 20k keys) 18, mHC prenorm GEMM 7 |
+| sparse-attention prefill | 58 | `_sparse_attn_prefill_ragged_kernel` |
+| MoE experts | 48 | bf16 × MXFP4 `matmul_ogs` 64×128×128 |
+| all-reduce | 40 | mostly waiting: ~46 ms a step for slower ranks (rank skew) |
+| bf16 GEMMs | 21 | hipBLASLt |
+| host-late gaps | ~60 | GPU idle waiting for launches: one 14 ms gap, 1 ms+ gaps 40 ms in all |
+
+Against the cold 16.5k profile before the prefill work (job 23898197, 547 ms a chunk):
+sparse attention 156 → 58 ms, indexer logits 85 → 18, all-reduce 70 → 40, MoE 75 → 48.
+About 100 ms of each chunk is now idle (host-late gaps plus waiting for other ranks), the
+largest single item; then mHC pre, sparse attention and MoE.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
