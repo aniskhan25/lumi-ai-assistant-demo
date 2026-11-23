@@ -335,13 +335,14 @@ if [ "${BENCH:-0}" = 1 ]; then
   done
 fi
 # PROFILE_PREFILL=N: profile one prefill of an ~N-token prompt instead of decode
-# (profile_prefill.py); the trace goes to profile/c1.
+# (profile_prefill.py); the trace goes to profile/c1. PROFILE_SUFFIX=M (with
+# PREFIX_CACHING=1): an agentic turn instead, a new ~M-token suffix on a cached N-token prefix.
 if [ "${PROFILE:-0}" = 1 ]; then
   for c in ${PROFILE_CONCURRENCIES:-1 32}; do
     echo "=== profile c=${c} ==="
     if [ -n "${PROFILE_PREFILL:-}" ]; then
       "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_prefill.py" \
-        "http://127.0.0.1:${PORT}" dsv4 "${PROFILE_PREFILL}" || STATUS=1
+        "http://127.0.0.1:${PORT}" dsv4 "${PROFILE_PREFILL}" "${PROFILE_SUFFIX:-}" || STATUS=1
     else
     "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_decode.py" \
       "http://127.0.0.1:${PORT}" dsv4 "${c}" "${PROFILE_SECONDS:-5}" \
