@@ -1002,8 +1002,21 @@ run. MTP acceptance is 1.91 vs 1.88.
 
 What is left is the conversion. Reading the ~130 routed experts' weights at 1.2 TB/s would
 take ~120 µs for gate/up and ~60 µs for down, against 214 and 130. That is ~7 ms a step at
-32 users, the largest single item now. It needs a cheaper e2m1 → bf16 upcast in the kernel
-(bit operations and an exponent add for the ue8m0 scale), not tiles.
+32 users, the largest single item now. It needs a cheaper e2m1 → bf16 upcast in the kernel, not tiles.
+
+Triton's own upcast is not easy to beat. `test_fp4_upcast.py` (job 23973504) runs one
+decode-shaped GEMM (16 rows, K 4096, N 65536, ~128 experts' gate/up) four ways:
+`tl.dot_scaled` as `matmul_ogs` calls it; nibbles placed into an fp32 bit pattern and scaled
+with one multiply; the bf16 pattern built with integer ops; and bf16 weights. `dot_scaled`
+was the fastest FP4 variant at every tile: 278 µs at block_n 256 / 8 warps, against 327 µs
+for fp32 bits and 483–634 µs for integer bits. The fp32 variant also used a wrong scale
+exponent; its error is 1.0, but it was slower anyway. With bf16 weights this simple kernel
+reaches only 0.3–0.4 TB/s, against 1.0–1.3 for `matmul_ogs`, so it cannot show the
+conversion's share by itself. The evidence that the conversion is the bound stays the
+`matmul_ogs` comparison above. A budget estimate fits it: 0.65 TB/s of MXFP4 is 1.3 G weights a second. A GCD issues ~12 T
+VALU lane-ops a second, so that is ~9 operations per weight for unpacking, scaling and
+converting. Doubling the rate would mean ≤ 5 operations per weight: packed 16-bit ops or
+`v_perm_b32` byte lookups through inline assembly. That is a hand-tuned kernel, not a flag.
 
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
@@ -1123,5 +1136,6 @@ take ~120 µs for gate/up and ~60 µs for down, against 214 and 130. That is ~7 
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
+| `test_fp4_upcast.py`, `run_fp4_upcast_test.sh` | MXFP4 upcast: `tl.dot_scaled` vs bit-trick conversions vs bf16 weights in one decode-shaped GEMM |
 | `test_moe_roofline.py`, `run_moe_roofline_test.sh` | expert GEMMs against HBM bandwidth and bf16 weights; block_m/n/k, split_k, warps/stages sweep |
 | `../deepseek_v41_gfx90a/run_v4_serve.sh` | the serving job (switches documented at its top) |
