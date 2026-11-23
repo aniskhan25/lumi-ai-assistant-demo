@@ -4,6 +4,13 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-23): agentic load (32 / 64 conversations resending 8–30k-token
+> contexts, `AGENTIC=1`): 144 / 154 output tok/s with prefix caching and sparse
+> sliding-window retention, against 22 / 27 without hits; median time to first token 4 s at
+> 16–32k (32 conversations) instead of 140–180 s; 87–89 % of prompt tokens from the cache,
+> answers 93 % right either way (jobs 23909353, 23911139). Now bound by prefilling the
+> ~2k new tokens per turn: time per output token ~165 ms.**
+>
 > **Status (2026-11-21): prefix caching works (`PREFIX_CACHING=1`, opt-in): a resent
 > context's time to first token falls from 4.5 s to 0.13–0.19 s at 17k tokens and from 2.6 s
 > to 0.19 s at 9k (agentic turns). Hits match cold prefills within run-to-run noise over 24
@@ -664,6 +671,49 @@ sweep as job 23902280): 59.3 / 743.9 / 943.3 tok/s at 1 / 32 / 64 users against 
 732.1 / 932.3 (c=1: 4 prompts, TPOT 15.5 against 14.7 ms, +5 %; not retested, so unclear whether
 the 8-token hashing or noise). GSM8K probe 97.5 % (200), sanity 5/5, needles 2/2 with
 caching on. Not covered: preemption of a request that started from a hit.
+
+**Agentic load** (`agentic_bench.py`, `AGENTIC=1`): conversations that resend their whole
+context each turn: a shared preamble, a session line, a ~8k-token document, then per turn
+a GSM8K question, the greedy answer (≤ 384 tokens) and ~1.5k tokens of "tool output"; at
+30k tokens a conversation starts over. 32, then 64 at once, 20 min each, the first 5 min
+not counted; 2048-token chunks, `--max-num-seqs 64`, DSpark.
+
+*No hits with dense retention* (job 23909353): 0 cached tokens in 725 turns. A probe
+(`prefix_evict_probe.py`, `PREFIX_EVICT=1`, job 23910870) found a cached 9k-token prefix
+alive after 200k tokens of other prefill and gone after 400k, against the 2.24M tokens the
+pool reports. The layout (`DSV41_DEBUG_KV=1`): V4.1 shares compressed KV, so only 4 layers
+own one (one group, 64-token blocks), but all 43 have a 128-token sliding window (15
+groups, 32-token blocks). 0.26's dense retention hashes every sliding-window block, since a
+hit needs 5 contiguous ones (window + DSpark lookahead) and that covers each 64-token
+boundary, and returns them to the LRU queue: per prefilled token ~30× more blocks than the
+compressed group uses, so the pool turns over after a few hundred thousand tokens, while
+32 conversations put ~280k tokens of other prefill between a conversation's turns.
+
+*Fix:* 0.26's `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` keeps sliding-window tails once per
+segment and at each request's prompt end (the next turn's hit); other sliding-window
+blocks get no hash and are reused first. `PREFIX_CACHING=1` now sets it to 4096
+(`RETENTION=dense` for the old behaviour). The probe (job 23911139): the prefix survives
+1.6M tokens of other prefill (8960 of ~9020 cached each time; one hit landed on the 8192
+segment boundary instead).
+
+| (job) | 32 conv., no hits (23909353) | 32 conv., retention 4096 (23911139) | 64 conv., no hits | 64 conv., retention 4096 |
+|---|---|---|---|---|
+| output tok/s | 22 | **144** | 27 | **154** |
+| turns in the 15-min window | 180 | 1141 | 236 | 1217 |
+| prompt tokens from the cache | 0 % | 87 % | 0 % | 89 % |
+| TTFT median, 8–16k / 16–24k / 24–32k | 101 / 142 / 178 s | 8.6 / 4.1 / 4.3 s | 191 / 250 / – s | 35 / 21 / 22 s |
+| TPOT median | 153 ms | 164 ms | 152 ms | 165–180 ms |
+| answers right | 92.3 % | 93.1 % | 92.0 % | 92.7 % |
+| preemptions | 0 | 0 | 0 | 0 |
+
+DSpark acceptance 3.0–3.1 throughout. The 8–16k bucket holds each conversation's cold
+first turn, hence 69 % cached there. With hits, each turn still prefills its ~2k new tokens
+(the answer and tool output since the last turn's prompt end): 13 % of 24.7k prompt tok/s
+is ~3.2k tok/s of real prefill, near the ~3.8k this node prefills at 16–30k context, so
+every step carries a 2048-token prefill chunk and the decode rows wait on it (TPOT
+~165 ms against 35 ms at 32 users on 1k-token prompts). Agentic throughput is now prefill
+throughput at long context. Preemption after a hit is still untested (no preemptions:
+contexts never filled the pool).
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
