@@ -52,6 +52,22 @@ def pick(M: int, N: int, K: int):
     return None
 
 
+def gemm_fp8_round(x2d: torch.Tensor, weight: torch.Tensor, group: int):
+    """BF16_LINEAR's FP8 activation rounding and the GEMM in one kernel, where this module's
+    table picks a Triton tile whose BLOCK_K holds whole 128-column groups; else None (the
+    caller rounds separately). Bit-identical to rounding first (test_fp8_fuse.py)."""
+    from .score_gemm import score_mm
+
+    M, K = x2d.shape
+    if (group != 128 or M > 128 or x2d.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16
+            or not x2d.is_contiguous() or weight.stride(1) != 1):
+        return None
+    cfg = pick(M, weight.shape[0], K)
+    if cfg is None or cfg[2] % 128:
+        return None
+    return score_mm(x2d, weight, cfg, out_dtype=torch.bfloat16, fp8_round=True)
+
+
 def install() -> None:
     import vllm.model_executor.layers.utils as u
 

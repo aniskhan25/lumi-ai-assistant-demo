@@ -95,9 +95,20 @@ def install() -> None:
     fake_quant = fp8_round_torch if os.environ.get("DSV4_FP8_ROUND") == "torch" else fp8_round_triton
     state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
 
+    # DSV4_FP8_FUSE=1 (default) with DSV4_DENSE_GEMM: the rounding inside the Triton GEMM
+    # where its tile allows (dense_gemm.gemm_fp8_round); 256 launches a step fewer at 32 users.
+    fused = None
+    if (act_fp8 and fake_quant is fp8_round_triton and os.environ.get("DSV4_DENSE_GEMM") == "1"
+            and os.environ.get("DSV4_FP8_FUSE", "1") == "1"):
+        from .dense_gemm import gemm_fp8_round as fused
+
     def run(self, layer, x, bias):
         if not act_fp8:
             return gemm(layer, x, layer.weight, bias)
+        if fused is not None and bias is None:
+            y = fused(x.reshape(-1, x.shape[-1]), layer.weight, self.weight_block_size[1])
+            if y is not None:
+                return y.view(*x.shape[:-1], layer.weight.shape[0])
         x2d = fake_quant(x.reshape(-1, x.shape[-1]), self.weight_block_size[1])
         return gemm(layer, x2d, layer.weight, bias).view(*x.shape[:-1], layer.weight.shape[0])
 

@@ -22,9 +22,27 @@ import triton.language as tl
 
 
 @triton.jit
+def _fp8_round_tile(a, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, eps):
+    """bf16_linear._fp8_round_kernel on a [BLOCK_M, BLOCK_K] tile, per 128-column group (the
+    same fp32 operations, so bit-identical): scale by max(amax, eps) / 448, round to e4m3
+    precision (RNE, subnormal grid 2^-9 below 2^-6), scale back, bf16."""
+    G: tl.constexpr = BLOCK_K // 128
+    x = tl.reshape(a.to(tl.float32), [BLOCK_M, G, 128])
+    s = tl.maximum(tl.max(tl.abs(x), axis=2), eps) / 448.0
+    v = tl.minimum(tl.maximum(x / s[:, :, None], -448.0), 448.0)
+    bits = v.to(tl.int32, bitcast=True)
+    bits = (bits + 0x7FFFF + ((bits >> 20) & 1)) & -1048576
+    normal = bits.to(tl.float32, bitcast=True)
+    sub = ((v * 512.0 + 12582912.0) - 12582912.0) / 512.0
+    q = tl.where(tl.abs(v) < 0.015625, sub, normal)
+    return tl.reshape((q * s[:, :, None]).to(tl.bfloat16), [BLOCK_M, BLOCK_K])
+
+
+@triton.jit
 def _score_mm_kernel(x_ptr, w_ptr, o_ptr, M, N, K, sxm, swn, som,
                      BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                     SPLIT_K: tl.constexpr, ATOMIC: tl.constexpr, M_FAST: tl.constexpr = False):
+                     SPLIT_K: tl.constexpr, ATOMIC: tl.constexpr, M_FAST: tl.constexpr = False,
+                     FP8_ROUND: tl.constexpr = False, eps=1e-10):
     # M_FAST: the token blocks of one weight tile are adjacent programs, so they run together
     # and the weight tile comes from HBM once (n-major order re-reads it per token block).
     if M_FAST:
@@ -45,6 +63,8 @@ def _score_mm_kernel(x_ptr, w_ptr, o_ptr, M, N, K, sxm, swn, som,
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for _ in range(0, k_len, BLOCK_K):
         a = tl.load(a_ptrs, mask=mask_m, other=0.0)
+        if FP8_ROUND:  # BF16_LINEAR's activation rounding, fused (BLOCK_K a multiple of 128)
+            a = _fp8_round_tile(a, BLOCK_M, BLOCK_K, eps)
         b = tl.load(b_ptrs)
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_K
@@ -97,8 +117,10 @@ TORCH_SUM = os.environ.get("DSV4_SPLITK_SUM", "triton") == "torch"
 
 
 def score_mm(x: torch.Tensor, w: torch.Tensor, cfg=None, atomic: bool = False,
-             out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    """x [M, K] bf16 @ w[N, K].T -> [M, N] in out_dtype (fp32 accumulation either way)."""
+             out_dtype: torch.dtype = torch.float32, fp8_round: bool = False) -> torch.Tensor:
+    """x [M, K] bf16 @ w[N, K].T -> [M, N] in out_dtype (fp32 accumulation either way).
+    fp8_round: round x through FP8 per 128 columns first, in the kernel (cfg's BLOCK_K must
+    be a multiple of 128)."""
     M, K = x.shape
     N = w.shape[0]
     cfg = cfg or pick(M, N)
@@ -108,7 +130,8 @@ def score_mm(x: torch.Tensor, w: torch.Tensor, cfg=None, atomic: bool = False,
     stages, m_fast = (cfg[5], cfg[6]) if len(cfg) > 5 else (2, False)
     assert N % bn == 0 and K % (bk * sk) == 0, (M, N, K, cfg)
     grid = ((triton.cdiv(M, bm), N // bn, sk) if m_fast else (N // bn, triton.cdiv(M, bm), sk))
-    kw = dict(M_FAST=m_fast, num_warps=warps, num_stages=stages)
+    assert not fp8_round or bk % 128 == 0, cfg
+    kw = dict(M_FAST=m_fast, FP8_ROUND=fp8_round, num_warps=warps, num_stages=stages)
     if sk == 1:
         out = torch.empty(M, N, dtype=out_dtype, device=x.device)
         _score_mm_kernel[grid](x, w, out, M, N, K, x.stride(0), w.stride(0), out.stride(0),
