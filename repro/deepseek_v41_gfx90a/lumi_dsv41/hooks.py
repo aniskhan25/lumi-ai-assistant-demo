@@ -643,7 +643,10 @@ def _prefill_stages(module) -> None:
     num_stages=1. Its wrapper leaves Triton's default (2), and software-pipelining the
     gathered KV rows makes it 2.2x slower on gfx90a: 5.98 -> 2.73 ms for a 2048-query chunk
     at 4k context, 5.99 -> 2.87 ms at 16k, same tile otherwise and the same output
-    (test_sparse_prefill.py, job 23900392). It was ~29 % of prefill (job 23898197)."""
+    (test_sparse_prefill.py, job 23900392). It was ~29 % of prefill (job 23898197).
+    Also 2 warps and AMD's 16-wide matrix instruction (matrix_instr_nonkdim=16,
+    waves_per_eu=1): 2.90 -> 1.77 ms at 16k, 2.92 -> 1.79 at 30k, same output
+    (launch-option sweep, job 23983859)."""
     import os
 
     if module._ON_GFX950 or os.environ.get("DSV41_SPARSE_PREFILL") != "1":
@@ -651,7 +654,8 @@ def _prefill_stages(module) -> None:
     _source_patch(
         module, "_rocm_sparse_attn_prefill_ragged_triton",
         "        num_warps=num_warps,\n",
-        "        num_warps=num_warps,\n        num_stages=1,\n",
+        "        num_warps=2,\n        num_stages=1,\n        matrix_instr_nonkdim=16,\n"
+        "        waves_per_eu=1,\n",
     )
 
 
