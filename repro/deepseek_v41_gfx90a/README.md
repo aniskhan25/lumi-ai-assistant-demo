@@ -883,6 +883,26 @@ of weights). The sweep also overrode num_warps, num_stages and the tile-order sw
 sweep, BLOCK_K 32 with matrix_instr_nonkdim 32 gives garbage on some shapes (rel err
 ~1e31; rejected by the check, never served).
 
+*Agentic turn re-profiled* (job 23995226, commit f9bba87, same turn as job 23974033): 2062
+new tokens over 20,032 cached, **664 ms** to the first token (717 before this round), the
+same length cold at position 0 483 ms (554). Per 2048-token chunk, mean of the 8 ranks
+(analyze_trace × 4):
+
+| component | ms | range over ranks | before (job 23974033) |
+|---|---|---|---|
+| all-reduce | **93.6** | 72–109 | 79–99 |
+| MoE experts | **88.3** | 78–94 | 78–96 |
+| decoder-layer kernels | 82.0 | 81–83 | 119 (indexer logits ~35, prenorm GEMM ~13, mHC post ~12; mHC pre now small) |
+| sparse-attention prefill | 77.7 | 78 | 116 |
+| bf16 GEMMs | 42.0 | 41–43 | 43 |
+
+The all-reduce is now the largest item: ~34 ms of transfer, ~60 ms of waiting for each
+layer's busiest rank. MoE per rank is the same in both profiles (rank 0 94 / 96 ms,
+rank 2 78 / 78, the others in between): systematic expert popularity under the linear
+placement (48 consecutive experts per rank), not batch noise (~1,500 routed pairs per
+rank per chunk, ±2.5 %). vLLM's EPLB is not available: the Triton MXFP4 experts refuse
+`enable_eplb`, and the vendored V4.1 model has no rebalancing interface.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
