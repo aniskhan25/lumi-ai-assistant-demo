@@ -11,7 +11,11 @@ make_routing_data   topk_ids.to(int16), topk_weights.to(bf16), torch.zeros(bitma
 UnfusedOAITritonExperts.apply
                     intermediate_cache1[dst_indx] and intermediate_cache2[src_indx] index with
                     int32 tensors: torch casts each index to int64 (a strided copy, ~13 us)
-                    before its gather. Here a Triton row gather takes the int32 index directly.
+                    before its gather (so does make_routing_data's gate_scal gather). Here a
+                    Triton row gather takes the int32 index directly.
+                    test_moe_glue.py (job 23983883): routing outputs equal to vLLM's on every
+                    routed entry, gathers and the activation bit-identical; the replaced glue
+                    101-116 -> 70-82 us per MoE layer (1.2-1.6 ms a step at 2-128 tokens).
 SiluAndMulWithClamp (the shared expert; vLLM sends ROCm to forward_native)
                     clamp, clamp, mul, sigmoid, mul, add, mul: ~6 launches a layer. Here one
                     kernel with the same bf16 rounding after each op.
@@ -119,7 +123,7 @@ def install() -> None:
             combine_indx = sparse_logits.mask_metadata.col_sorted_indx
             ragged = m.make_ragged_tensor_metadata(sparse_logits.mask_metadata.col_sum,
                                                    dispatch_indx.shape[0])
-            gate_scal = sparse_logits.vals.flatten()[combine_indx]
+            gate_scal = gather_rows(sparse_logits.vals.reshape(-1, 1), combine_indx).view(-1)
             routing_data = m.RoutingData(gate_scal, ragged.block_sizes, num_local_experts, topk,
                                          ragged)
             return (routing_data, m.GatherIndx(combine_indx, dispatch_indx),
