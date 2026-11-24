@@ -137,4 +137,31 @@ for t in [int(x) for x in __import__('os').environ.get('MHC_SWEEP_T', '16 32 96 
     print(f"  T={t:4d}: split-K {t_sk:6.3f}  torch {t_mm:6.3f}  tiled {times[best]:6.3f} {best}  "
           + " ".join(f"{c}:{times[c]:.3f}" for c in top[1:]) + f"  (layer0 err {e0:.1e})")
 
+print("5. gates: fused in the collapse's block-0 programs vs their own token-blocked kernel "
+      "(whole delayed-pre call, ms; carried pre-mix)")
+for t in (1, 16, 96, 384, 2048, 4096):
+    residual = torch.randn(t, HC, H, device=dev).bfloat16()
+    fn = torch.randn(HC3, HC * H, device=dev) * 0.02
+    scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5
+    pre_mix = torch.rand(t, HC, device=dev) + 0.1
+    args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
+    saved = (mt.GATES_MIN_TOKENS, mt.GATES_BLOCK_T)
+    mt.GATES_MIN_TOKENS = None
+    fused = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+    t_fused = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.GATES_MIN_TOKENS = 1
+    times = {}
+    for bt in (16, 32, 64, 128):
+        mt.GATES_BLOCK_T = bt
+        got = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+        diff = max((a.float() - b.float()).abs().max().item() for a, b in zip(got, fused))
+        if diff > 1e-6:
+            failures.append(f"split gates BLOCK_T={bt} T={t}: max |diff| {diff:.1e}")
+        times[bt] = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.GATES_MIN_TOKENS, mt.GATES_BLOCK_T = saved
+    best = min(times, key=times.get)
+    print(f"  T={t:5d}: fused {t_fused:7.3f}  split " + "  ".join(
+        f"{bt}:{times[bt]:.3f}" for bt in times) + f"  (best BLOCK_T {best}, "
+        f"{t_fused / times[best]:.1f}x)", flush=True)
+
 print("FAILED:", failures or "none")

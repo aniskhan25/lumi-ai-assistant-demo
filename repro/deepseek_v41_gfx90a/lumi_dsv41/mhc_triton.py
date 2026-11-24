@@ -95,10 +95,11 @@ def _pre_delayed_kernel(
     num_tokens, stride_rt, stride_rm, inv_k,
     rms_eps, pre_eps, sk_eps, post_mult,
     H: tl.constexpr, HC: tl.constexpr, SK_REPEAT: tl.constexpr, HAS_CARRIED: tl.constexpr,
-    N_SPLITS: tl.constexpr, BLOCK: tl.constexpr,
+    N_SPLITS: tl.constexpr, BLOCK: tl.constexpr, GATES: tl.constexpr = True,
 ):
-    """One program per (token, hidden block). Block 0 also writes the token's gates.
-    mix [N_SPLITS, T, hc3] and sqr [N_SPLITS, T] are summed over the splits."""
+    """One program per (token, hidden block). Block 0 also writes the token's gates (unless
+    GATES is off: _gates_kernel writes them). mix [N_SPLITS, T, hc3] and sqr [N_SPLITS, T]
+    are summed over the splits."""
     t = tl.program_id(0).to(tl.int64)
     hb = tl.program_id(1)
     HC3: tl.constexpr = HC * (2 + HC)
@@ -110,7 +111,7 @@ def _pre_delayed_kernel(
     else:  # no carried pre-mix: the layer input is stream 0
         w = tl.where(j == 0, 1.0, 0.0)
 
-    if hb == 0:
+    if GATES and hb == 0:
         sq = tl.load(sqr_ptr + t)
         m_pre = tl.load(mix_ptr + t * HC3 + j)
         m_post = tl.load(mix_ptr + t * HC3 + HC + j)
@@ -139,6 +140,56 @@ def _pre_delayed_kernel(
     x = tl.load(res_ptr + t * stride_rt + j[:, None] * stride_rm + offs[None, :]).to(tl.float32)
     tl.store(out_ptr + t * H + offs,
              tl.sum(w[:, None] * x, 0).to(out_ptr.dtype.element_ty))
+
+
+@triton.jit
+def _gates_kernel(
+    mix_ptr, sqr_ptr, scale_ptr, base_ptr, post_ptr, comb_ptr, next_pre_ptr,
+    num_tokens, inv_k, rms_eps, pre_eps, sk_eps, post_mult,
+    HC: tl.constexpr, SK_REPEAT: tl.constexpr, N_SPLITS: tl.constexpr, BLOCK_T: tl.constexpr,
+):
+    """The gates of _pre_delayed_kernel's block 0 for BLOCK_T tokens at once ([BLOCK_T, hc,
+    hc] tiles), same arithmetic in the same order. There, each token's 20 Sinkhorn
+    iterations on a 4x4 matrix ran serially in its own program: at 2048 tokens ~0.9 ms
+    a call (agentic-turn profile, job 23974033)."""
+    HC3: tl.constexpr = HC * (2 + HC)
+    tok = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    tmask = tok < num_tokens
+    tok = tl.where(tmask, tok, 0).to(tl.int64)
+    j = tl.arange(0, HC)
+    t2 = tok[:, None] * HC3 + j[None, :]  # [T, hc]
+    t3 = tok[:, None, None] * HC3 + 2 * HC + j[None, :, None] * HC + j[None, None, :]
+    sq = tl.load(sqr_ptr + tok)
+    m_pre = tl.load(mix_ptr + t2)
+    m_post = tl.load(mix_ptr + t2 + HC)
+    m_comb = tl.load(mix_ptr + t3)
+    for s in tl.static_range(1, N_SPLITS):
+        sq += tl.load(sqr_ptr + s * num_tokens + tok)
+        m_pre += tl.load(mix_ptr + s * num_tokens * HC3 + t2)
+        m_post += tl.load(mix_ptr + s * num_tokens * HC3 + t2 + HC)
+        m_comb += tl.load(mix_ptr + s * num_tokens * HC3 + t3)
+    rms = tl.rsqrt(sq * inv_k + rms_eps)
+    pre = tl.sigmoid(m_pre * rms[:, None] * tl.load(scale_ptr) + tl.load(base_ptr + j)[None, :]) + pre_eps
+    tl.store(next_pre_ptr + tok[:, None] * HC + j[None, :], pre, mask=tmask[:, None])
+    post = tl.sigmoid(m_post * rms[:, None] * tl.load(scale_ptr + 1)
+                      + tl.load(base_ptr + HC + j)[None, :])
+    tl.store(post_ptr + tok[:, None] * HC + j[None, :], post * post_mult, mask=tmask[:, None])
+    jk = j[:, None] * HC + j[None, :]
+    cm = (m_comb * rms[:, None, None] * tl.load(scale_ptr + 2)
+          + tl.load(base_ptr + 2 * HC + jk)[None, :, :])
+    cm = tl.exp(cm - tl.max(cm, 2)[:, :, None])
+    cm = cm / tl.sum(cm, 2)[:, :, None] + sk_eps
+    cm = cm / (tl.sum(cm, 1)[:, None, :] + sk_eps)
+    for _ in tl.static_range(SK_REPEAT - 1):
+        cm = cm / (tl.sum(cm, 2)[:, :, None] + sk_eps)
+        cm = cm / (tl.sum(cm, 1)[:, None, :] + sk_eps)
+    tl.store(comb_ptr + tok[:, None, None] * HC * HC + jk[None, :, :], cm,
+             mask=tmask[:, None, None])
+
+
+# Gates in their own token-blocked kernel from this many tokens on (None: never).
+GATES_MIN_TOKENS = 1
+GATES_BLOCK_T = 64
 
 
 @triton.jit
@@ -210,13 +261,21 @@ def mhc_pre_delayed_triton(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
         sqrsum = src.square().sum(-1).unsqueeze(0)  # [1, T]
     residual = _rows(residual)
     carried = pre_mix.float().contiguous() if pre_mix is not None else next_pre
+    split_gates = GATES_MIN_TOKENS is not None and t >= GATES_MIN_TOKENS
+    if split_gates:
+        _gates_kernel[(triton.cdiv(t, GATES_BLOCK_T),)](
+            mixes, sqrsum, hc_scale, hc_base, post, comb, next_pre,
+            t, 1.0 / k, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
+            HC=hc, SK_REPEAT=sinkhorn_repeat, N_SPLITS=mixes.shape[0],
+            BLOCK_T=GATES_BLOCK_T, num_warps=4,
+        )
     _pre_delayed_kernel[(t, hidden // BLOCK_H)](
         mixes, sqrsum, hc_scale, hc_base, residual, carried,
         post, comb, next_pre, layer_input,
         t, residual.stride(0), residual.stride(1), 1.0 / k,
         rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
         H=hidden, HC=hc, SK_REPEAT=sinkhorn_repeat, HAS_CARRIED=pre_mix is not None,
-        N_SPLITS=mixes.shape[0], BLOCK=BLOCK_H, num_warps=4,
+        N_SPLITS=mixes.shape[0], BLOCK=BLOCK_H, GATES=not split_gates, num_warps=4,
     )
     return post, comb, layer_input, next_pre
 
