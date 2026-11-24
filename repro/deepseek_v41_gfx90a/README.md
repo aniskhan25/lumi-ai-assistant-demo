@@ -4,6 +4,10 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-24): mHC delayed pre rewritten (per-stream row loads, 1 warp): 551 →
+> 112 µs a call at 2048 tokens; agentic load 159 output tok/s at 32 conversations (+10 %),
+> GSM8K 99 % (job 23982702).**
+>
 > **Status (2026-11-23): agentic load (32 / 64 conversations resending 8–30k-token
 > contexts, `AGENTIC=1`): 144 / 154 output tok/s with prefix caching and sparse
 > sliding-window retention, against 22 / 27 without hits; median time to first token 4 s at
@@ -762,6 +766,29 @@ Capturing graphs up to 2048 tokens (`MAX_CAPTURE=2048`, job 23975414) so the chu
 graphable parts replay: start-up hangs at the first size past 512 (51 of 147), with 3 of
 8 ranks still capturing and 5 already registering graph buffers; stack dumps empty, not
 pursued (launch overhead is ~20 ms of a ~600 ms chunk).
+
+*mHC delayed pre* (`mhc_triton.py`, `test_mhc_triton.py` sections 5–8). First guess, the
+gates and 20 Sinkhorn iterations run serially per token in the collapse's block-0
+programs: moved to a token-blocked kernel (`_gates_kernel`, same arithmetic, outputs
+equal), no faster at 2048–4096 tokens (0.743 vs 0.750 ms a call) and slower at decode
+sizes, so off (`GATES_MIN_TOKENS = None`; job 23982520). A per-kernel profile of one call
+at 2048 tokens (job 23982574): the collapse `_pre_delayed_kernel` 551 µs for 84 MB read and
+21 MB written (~190 GB/s), the prenorm GEMM 195 µs. The collapse loaded the 4 streams as a
+[4, 512] tile over 4 warps and summed across the stream axis; per-stream 1-D row loads with
+a running fp32 sum, 256 columns and 1 warp a program (`PRE_ROWS/PRE_BLOCK/PRE_WARPS`):
+
+| delayed-pre call (ms) | 16 tokens | 384 | 2048 |
+|---|---|---|---|
+| tile, 512, 4 warps (before) | 0.095 | 0.163 | 0.749 |
+| rows, 256, 1 warp | 0.090 | 0.091 | **0.313** |
+
+(the collapse alone 551 → 112 µs; with 1 warp the tile form is nearly as fast, so the cost
+was 4 warps splitting a 4-row tile; job 23982591 / 23982657). The post kernel, rewritten
+the same way, was already at its limit (0.171 → 0.168 ms at 2048). All outputs within the
+reference tolerances. Serving (job 23982702): GSM8K 99 % (200), sanity 5/5, needles; agentic
+load at 32 conversations 159 output tok/s against 144 (1223 turns against 1141 in the
+15-min window), TPOT 154 against 164 ms, median TTFT 7.0 / 3.5 / 4.0 s at 8–16k / 16–24k /
+24–32k, answers 92.3 % right.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
