@@ -120,7 +120,84 @@ def ROUTE(ids, wts):
     return rd, gi, si, ids.shape[0] * TOPK
 
 
-if __name__ == "__main__":
+# Served tiles (lumi_dsv41/__init__.py, MOE_TILES=1): tokens <= m_max -> (block_n, split_k).
+SERVED = {"gate_up": [(1, (32, 2)), (2, (32, 4)), (8, (128, 2)), (8192, (128, 1))],
+          "down": [(2, (32, 2)), (4, (128, 2)), (8192, (128, 1))]}
+OVR: dict = {}  # launch overrides applied on top of the AMD default flags
+_stock_amd = of.make_default_opt_flags_amd
+
+
+def _amd_with_overrides(*args, **kwargs):
+    import dataclasses
+
+    flags = _stock_amd(*args, **kwargs)
+    if not OVR:
+        return flags
+    tk = {**flags.target_kernel_kwargs,
+          **{k: v for k, v in OVR.items() if k in ("waves_per_eu", "matrix_instr_nonkdim", "kpack")}}
+    rest = {k: v for k, v in OVR.items() if k in ("num_warps", "num_stages", "xcd_swizzle", "group_m")}
+    return dataclasses.replace(flags, target_kernel_kwargs=tk, **rest)
+
+
+of.make_default_opt_flags_amd = _amd_with_overrides
+
+
+def served_cons(which, M):
+    for m_max, (bn, sk) in SERVED[which]:
+        if M <= m_max:
+            return {"block_n": bn, "split_k": sk}
+
+
+def launch_sweep():
+    """AMD launch options on top of the served tiles: warps, stages, waves_per_eu, kpack and
+    the tile-order swizzle (num_xcds 8 is MI300's; one MI250X GCD is a single die)."""
+    global OVR
+    print("\nlaunch options on the served tiles: us per call (num_warps, num_stages, "
+          "waves_per_eu, kpack, xcd_swizzle)")
+    for which in ("gate_up", "down"):
+        for M in (int(m) for m in os.environ.get("MOE_LAUNCH_M", "6 96 384 2048").split()):
+            cs = calls(M, which)
+            fns = [c[0] for c in cs]
+            cons = served_cons(which, M)
+
+            def read_rows(c, t):
+                t = t.view(-1, t.shape[-1]).float()
+                return t if c[2] is None else t[c[2].long()]
+
+            OVR = {}
+            with_flags(cons, lambda: [f() for f in fns])
+            ref = [read_rows(c, c[1]).clone() for c in cs]
+            t0 = with_flags(cons, lambda: graph_us(fns))
+            rows = []
+            for nw, st, we, kp, xs in itertools.product(
+                    (2, 4) if M <= 16 else (4, 8), (1, 2), (0, 1, 2), (1, 2), (1, 8)):
+                OVR = {"num_warps": nw, "num_stages": st, "waves_per_eu": we, "kpack": kp,
+                       "xcd_swizzle": xs}
+                try:
+                    with_flags(cons, lambda: [f() for f in fns])
+                    err = max(((read_rows(c, c[1]) - r).abs().max()
+                               / r.abs().max().clamp_min(1e-6)).item() for c, r in zip(cs, ref))
+                    if err > 2e-3:
+                        rows.append((float("inf"), dict(OVR), f"err {err:.1e}"))
+                        continue
+                    rows.append((with_flags(cons, lambda: graph_us(fns)), dict(OVR), ""))
+                except Exception as e:  # unsupported combination
+                    torch.cuda.synchronize()
+                    rows.append((float("inf"), dict(OVR), repr(e)[:60]))
+            OVR = {}
+            rows.sort(key=lambda r: r[0])
+            fmt = lambda o: f"{o['num_warps']}/{o['num_stages']}/{o['waves_per_eu']}/{o['kpack']}/{o['xcd_swizzle']}"  # noqa: E731
+            bad = [r for r in rows if r[2].startswith("err")]
+            print(f"  {which:7} M={M:5d} {cons}: served {t0:8.1f}  best {rows[0][0]:8.1f} "
+                  f"{fmt(rows[0][1])} ({t0 / rows[0][0]:.2f}x)  "
+                  + "  ".join(f"{fmt(r[1])}:{r[0]:.0f}" for r in rows[1:5])
+                  + (f"  [{len(bad)} over tolerance]" if bad else ""), flush=True)
+
+
+if __name__ == "__main__" and os.environ.get("MOE_LAUNCH_SWEEP") == "1":
+    print(torch.cuda.get_device_name(), f"local experts {E}, gate/up [{H} -> {N1}], down [{I} -> {H}]")
+    launch_sweep()
+elif __name__ == "__main__":
     print(torch.cuda.get_device_name(), f"local experts {E}, gate/up [{H} -> {N1}], down [{I} -> {H}]")
     for which in ("gate_up", "down"):
         print(f"\n{which}: us per call; best forced flags vs default (block_n, split_k)")
