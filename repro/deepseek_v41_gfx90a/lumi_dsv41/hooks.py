@@ -593,6 +593,64 @@ def _expert_counts(module) -> None:
     cls.forward_modular = forward_modular
 
 
+def _expert_placement(module) -> None:
+    """DSV41_EXPERT_PLACEMENT=<json>: a per-layer expert -> EP rank placement instead of the
+    linear one (48 consecutive experts a rank). The JSON maps a MoE layer name to 384 ranks
+    (expert_placement.py, from EXPERT_COUNTS router counts); layers not in it stay linear.
+
+    Each layer ends in an all-reduce that waits for its slowest rank, and the router's hot
+    experts are concentrated in a different rank per layer: timed on the served kernels, a
+    balanced placement cuts the MoE critical path of a 2048-token chunk from 146.6 to
+    120.6 ms (test_moe_placement.py, job 23997455). The map is the one ExpertMapManager
+    hands both the weight loader (global -> local expert id; others are skipped) and the
+    Triton MoE path (remap_topk_to_local), so overriding it before weights load is enough.
+    Local ids follow ascending global ids."""
+    import json
+    import os
+
+    path = os.environ.get("DSV41_EXPERT_PLACEMENT")
+    if not path:
+        return
+    import torch
+
+    import vllm.model_executor.layers.fused_moe.expert_map_manager as emm
+
+    placement = json.load(open(path))
+    manager_cls = emm.ExpertMapManager
+    if not getattr(manager_cls, "_lumi_placement_hook", False):
+        stock_calc = manager_cls._calculate_expert_maps
+
+        def _calculate_expert_maps(self):
+            stock_calc(self)
+            ranks = getattr(self, "_lumi_placement", None)
+            if ranks is None or self._expert_map is None:
+                return
+            assert len(ranks) == self.global_num_experts and self.num_fused_shared_experts == 0
+            mine = [e for e, r in enumerate(ranks) if r == self.ep_rank]
+            assert len(mine) == self._local_num_experts, (len(mine), self._local_num_experts)
+            emap = torch.full((self.global_num_experts,), -1, dtype=torch.int32)
+            emap[mine] = torch.arange(len(mine), dtype=torch.int32)
+            self._expert_map = emap.to(self._expert_map.device)
+            if self._expert_mask is not None:
+                self._expert_mask[: self.global_num_experts] = emap > -1
+
+        manager_cls._calculate_expert_maps = _calculate_expert_maps
+        manager_cls._lumi_placement_hook = True
+
+    cls = module.RoutedExperts
+    stock_init = cls.__init__
+
+    def __init__(self, *args, **kwargs):
+        stock_init(self, *args, **kwargs)
+        ranks = placement.get(self.layer_name)
+        if ranks is not None and self.expert_map_manager.expert_map is not None:
+            self.expert_map_manager._lumi_placement = ranks
+            self.expert_map_manager._calculate_expert_maps()
+            self.update_expert_map_info()
+
+    cls.__init__ = __init__
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
 HOOKS["vllm.config.utils"].append(_config_replace)
 HOOKS["vllm.model_executor.models.qwen3_dspark"] = [_dspark_confidence_head]
@@ -600,7 +658,8 @@ HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
 HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes, _debug_kv_views]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
 HOOKS.setdefault("vllm.v1.worker.gpu.model_runner", []).append(_gc_control)
-HOOKS.setdefault("vllm.model_executor.layers.fused_moe.routed_experts", []).append(_expert_counts)
+HOOKS.setdefault("vllm.model_executor.layers.fused_moe.routed_experts", []).extend(
+    [_expert_counts, _expert_placement])
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]

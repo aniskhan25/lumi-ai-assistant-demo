@@ -185,6 +185,9 @@ echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEX
 export DSV41_GC_LOG="${GC_LOG:-0}" DSV41_GC_FREEZE="${GC_FREEZE:-0}"
 # EXPERT_COUNTS=1: per-layer router expert counts to ${LOG}/expert_counts.json (hooks.py)
 if [ "${EXPERT_COUNTS:-0}" = 1 ]; then export DSV41_EXPERT_COUNTS="${LOG}/expert_counts.json"; fi
+# EXPERT_PLACEMENT=<json> (or 1: expert_placement_gsm8k.json): balanced expert placement (hooks.py)
+if [ "${EXPERT_PLACEMENT:-0}" = 1 ]; then EXPERT_PLACEMENT="${REPO}/repro/deepseek_v41_gfx90a/expert_placement_gsm8k.json"; fi
+if [ "${EXPERT_PLACEMENT:-0}" != 0 ]; then export DSV41_EXPERT_PLACEMENT="${EXPERT_PLACEMENT}"; fi
 if [ "${COMPILE:-0}" = 1 ]; then
   DEFAULT_EXTRA="--moe-backend triton_unfused --compilation-config {\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\"$([ -n "${MAX_CAPTURE:-}" ] && echo ",\"max_cudagraph_capture_size\":${MAX_CAPTURE}" || true)}"
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
