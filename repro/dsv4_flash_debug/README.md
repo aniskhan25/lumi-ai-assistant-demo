@@ -99,11 +99,14 @@ torch reference than TileLang and TPOT 0.4–1.2 ms lower from 4 users up (see
 short natural prompts, 32 sequences was 13 % slower at 32 users (same section).
 `MOE_SMALL`'s expert GEMM table v2 (default) and `MOE_GLUE=1` cut the MoE's small kernels:
 **71 tok/s for one user** on GSM8K prompts, TPOT 0.9–1.3 ms lower at every load (see
-"Small kernels around the MoE").
+"Small kernels around the MoE"). Its routing prologue now also covers the legacy
+`triton_kernels` path this container takes, and `QNORM_ROPE=1` runs attention's q-norm /
+RoPE / KV insert in one Triton kernel: **75.6 tok/s for one user**, 824 at 32 (see
+"The routing prologue on the legacy path; q-norm / RoPE / KV insert").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 QNORM_ROPE=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -114,7 +117,8 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **the command above**, GSM8K-question prompts (`BENCH_DATA=gsm8k`) | 64 | 23983908 | 97.4 % | **70.7 / 210.3 / 576.2 / 783.5 / 1098.2** | 14 / 32 / 50 ms |
+| **the command above**, GSM8K-question prompts (`BENCH_DATA=gsm8k`) | 64 | 23989320 | 97.6 % | **75.6 / 223.4 / 603.2 / 824.1 / 1144.3** | 13 / 31 / 47 ms |
+| without the legacy-path routing prologue and `QNORM_ROPE` | 64 | 23983908 | 97.4 % | 70.7 / 210.3 / 576.2 / 783.5 / 1098.2 | 14 / 32 / 50 ms |
 | without `MOE_GLUE` and MoE table v2, GSM8K-question prompts | 64 | 23898747 | 97.4 % | 57.0 / 184.7 / 513.4 / 709.5 / 1054.5 | 17 / 34 / 52 ms |
 | the same, GSM8K-question prompts | 32 | 23898749 | 97.0 % | 54.3 / 181.5 / 485.8 / 618.5 / – | 17 / 42 / – ms |
 | without `MHC_FAST`, 1024-token random prompts | 32 | 23896453 | 97.2 % | **51.8** / 141.3 / 360.9 / **538.7** / – | 18 / 49 / – ms |
@@ -1089,6 +1093,37 @@ more than the launch it saves; it stays off. The buffer copies are mostly needed
 all-reduce's copy into its uncached buffer, and the sparse decode and MoE finalize output
 copies (~0.25 ms together).
 
+### The routing prologue on the legacy path; q-norm / RoPE / KV insert (Nov 24)
+
+A graph profile with `MOE_GLUE` (job 23988423) still showed the six routing-prologue
+kernels. This container's `triton_kernels` has no `SparseMatrix`, so vLLM takes its legacy
+path (`routing_from_bitmatrix`), and `moe_glue.py` had replaced only the other one. Its test
+had compared vLLM's routing with itself; it now prints the path taken. The one-kernel
+prologue now feeds the legacy `routing_from_bitmatrix` too (`MOE_GLUE_ROUTE=1`, the
+default). `test_moe_glue.py` (job 23989302, legacy path): routing equal on every routed
+entry, the replaced glue **100–117 → 19–22 µs per MoE layer**. vLLM's prologue alone was
+~50 µs a layer.
+
+The same profiles showed vLLM's HIP `fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert`
+taking 32–34 µs a call at 1, 32 and 64 users: ~1.4 ms a step. `qnorm_rope.py`
+(`QNORM_ROPE=1`) does it in one Triton kernel: per-head RMSNorm and GPT-J RoPE into the
+head-padded q, zeroed padding heads, and the KV row's RoPE, UE8M0 FP8 quantisation and
+cache insert as vLLM's Triton `quantize_and_insert_k_kernel` writes it. `test_qnorm_rope.py`
+(job 23988389): cache bytes identical, q identical but for one bf16 rounding at 64 tokens.
+Alone the HIP op takes only 9–11 µs and the Triton kernel 6–12. In a decode step (profile
+23988423) the Triton kernel takes 12.6 µs against the HIP op's 33.
+
+| 64 seqs, GSM8K prompts, same day | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 4 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| `MOE_GLUE` without the legacy-path prologue | 23989318 | 97.6 % | 63.2 / 206.7 / 551.5 / 778.9 / 1165.0 | 13.6 / 16.8 / 23.8 / 31.5 / 48.9 ms |
+| + legacy-path prologue (`MOE_GLUE_ROUTE=1`) | 23989319 | 97.2 % | 75.0 / 221.6 / 562.7 / 811.9 / 1135.7 | 12.8 / 16.0 / 22.9 / 30.9 / 47.6 ms |
+| **+ `QNORM_ROPE=1`** (recipe) | 23989320 | 97.6 % | **75.6 / 223.4 / 603.2 / 824.1 / 1144.3** | **12.8 / 15.8 / 22.7 / 30.9 / 47.1** ms |
+
+The prologue lowers TPOT by 0.6–1.3 ms at every load. `QNORM_ROPE` adds 0–0.5 ms, about the
+0.5 ms its ~0.9 ms a step predicts at 1.9 tokens a step. Sanity 5/5 and needles 2/2 in all
+three runs. The one "garbage" flag in 23989320 is a correct answer (15). The same question
+was flagged in control 23898748: the checker reacts to its formatting.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -1138,8 +1173,8 @@ copies (~0.25 ms together).
       big fuse with runtime loops (cold instruction cache), mHC 7.1 → 3.5 ms a step at 32
       users. Next by size: MoE expert GEMMs (~30 % of the step), the 370 dense-GEMM calls,
       sparse attention, all-reduce.
-  16. ~~Small kernels around the MoE~~: done, `MOE_GLUE=1`, TPOT 0.9–1.3 ms lower at every
-      load. Left: the split-K sum kernels (252 a step, 0.86 ms), FP8 rounding (0.99 ms; fusing
+  16. ~~Small kernels around the MoE~~: done, `MOE_GLUE=1` (routing prologue on both
+      `triton_kernels` paths), TPOT 1.7–2.4 ms lower at every load; `QNORM_ROPE=1`, 0–0.5 more. Left: the split-K sum kernels (252 a step, 0.86 ms), FP8 rounding (0.99 ms; fusing
       it was slower), the routing metadata kernels.
   15. ~~Expert GEMM tiles, second pass~~: done, `MOE_SMALL` table v2 (block_m 16, 4 warps,
       one stage), down −15 % in serving, TPOT 0.1–1.8 ms lower. Open: the FP4 → bf16
@@ -1212,6 +1247,8 @@ copies (~0.25 ms together).
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
 | `plugin/lumi_dsv4_debug/moe_glue.py` | one-kernel MoE routing prologue, int32 row gathers, fused shared-expert activation (`DSV4_MOE_GLUE`) |
 | `test_moe_glue.py`, `run_moe_glue_test.sh` | those vs vLLM's code: routing outputs, gathers, activation, us per MoE layer |
+| `plugin/lumi_dsv4_debug/qnorm_rope.py` | attention q-norm / RoPE / KV RoPE + FP8 cache insert in one Triton kernel (`DSV4_QNORM_ROPE`) |
+| `test_qnorm_rope.py`, `run_qnorm_rope_test.sh` | that kernel vs vLLM's HIP op: q, cache bytes, dequantised KV, us per call |
 | `small_kernels.py` | small kernels per step by issuing call, with Python stacks (eager traces) |
 | `test_fp8_fuse.py`, `run_fp8_fuse_test.sh` | FP8 activation rounding fused into the dense GEMM: bit-identity and time (slower) |
 | `test_dense_bw.py`, `run_dense_bw_test.sh` | dense bf16 GEMMs vs the memory bound: tiles, grid order, warps/stages, per-step total |
