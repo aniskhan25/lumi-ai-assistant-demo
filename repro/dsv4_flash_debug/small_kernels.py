@@ -9,6 +9,7 @@ ones, the most common Python stacks (needs a trace recorded with stacks).
     python small_kernels.py TRACE.json.gz STEPS [substring ...]
 """
 
+import bisect
 import collections
 import gzip
 import json
@@ -27,13 +28,25 @@ frames = collections.defaultdict(list)
 for e in ev:
     if e.get("cat") == "python_function" and e.get("ph") == "X":
         frames[e["tid"]].append((e["ts"], e["ts"] + e["dur"], e["name"]))
-for v in frames.values():
+starts = {}
+for tid, v in frames.items():
     v.sort()
+    starts[tid] = [f[0] for f in v]
+SAMPLE = 300  # stacks per kernel name: enough to rank the callers
 
 
 def stack(launch):
-    fs = [f for f in frames.get(launch["tid"], ()) if f[0] <= launch["ts"] <= f[1]]
-    return tuple(f[2] for f in fs[-8:])
+    """Enclosing frames, innermost last: binary search, then walk back over earlier frames
+    (bounded; enclosing frames start earlier and end after the launch)."""
+    fs, st = frames.get(launch["tid"], []), starts.get(launch["tid"], [])
+    i = bisect.bisect_right(st, launch["ts"]) - 1
+    out = []
+    for j in range(i, max(-1, i - 20000), -1):
+        if fs[j][1] >= launch["ts"]:
+            out.append(fs[j][2])
+            if len(out) == 8:
+                break
+    return tuple(reversed(out))
 
 
 rows = collections.defaultdict(lambda: [0.0, 0])
@@ -49,14 +62,18 @@ for e in ev:
     key = (e["name"][:110], api)
     rows[key][0] += e.get("dur", 0)
     rows[key][1] += 1
-    if launch and "Graph" not in api:
+    if launch and "Graph" not in api and sum(stacks[e["name"][:110]].values()) < SAMPLE:
         stacks[e["name"][:110]][stack(launch)] += 1
 
+rows_by_name = collections.Counter()
+for (name, api), (dur, n) in rows.items():
+    rows_by_name[name] += dur
 print(f"per step over {steps:.0f} steps: ms, launches, kernel, issued by")
 for (name, api), (dur, n) in sorted(rows.items(), key=lambda r: -r[1][0])[:40]:
     print(f"  {dur / 1e3 / steps:7.3f} ms {n / steps:7.1f}x  {name}  [{api}]")
 print("\ndirectly launched: top Python stacks (innermost last)")
-for name, c in sorted(stacks.items(), key=lambda kv: -sum(kv[1].values()))[:12]:
-    print(f"--- {name}  ({sum(c.values()) / steps:.1f} per step)")
-    for st, n in c.most_common(3):
-        print(f"    {n / steps:6.1f}x  " + " > ".join(s[:70] for s in st[-5:]))
+for name, c in sorted(stacks.items(), key=lambda kv: -rows_by_name.get(kv[0], 0))[:14]:
+    tot = sum(c.values())
+    print(f"--- {name}  ({tot} launches sampled)")
+    for st, n in c.most_common(4):
+        print(f"    {100 * n / tot:5.1f} %  " + " > ".join(s[:80] for s in st[-5:]))
