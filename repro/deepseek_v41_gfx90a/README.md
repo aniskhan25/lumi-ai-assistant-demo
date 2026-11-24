@@ -966,6 +966,24 @@ as other traffic loads broadly the same experts (re-count with `EXPERT_COUNTS=1`
 regenerate with `expert_placement.py` for a different workload). In `best.env`; off by
 default in `run_v4_serve.sh`.
 
+*MXFP4 expert GEMMs: where the time goes* (`lumi_dsv41/mxfp4_gemm.py`, `test_mxfp4_gemm.py`,
+job 24006798): one grouped GEMM over 48 experts of the gate/up shape (5120 → 4608, 566 MB
+of FP4, cold), M tokens an expert, best tile per mode, all within 1e-2 of an fp32
+dequantize-and-matmul reference; µs a call:
+
+| M | `tl.dot_scaled` (as matmul_ogs) | integer upcast + `tl.dot` | bf16 weights (4× bytes) | FP4 bytes loaded only |
+|---|---|---|---|---|
+| 16 | ~950 | 2172 | 1684 | 710 (~850 GB/s) |
+| 32 | 1148 | 2677 | 1715 | 734 |
+| 64 | 1712 | 3199 | 2369 | 764 |
+
+The compiler's e2m1 → bf16 expansion of `dot_scaled` is ~2× faster than a hand-written
+integer upcast in Triton (sign / 2-bit exponent / mantissa to bf16 bits, the e8m0 scale
+added to the exponent; bit-exact for all 16 codes). `dot_scaled` sits within 1.34× / 1.56×
+/ 2.2× of the load-only floor at 16 / 32 / 64 tokens an expert, and that floor itself reads
+at ~50 % of peak bandwidth. bf16 weights would read 4× the bytes and do not fit anyway. A
+faster upcast would need code below Triton; not pursued.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
