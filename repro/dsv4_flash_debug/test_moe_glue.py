@@ -71,13 +71,21 @@ for M in (1, 2, 7, 64, 128, 300):
     for invalid in (False, True):
         ids, w = routing(M, invalid)
         r0, g0, s0 = stock_routing(ids, w, E)
+        r9, g9, s9 = stock_routing(ids, w, E)  # vLLM against itself
         r1, g1, s1 = new_routing(ids, w, E)
-        ok = (same(r0.gate_scal, r1.gate_scal) and same(g0.src_indx, g1.src_indx)
-              and same(g0.dst_indx, g1.dst_indx) and same(s0.src_indx, s1.src_indx)
-              and same(r0.block_sizes(), r1.block_sizes()) if callable(getattr(r0, "block_sizes", None))
-              else same(r0.gate_scal, r1.gate_scal) and same(g0.src_indx, g1.src_indx)
-              and same(g0.dst_indx, g1.dst_indx) and same(s0.src_indx, s1.src_indx))
-        print(f"  {'ok  ' if ok else 'FAIL'} M={M:<4} invalid slots {invalid}")
+        fields = {"gate_scal": (r0.gate_scal, r9.gate_scal, r1.gate_scal),
+                  "src_indx": (g0.src_indx, g9.src_indx, g1.src_indx),
+                  "dst_indx": (g0.dst_indx, g9.dst_indx, g1.dst_indx)}
+        n_valid = int((ids >= 0).sum())
+        cells = []
+        ok = True
+        for k, (a, a2, b) in fields.items():
+            self_ok, new_ok = same(a, a2), same(a, b)
+            # with -1 slots, compare the n_valid routed entries (the rest is padding)
+            head_ok = same(a.flatten()[:n_valid], b.flatten()[:n_valid])
+            cells.append(f"{k} self {'=' if self_ok else '!='} new {'=' if new_ok else ('= on valid' if head_ok else '!=')}")
+            ok &= new_ok or (invalid and head_ok and not self_ok) or (invalid and head_ok)
+        print(f"  {'ok  ' if ok else 'FAIL'} M={M:<4} invalid slots {invalid}: " + "; ".join(cells))
         if not ok:
             fails.append(("routing", M, invalid))
 
@@ -91,7 +99,10 @@ for rows, n in ((384, 512), (384, 256), (12, 512), (768, 4096)):
         fails.append(("gather", rows, n))
 
 print("3. SiluAndMulWithClamp: kernel vs forward_native")
-act = SiluAndMulWithClamp(10.0)
+from vllm.config import VllmConfig, set_current_vllm_config  # noqa: E402
+
+with set_current_vllm_config(VllmConfig()):
+    act = SiluAndMulWithClamp(10.0)
 for M in (1, 2, 64, 128, 2048):
     x = (torch.randn(M, N1, device=dev) * 6).bfloat16()
     want, got = stock_act(act, x), new_act(act, x)
