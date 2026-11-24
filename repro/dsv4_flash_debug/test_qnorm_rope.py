@@ -77,7 +77,7 @@ for T in (1, 2, 7, 64, 128, 300):
     pos = torch.randint(0, MAX_POS, (T,), device=dev)
     nblocks = T // BS + 4
     slots = torch.randperm(nblocks * BS, device=dev)[:T]
-    slots[::5] = -1
+    slots[1::5] = -1
     c0 = torch.zeros(nblocks, STRIDE, dtype=torch.uint8, device=dev)
     c1 = c0.clone()
     q0 = stock(q.clone(), kv, c0, slots, pos, cos_sin, PAD, EPS, BS)
