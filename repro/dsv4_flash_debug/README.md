@@ -1124,6 +1124,27 @@ The prologue lowers TPOT by 0.6–1.3 ms at every load. `QNORM_ROPE` adds 0–0.
 three runs. The one "garbage" flag in 23989320 is a correct answer (15). The same question
 was flagged in control 23898748: the checker reacts to its formatting.
 
+### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
+
+Two changes the V4.1 port made to this plugin, measured on V4:
+- `FP8_ROUND_BLOCK` (default 2048): the FP8 activation rounding with many 128-column
+  groups per program. `test_fp8_round.py` (job 23990224) finds it bit-identical. It takes
+  3.5 → 2.8 µs a call at 32 rows and 92 → 35 µs at 2048 rows (K 4096).
+- `CUSTOM_AR_MAX_MB`: the custom all-reduce's message limit, 8 MB in vLLM. V4's 2048-token
+  prefill chunks make 16 MB messages, which otherwise go to RCCL.
+
+Same day, both on (`CUSTOM_AR_MAX_MB=32`) against both off. Decode, 64 seqs, GSM8K
+prompts: TPOT 12.8 / 15.7 / 22.8 / 30.0 / 48.9 ms against 12.6 / 15.8 / 22.4 / 30.4 /
+46.2 at 1 / 4 / 16 / 32 / 64 users (jobs 23990225 / 23990227), GSM8K 97.8 / 97.6 %, all
+within run spread. Prefill of 16k random-token prompts: time to first token 6.6 s against
+6.5 s at one user, 19.0 against 18.8 s at four (23990226 / 23990228). Neither helps V4.
+V4.1's gain came from its 32-column MXFP8 groups, where one program per group was mostly
+launch overhead; V4's 128-column groups were not. The blocked kernel stays the default
+(bit-identical, never slower per call); `CUSTOM_AR_MAX_MB` stays unset.
+
+The same runs give the prefill baseline: **6.5 s for a 16k-token prompt** (~2.5k tokens/s),
+where the V4.1 port, a larger model, takes 3.77 s after its prefill work.
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to

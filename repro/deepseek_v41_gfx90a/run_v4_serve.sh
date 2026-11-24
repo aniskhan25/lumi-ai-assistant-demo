@@ -219,12 +219,19 @@ if [ "${BENCH:-0}" = 1 ]; then
     done
   done
 fi
+# PROFILE_PREFILL=N (from the V4.1 branch): profile one prefill of an ~N-token prompt instead
+# of decode (profile_prefill.py); the trace goes to profile/c1.
 if [ "${PROFILE:-0}" = 1 ]; then
   for c in ${PROFILE_CONCURRENCIES:-1 32}; do
     echo "=== profile c=${c} ==="
+    if [ -n "${PROFILE_PREFILL:-}" ]; then
+      "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_prefill.py" \
+        "http://127.0.0.1:${PORT}" dsv4 "${PROFILE_PREFILL}" "${PROFILE_SUFFIX:-}" || STATUS=1
+    else
     "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/profile_decode.py" \
       "http://127.0.0.1:${PORT}" dsv4 "${c}" "${PROFILE_SECONDS:-5}" \
       "$([ "${BENCH_DATA:-random}" = gsm8k ] && echo "${LOG}/bench_gsm8k.jsonl" || true)" || STATUS=1
+    fi
     sleep 20   # traces are written after /stop_profile returns
     mkdir -p "${PROF_DIR}/c${c}"
     find "${PROF_DIR}" -maxdepth 1 -type f -exec mv {} "${PROF_DIR}/c${c}/" \;
@@ -233,7 +240,7 @@ if [ "${PROFILE:-0}" = 1 ]; then
     [ -n "${rank0}" ] && "${RUN[@]}" python "${REPO}/repro/dsv4_flash_debug/analyze_trace.py" "${rank0}"
     # Graph mode: idle time and host-late gaps per step (MoE layers per step: 43, +1 with MTP)
     [ -n "${rank0}" ] && [ "${COMPILE:-0}" = 1 ] && "${RUN[@]}" python \
-      "${REPO}/repro/dsv4_flash_debug/graph_trace.py" "${rank0}" pack_bitmatrix "${STEP_MOE:-44}"
+      "${REPO}/repro/dsv4_flash_debug/graph_trace.py" "${rank0}" "${STEP_KERNEL:-_masked_topk_sum}" "${STEP_MOE:-44}"
   done
 fi
 [ "${STATUS}" != 0 ] && { echo "--- server log tail ---"; grep -v amdsmi "${LOG}/server.log" | tail -60; }
