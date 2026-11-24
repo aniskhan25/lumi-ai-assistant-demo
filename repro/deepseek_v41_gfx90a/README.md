@@ -7,7 +7,8 @@ port work and before downloading its 475 GiB.
 > **Status (2026-11-24, later): AMD launch options for the sparse-attention prefill (2
 > warps, 16-wide MFMA: 2.90 → 1.77 ms a call) and the indexer logits (−10 %): agentic load
 > 166 output tok/s at 32 conversations (159 before, 144 before the mHC fix), GSM8K 99 %
-> (job 23983987).**
+> (job 23983987); cold prefill 1.19 / 3.77 / 6.99 s at 4k / 16k / 30k (from 1.19 / 4.35 /
+> 8.07, job 23984875).**
 >
 > **Status (2026-11-24): mHC delayed pre rewritten (per-stream row loads, 1 warp): 551 →
 > 112 µs a call at 2048 tokens; agentic load 159 output tok/s at 32 conversations (+10 %),
@@ -812,7 +813,11 @@ the kernel's sweep tolerance, and identical masks). Folded into `SPARSE_PREFILL=
 (`hooks.py:_prefill_stages`). Serving (job 23983987): GSM8K 99 % (200), sanity 5/5, needles;
 agentic load at 32 conversations **166** output tok/s (159 with the mHC fix alone), 1281
 turns in the window, TPOT 146 ms, median TTFT 7.3 / 3.8 / 4.6 s at 8–16k / 16–24k /
-24–32k, answers 93.4 % right.
+24–32k, answers 93.4 % right. Cold prefill, one user, 16 output tokens, no prefix caching
+(job 23984875, same workloads as job 23900916): TTFT **1.19 / 3.77 / 6.99 s** at 4k / 16k /
+30k against 1.19 / 4.35 / 8.07 (−13 % at 16k and 30k; at 4k the sparse and indexer work is
+small). With the earlier prefill work, −28 / −45 / −50 % against the first measurement
+(1.66 / 6.83 / 13.93 s, job 23898195).
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
