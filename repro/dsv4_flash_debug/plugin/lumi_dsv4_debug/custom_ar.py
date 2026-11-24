@@ -22,6 +22,8 @@ fence  Keep reading the caller's (cached) tensor in graphs, behind a one-thread 
        fresh activations costs about half of the gain.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -49,6 +51,18 @@ def install(mode: str = "copy") -> None:
 
     # Read by ParallelConfig.__post_init__, after EngineArgs has loaded the plugins.
     RocmPlatform.use_custom_allreduce = classmethod(lambda cls: True)
+
+    # DSV4_CUSTOM_AR_MAX_MB: the largest message the custom kernel takes (vLLM: 8 MB; the
+    # uncached IPC buffer is allocated at this size). Prefill chunks of 2048 tokens make
+    # 20 MB messages (V4.1, hidden 5120), which otherwise go to RCCL.
+    max_mb = os.environ.get("DSV4_CUSTOM_AR_MAX_MB")
+    if max_mb:
+        init = CustomAllreduce.__init__
+
+        def __init__(self, *args, max_size=8192 * 1024, **kwargs):
+            init(self, *args, max_size=max(max_size, int(float(max_mb) * (1 << 20))), **kwargs)
+
+        CustomAllreduce.__init__ = __init__
 
     should = CustomAllreduce.should_custom_ar
     reduce = CustomAllreduce.all_reduce
