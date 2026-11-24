@@ -924,6 +924,23 @@ a 2048-token chunk and replayed as each rank's routing through the served kernel
 times run above serving's ~88 ms mean). It accounts for about half of the ~60 ms of
 all-reduce waiting in the profile.
 
+*Sparse-attention prefill: how far from its floor* (`lumi_dsv41/sparse_prefill.py`, a copy
+of upstream's kernel with diagnostic switches; `test_sparse_prefill.py`, job 24005460;
+2048 queries, 1.32 GB gathered at 16k and 30k context):
+
+| variant | ms a call |
+|---|---|
+| served (upstream, 2 warps, nonkdim 16) | 1.78 |
+| the gathers alone, no attention math (`LOADS_ONLY`) | **1.01** (~1.3 TB/s) |
+| the copy with BLOCK_K 32 | 1.68 |
+| output columns split over 2 / 4 programs a query (`DV_SPLIT`, smaller accumulators) | 3.4 / 6.0 (the extra row reads cost more than the occupancy gains) |
+
+The gathers of 1 KB bf16 rows already run near this access pattern's ceiling, so the
+floor is ~1.0 ms, not the ~0.84 ms estimated from peak bandwidth; the math adds ~0.77 ms
+it does not hide. A new kernel (better overlap, the 128-row SWA window shared across
+consecutive queries: ~20 % of the bytes) might reach ~1.4 ms: ~15 ms of a ~600 ms chunk,
+~2 %. Not pursued; the BLOCK_K 32 copy (−6 %, ~4 ms a chunk) is not wired in either.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,

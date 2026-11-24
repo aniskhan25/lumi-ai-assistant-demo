@@ -153,6 +153,6 @@ for T, n_kv in ((2048, 16384), (2048, 30000)):
         lo[(split, nw)] = timeit(lambda: sparse_prefill(q, kv, idx, ptr, SCALE, sink, dv_split=split,
                                                         num_warps=nw, loads_only=True))
     print(f"kv={n_kv}: {gb:.2f} GB gathered; " + "  ".join(row), flush=True)
-    print(f"   loads only: " + "  ".join(f"s{s_}/w{w}: {t:.2f} ms ({gb / t:.0f} GB/s)"
+    print(f"   loads only: " + "  ".join(f"s{s_}/w{w}: {t:.2f} ms ({gb / t * 1e3:.0f} GB/s)"
                                          for (s_, w), t in lo.items()), flush=True)
 print("FAILED:", bad if bad else "none")
