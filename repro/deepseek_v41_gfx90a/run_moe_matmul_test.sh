@@ -17,5 +17,5 @@ REPO="${SLURM_SUBMIT_DIR:-$(pwd)}"
 module load Local-LAIF lumi-aif-singularity-bindings
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
 export AMDGCN_USE_BUFFER_OPS=0   # as served
-singularity exec --env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a:/opt/venv/lib/python3.12/site-packages" "${CONTAINER}" python "${REPO}/repro/deepseek_v41_gfx90a/test_moe_matmul.py" 2>&1 \
+singularity exec --env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a:/opt/venv/lib/python3.12/site-packages" "${CONTAINER}" python "${REPO}/repro/deepseek_v41_gfx90a/${MOE_TEST:-test_moe_matmul.py}" 2>&1 \
   | grep -vE 'amdsmi|raw_cnt'
