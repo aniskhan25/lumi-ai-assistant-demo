@@ -71,4 +71,34 @@ for N in (2048, 8192, 16384, 30000):
     print(f"N={N:6d}: mask {same_mask} max rel err {err:.1e} top-{kk} overlap {overlap:.4f}  "
           f"torch {t_ref:7.2f} ms  triton best {times[best]:6.2f} ms {best}  "
           + " ".join(f"{c}:{times[c]:.2f}" for c in top[1:]), flush=True)
+print("AMD launch options at the 32x128x4 tile (ms per call; 2048 rows at the end of N keys)")
+for N in (16384, 30000):
+    q = (torch.randn(M, H, D, device=dev) * 0.5).to(FP8)
+    k = (torch.randn(N, D, device=dev) * 0.5).to(FP8)
+    scale = (torch.rand(N, 1, device=dev) * 0.05 + 0.01)
+    w = torch.randn(M, H, device=dev) * 0.1
+    ke = (torch.arange(M, device=dev, dtype=torch.int32) + (N - M) + 1).clamp(1, N)
+    ks = torch.zeros(M, device=dev, dtype=torch.int32)
+    base = fp8_mqa_logits_triton(q, (k, scale), w, ks, ke)
+    times = {}
+    for bm, bn, nw, nk, we, kp, st in itertools.product(
+            (32, 64), (64, 128), (4, 8), (16, 32), (0, 1, 2), (1, 2), (1, 2)):
+        kw = dict(matrix_instr_nonkdim=nk, waves_per_eu=we, kpack=kp, num_stages=st)
+        try:
+            got = fp8_mqa_logits_triton(q, (k, scale), w, ks, ke, block_m=bm, block_n=bn,
+                                        num_warps=nw, launch_kw=kw)
+        except Exception:  # unsupported or out of resources
+            continue
+        fin = torch.isfinite(base)
+        if not torch.equal(torch.isinf(got), torch.isinf(base)) or (
+                (got[fin] - base[fin]).abs().max() / base[fin].abs().max()).item() > 1e-3:
+            bad.append(("launch", N, bm, bn, nw, kw))
+            continue
+        times[(bm, bn, nw, nk, we, kp, st)] = timeit(lambda: fp8_mqa_logits_triton(
+            q, (k, scale), w, ks, ke, block_m=bm, block_n=bn, num_warps=nw, launch_kw=kw))
+    ref_t = times.get((32, 128, 4, 16, 0, 1, 2)) or timeit(
+        lambda: fp8_mqa_logits_triton(q, (k, scale), w, ks, ke))
+    top = sorted(times, key=times.get)[:6]
+    print(f"N={N:6d}: current {ref_t:.2f} ms; best (bm, bn, warps, nonkdim, waves_per_eu, kpack, "
+          f"stages): " + "  ".join(f"{c}:{times[c]:.2f}" for c in top), flush=True)
 print("FAILED:", bad if bad else "none")

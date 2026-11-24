@@ -65,8 +65,13 @@ def _mqa_logits_kernel(q_ptr, k_ptr, s_ptr, w_ptr, ks_ptr, ke_ptr, o_ptr, M, N,
         tl.store(out, tl.where(valid, acc, neg_inf), mask=omask)
 
 
+# Extra launch options (AMD: matrix_instr_nonkdim, waves_per_eu, kpack, num_stages).
+LAUNCH_KW: dict = {}
+
+
 def fp8_mqa_logits_triton(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke,
-                          block_m=None, block_n=None, num_warps=None, round_bf16=True):
+                          block_m=None, block_n=None, num_warps=None, round_bf16=True,
+                          launch_kw=None):
     """Same arguments and result as rocm_aiter_mla_sparse.fp8_mqa_logits_torch:
     q [M, H, D] float8_e4m3fn, kv = (k [N, D] float8_e4m3fn, scales [N] or [N, 1] fp32),
     weights [M, H] fp32, cu_seqlen_ks / cu_seqlen_ke [M] int32 -> logits [M, N] fp32."""
@@ -85,5 +90,6 @@ def fp8_mqa_logits_triton(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke,
         qb, kb, sc, w, cu_seqlen_ks.int().contiguous(), cu_seqlen_ke.int().contiguous(), out,
         m, n, qb.stride(0), qb.stride(1), kb.stride(0), w.stride(0), out.stride(0),
         H=h, D=d, BLOCK_M=bm, BLOCK_N=bn, ROUND=round_bf16, num_warps=num_warps or NUM_WARPS,
+        **(LAUNCH_KW if launch_kw is None else launch_kw),
     )
     return out
