@@ -4,6 +4,12 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-25): production defaults. Prefix caching with sparse sliding-window
+> retention is on by default (the plugin sets it); preemption after a hit is correct (14
+> preemptions, outputs unchanged, job 23987665); 2 h 20 min of 64 agentic conversations at
+> 166 output tok/s with 0 errors and flat memory (job 23988580). Best configuration in
+> `best.env`.**
+>
 > **Status (2026-11-24, later): AMD launch options for the sparse-attention prefill (2
 > warps, 16-wide MFMA: 2.90 → 1.77 ms a call) and the indexer logits (−10 %): agentic load
 > 166 output tok/s at 32 conversations (159 before, 144 before the mHC fix), GSM8K 99 %
@@ -849,6 +855,17 @@ GSM8K question and generate 12,000 tokens with EOS ignored, on a 288k-token pool
 
 The tail is the model copying few-shot text at near-certainty, so state corrupted on
 resume would show as a drop there; there is none.
+
+*Stability* (job 23988580): the default configuration (`best.env`, prefix caching on by
+default) under 64 agentic conversations for 2 h 20 min after start-up and the probe (GSM8K
+98.5 %, sanity 5/5, needles). Every 10-min interval: 150–169 output tok/s (166 over the
+window after a 5-min warm-up), 86–88 % of prompt tokens from the cache, 91–93 % of answers
+right; 11,868 turns in the 135-min window, 0 errors, 0 preemptions, no hang. Memory sampled
+every 5 min (`SAMPLE_MEM=300`): GPU memory in use rose from 40.7 to 62.1–63.5 GiB per GCD
+in the first 10 min as the KV pool was touched, then stayed there to the end; the vLLM
+processes' host RSS 228.2 GiB throughout (from 217.9 at start-up; it includes each rank's
+11.8 GiB pinned Engram table). Median TTFT 29 / 23 / 24 s at 8–16k / 16–24k / 24–32k at this
+load (64 conversations queue for one prefill lane), TPOT 149–154 ms.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
