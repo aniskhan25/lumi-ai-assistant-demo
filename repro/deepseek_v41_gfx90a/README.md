@@ -819,6 +819,21 @@ turns in the window, TPOT 146 ms, median TTFT 7.3 / 3.8 / 4.6 s at 8–16k / 16�
 small). With the earlier prefill work, −28 / −45 / −50 % against the first measurement
 (1.66 / 6.83 / 13.93 s, job 23898195).
 
+**Prefix caching on by default** (commit edbf2f2): the plugin accepts prefix caching
+without an opt-in (`DSV41_PREFIX_CACHING=0` refuses it) and sets
+`VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` itself in the API process before the engine
+core starts, so a plain `vllm serve` with the plugin gets sparse retention
+(`DSV41_RETENTION=dense` keeps 0.26's). `run_v4_serve.sh` defaults to `PREFIX_CACHING=1`
+for V4.1; the best configuration is in `best.env`.
+
+*Sizing:* the cache only helps while the conversations' live contexts fit in the pool.
+64 agentic conversations (8–30k, ~1M tokens live) on a 613k-token pool
+(`--gpu-memory-utilization 0.72`, job 23986188): between two turns of a conversation the
+other 63 prefill ~950k tokens, every prefix is evicted before reuse, and LRU thrashes to
+0 % cached (28 output tok/s, the no-hit rate). No preemptions there either: vLLM admits a
+request only when its blocks fit, and agentic turns decode too little to outgrow them.
+At the default 0.92 the pool is 2.24M tokens: 64 conversations at up to 30k fit.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
