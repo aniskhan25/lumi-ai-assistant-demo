@@ -186,4 +186,31 @@ for t in (2048, 4096):
     print(f"  T={t}: residual {gb * 1e3:.0f} MB; " + "; ".join(f"{k[:40]} {v:.0f}" for k, v in rows[:6]),
           flush=True)
 
+print("7. collapse form (row loads vs [hc, BLOCK] tile), hidden block, warps (whole call, ms)")
+for t in (16, 384, 2048):
+    residual = torch.randn(t, HC, H, device=dev).bfloat16()
+    fn = torch.randn(HC3, HC * H, device=dev) * 0.02
+    scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5
+    pre_mix = torch.rand(t, HC, device=dev) + 0.1
+    args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
+    want = ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix)
+    saved = (mt.PRE_ROWS, mt.PRE_BLOCK, mt.PRE_WARPS)
+    times = {}
+    for rows, block, warps in itertools.product((False, True), (256, 512, 1024), (1, 2, 4, 8)):
+        if H % block:
+            continue
+        mt.PRE_ROWS, mt.PRE_BLOCK, mt.PRE_WARPS = rows, block, warps
+        got = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+        err = max(rel(x, y) for x, y in zip(got, want))
+        if err > 1e-2:
+            failures.append(f"collapse rows={rows} block={block} warps={warps} T={t}: {err:.1e}")
+            continue
+        times[(rows, block, warps)] = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.PRE_ROWS, mt.PRE_BLOCK, mt.PRE_WARPS = saved
+    best = min(times, key=times.get)
+    tile = times.get((False, 512, 4))
+    print(f"  T={t:5d}: tile/512/4 (old) {tile:.3f}  best {times[best]:.3f} (rows, block, warps)="
+          f"{best}  " + " ".join(f"{c}:{times[c]:.3f}" for c in sorted(times, key=times.get)[1:5]),
+          flush=True)
+
 print("FAILED:", failures or "none")

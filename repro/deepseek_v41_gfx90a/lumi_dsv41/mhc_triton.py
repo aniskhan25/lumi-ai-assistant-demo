@@ -96,6 +96,7 @@ def _pre_delayed_kernel(
     rms_eps, pre_eps, sk_eps, post_mult,
     H: tl.constexpr, HC: tl.constexpr, SK_REPEAT: tl.constexpr, HAS_CARRIED: tl.constexpr,
     N_SPLITS: tl.constexpr, BLOCK: tl.constexpr, GATES: tl.constexpr = True,
+    ROWS: tl.constexpr = True,
 ):
     """One program per (token, hidden block). Block 0 also writes the token's gates (unless
     GATES is off: _gates_kernel writes them). mix [N_SPLITS, T, hc3] and sqr [N_SPLITS, T]
@@ -137,9 +138,22 @@ def _pre_delayed_kernel(
         tl.store(comb_ptr + t * HC * HC + jk, cm)
 
     offs = hb * BLOCK + tl.arange(0, BLOCK)
-    x = tl.load(res_ptr + t * stride_rt + j[:, None] * stride_rm + offs[None, :]).to(tl.float32)
-    tl.store(out_ptr + t * H + offs,
-             tl.sum(w[:, None] * x, 0).to(out_ptr.dtype.element_ty))
+    if ROWS:
+        # One 1-D load per stream and a running fp32 sum: no cross-thread reduction over
+        # the hc axis of a [hc, BLOCK] tile (that form ran at ~190 GB/s at 2048 tokens,
+        # 551 us a call, test_mhc_triton.py section 6, job 23982574).
+        row = res_ptr + t * stride_rt + offs
+        if HAS_CARRIED:
+            acc = tl.load(carried_ptr + t * HC) * tl.load(row).to(tl.float32)
+            for i in tl.static_range(1, HC):
+                acc += tl.load(carried_ptr + t * HC + i) * tl.load(row + i * stride_rm).to(tl.float32)
+        else:  # stream 0 alone
+            acc = tl.load(row).to(tl.float32)
+        tl.store(out_ptr + t * H + offs, acc.to(out_ptr.dtype.element_ty))
+    else:
+        x = tl.load(res_ptr + t * stride_rt + j[:, None] * stride_rm + offs[None, :]).to(tl.float32)
+        tl.store(out_ptr + t * H + offs,
+                 tl.sum(w[:, None] * x, 0).to(out_ptr.dtype.element_ty))
 
 
 @triton.jit
@@ -186,6 +200,10 @@ def _gates_kernel(
     tl.store(comb_ptr + tok[:, None, None] * HC * HC + jk[None, :, :], cm,
              mask=tmask[:, None, None])
 
+
+# The delayed pre's collapse: per-stream row loads (ROWS) or the [hc, BLOCK] tile; hidden
+# block per program and warps.
+PRE_ROWS, PRE_BLOCK, PRE_WARPS = True, 512, 4
 
 # Gates in their own token-blocked kernel from this many tokens on (None: never). Off:
 # no faster at 2048-4096 tokens (0.743 vs 0.750 ms a call), slower at decode sizes (0.116
@@ -271,13 +289,15 @@ def mhc_pre_delayed_triton(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
             HC=hc, SK_REPEAT=sinkhorn_repeat, N_SPLITS=mixes.shape[0],
             BLOCK_T=GATES_BLOCK_T, num_warps=4,
         )
-    _pre_delayed_kernel[(t, hidden // BLOCK_H)](
+    assert hidden % PRE_BLOCK == 0
+    _pre_delayed_kernel[(t, hidden // PRE_BLOCK)](
         mixes, sqrsum, hc_scale, hc_base, residual, carried,
         post, comb, next_pre, layer_input,
         t, residual.stride(0), residual.stride(1), 1.0 / k,
         rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
         H=hidden, HC=hc, SK_REPEAT=sinkhorn_repeat, HAS_CARRIED=pre_mix is not None,
-        N_SPLITS=mixes.shape[0], BLOCK=BLOCK_H, GATES=not split_gates, num_warps=4,
+        N_SPLITS=mixes.shape[0], BLOCK=PRE_BLOCK, GATES=not split_gates, ROWS=PRE_ROWS,
+        num_warps=PRE_WARPS,
     )
     return post, comb, layer_input, next_pre
 
