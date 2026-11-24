@@ -302,6 +302,13 @@ if [ "${PREFIX_EVICT:-0}" = 1 ]; then
     "http://127.0.0.1:${PORT}" dsv4 || STATUS=1
 fi
 
+# PREEMPT_CHECK=1: requests that start from a prefix hit, preempted mid-generation on a
+# small KV pool (pass --gpu-memory-utilization), against the same requests unpreempted
+if [ "${PREEMPT_CHECK:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/preempt_check.py" \
+    "http://127.0.0.1:${PORT}" dsv4 "${GSM8K}" ${PREEMPT_ARGS:-} || STATUS=1
+fi
+
 # AGENTIC=1: concurrent conversations resending a growing context (agentic_bench.py);
 # AGENTIC_CONVS (default "32 64") conversations at once, AGENT_* env for lengths and time
 if [ "${AGENTIC:-0}" = 1 ]; then
