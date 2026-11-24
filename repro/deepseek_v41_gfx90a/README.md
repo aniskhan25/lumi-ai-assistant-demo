@@ -867,6 +867,22 @@ processes' host RSS 228.2 GiB throughout (from 217.9 at start-up; it includes ea
 11.8 GiB pinned Engram table). Median TTFT 29 / 23 / 24 s at 8–16k / 16–24k / 24–32k at this
 load (64 conversations queue for one prefill lane), TPOT 149–154 ms.
 
+*Launch options for the remaining Triton kernels* (after they gave the sparse prefill
+−39 %): little left.
+
+| kernel (test, job) | served | best | |
+|---|---|---|---|
+| MoE expert GEMMs, matmul_ogs (`test_moe_matmul.py` `MOE_LAUNCH_SWEEP=1`, 23993739) | down 982 / 791 µs at 2048 / 384 tokens; gate/up 1576 / 1500 | 925 / 758; 1545 / 1494 | ≤ 6 %, none at 6 tokens: not used |
+| sparse decode (`test_sparse_decode.py` section 4, 23993861) | top-k 873 µs at 384 queries, 33 at 6 | 854, 33 | ≤ 2 %: not used |
+| mHC tiled prenorm GEMM (`test_mhc_triton.py` section 9, 23993866) | whole delayed pre 0.311 ms at 2048 tokens | **0.236** (64 × 32 tiles, 2048-wide chunks, kpack 2) | used from 1024 tokens (`TILED_*_LARGE`); none at 96 / 384 |
+
+The MoE GEMMs are already on AMD's tuned defaults (16-wide MFMA); their gap is the MXFP4 →
+bf16 conversion in software (gate/up at 96 tokens 775 µs against ~350 µs to read the 566 MB
+of weights). The sweep also overrode num_warps, num_stages and the tile-order swizzle
+(`xcd_swizzle` 8, MI300's die count; 1 is no faster on a single GCD). In the sparse decode
+sweep, BLOCK_K 32 with matrix_instr_nonkdim 32 gives garbage on some shapes (rel err
+~1e31; rejected by the check, never served).
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,

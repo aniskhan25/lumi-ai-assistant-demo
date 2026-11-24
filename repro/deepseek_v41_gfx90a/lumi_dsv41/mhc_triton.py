@@ -88,6 +88,10 @@ TILED_MIN_TOKENS = 96
 TILED_CFG = (64, 64, 512, 4)
 # Extra AMD launch options for the tiled prenorm GEMM.
 TILED_KW: dict = {}
+# Prefill-sized batches: 64 x 32 tiles over 2048-wide chunks with kpack 2. test_mhc_triton.py
+# section 9 (job 23993866), whole delayed-pre call: 0.311 -> 0.236 ms at 2048 tokens; no gain
+# at 96 (0.104) or 384 (0.104 -> 0.102), so from 1024 tokens on only.
+TILED_LARGE_MIN, TILED_CFG_LARGE, TILED_KW_LARGE = 1024, (64, 32, 2048, 4), {"kpack": 2}
 
 
 @triton.jit
@@ -274,7 +278,9 @@ def mhc_pre_delayed_triton(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
     assert hidden % BLOCK_H == 0 and fn.shape[0] == hc3
     src = residual.reshape(t, hc * hidden) if x is None else x  # a view when contiguous
     k = src.shape[-1]
-    bm, bk, chunk, warps = TILED_CFG
+    large = TILED_LARGE_MIN is not None and t >= TILED_LARGE_MIN
+    bm, bk, chunk, warps = TILED_CFG_LARGE if large else TILED_CFG
+    tiled_kw = TILED_KW_LARGE if large else TILED_KW
     if (TILED_MIN_TOKENS is not None and t >= TILED_MIN_TOKENS and k % chunk == 0
             and fn.is_contiguous() and fn.dtype == torch.float32):
         src = _rows(src)
@@ -284,7 +290,7 @@ def mhc_pre_delayed_triton(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
         _prenorm_gemm_tiled_kernel[(triton.cdiv(t, bm), splits)](
             src, fn, mixes, sqrsum, t, src.stride(0), k,
             HC3=hc3, BLOCK_M=bm, BLOCK_N=triton.next_power_of_2(hc3), BLOCK_K=bk,
-            CHUNK=chunk, num_warps=warps, **TILED_KW,
+            CHUNK=chunk, num_warps=warps, **tiled_kw,
         )
     elif t <= GEMM_MAX_TOKENS and k % GEMM_CHUNK == 0 and fn.is_contiguous():
         src = _rows(src)

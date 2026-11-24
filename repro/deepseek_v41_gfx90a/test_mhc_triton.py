@@ -246,8 +246,8 @@ for t in (96, 384, 2048):
     pre_mix = torch.rand(t, HC, device=dev) + 0.1
     args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
     want = ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix)
-    saved = (mt.TILED_CFG, mt.TILED_KW, mt.TILED_MIN_TOKENS)
-    mt.TILED_MIN_TOKENS = 1
+    saved = (mt.TILED_CFG, mt.TILED_KW, mt.TILED_MIN_TOKENS, mt.TILED_LARGE_MIN)
+    mt.TILED_MIN_TOKENS, mt.TILED_LARGE_MIN = 1, None
     t0 = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
     times = {}
     for cfg, nk, we, kp in itertools.product(
@@ -263,7 +263,7 @@ for t in (96, 384, 2048):
             failures.append(f"tiled launch {cfg} nk{nk} we{we} kp{kp} T={t}: {err:.1e}")
             continue
         times[(cfg, nk, we, kp)] = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
-    mt.TILED_CFG, mt.TILED_KW, mt.TILED_MIN_TOKENS = saved
+    mt.TILED_CFG, mt.TILED_KW, mt.TILED_MIN_TOKENS, mt.TILED_LARGE_MIN = saved
     top = sorted(times, key=times.get)[:4]
     print(f"  T={t:5d}: served {t0:.3f}  best {times[top[0]]:.3f} {top[0]} ({t0 / times[top[0]]:.2f}x)  "
           + " ".join(f"{c}:{times[c]:.3f}" for c in top[1:]), flush=True)
