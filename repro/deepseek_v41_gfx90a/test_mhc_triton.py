@@ -213,4 +213,28 @@ for t in (16, 384, 2048):
           f"{best}  " + " ".join(f"{c}:{times[c]:.3f}" for c in sorted(times, key=times.get)[1:5]),
           flush=True)
 
+print("8. post: row form vs [hc, hc, BLOCK] tile, hidden block, warps (ms per call)")
+for t in (16, 384, 2048):
+    x = torch.randn(t, H, device=dev).bfloat16()
+    residual = torch.randn(t, HC, H, device=dev).bfloat16()
+    post = torch.rand(t, HC, 1, device=dev) * 2
+    comb = torch.rand(t, HC, HC, device=dev)
+    want = ref.mhc_post_torch(x, residual, post, comb)
+    saved = (mt.POST_ROWS, mt.POST_BLOCK, mt.POST_WARPS)
+    times = {}
+    for rows, block, warps in itertools.product((False, True), (256, 512, 1024), (1, 2, 4)):
+        if H % block:
+            continue
+        mt.POST_ROWS, mt.POST_BLOCK, mt.POST_WARPS = rows, block, warps
+        got = mhc_post_triton(x, residual, post, comb)
+        err = rel(got, want)
+        if err > 1e-2:
+            failures.append(f"post rows={rows} block={block} warps={warps} T={t}: {err:.1e}")
+            continue
+        times[(rows, block, warps)] = timeit(lambda: mhc_post_triton(x, residual, post, comb))
+    mt.POST_ROWS, mt.POST_BLOCK, mt.POST_WARPS = saved
+    best = min(times, key=times.get)
+    print(f"  T={t:5d}: tile/512/4 (old) {times.get((False, 512, 4)):.3f}  default "
+          f"{times.get(saved):.3f}  best {times[best]:.3f} {best}", flush=True)
+
 print("FAILED:", failures or "none")

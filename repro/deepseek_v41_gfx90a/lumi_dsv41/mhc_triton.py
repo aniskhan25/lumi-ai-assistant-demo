@@ -203,7 +203,11 @@ def _gates_kernel(
 
 # The delayed pre's collapse: per-stream row loads (ROWS) or the [hc, BLOCK] tile; hidden
 # block per program and warps.
-PRE_ROWS, PRE_BLOCK, PRE_WARPS = True, 512, 4
+# test_mhc_triton.py section 7 (job 23982591), whole call: tile/512/4 0.749 ms -> rows/256/1
+# 0.313 at 2048 tokens, 0.163 -> 0.091 at 384, 0.095 -> 0.090 at 16 (with 1 warp the tile is
+# nearly as fast: 4 warps splitting a 4-row tile was the cost).
+PRE_ROWS, PRE_BLOCK, PRE_WARPS = True, 256, 1
+POST_ROWS, POST_BLOCK, POST_WARPS = True, 256, 1
 
 # Gates in their own token-blocked kernel from this many tokens on (None: never). Off:
 # no faster at 2048-4096 tokens (0.743 vs 0.750 ms a call), slower at decode sizes (0.116
@@ -216,13 +220,27 @@ GATES_BLOCK_T = 16
 def _post_kernel(
     x_ptr, res_ptr, post_ptr, comb_ptr, out_ptr,
     stride_xt, stride_rt, stride_rm,
-    H: tl.constexpr, HC: tl.constexpr, BLOCK: tl.constexpr,
+    H: tl.constexpr, HC: tl.constexpr, BLOCK: tl.constexpr, ROWS: tl.constexpr = True,
 ):
     """out[t, j, h] = post[t, j] * x[t, h] + sum_i comb[t, i, j] * res[t, i, h]."""
     t = tl.program_id(0).to(tl.int64)
     hb = tl.program_id(1)
     j = tl.arange(0, HC)
     offs = hb * BLOCK + tl.arange(0, BLOCK)
+    if ROWS:  # per-stream rows and scalar weights, as in _pre_delayed_kernel
+        x = tl.load(x_ptr + t * stride_xt + offs).to(tl.float32)
+        row = res_ptr + t * stride_rt + offs
+        r0 = tl.load(row).to(tl.float32)
+        r1 = tl.load(row + stride_rm).to(tl.float32)
+        r2 = tl.load(row + 2 * stride_rm).to(tl.float32)
+        r3 = tl.load(row + 3 * stride_rm).to(tl.float32)
+        cb = comb_ptr + t * HC * HC
+        for jj in tl.static_range(HC):
+            o = (tl.load(cb + jj) * r0 + tl.load(cb + HC + jj) * r1
+                 + tl.load(cb + 2 * HC + jj) * r2 + tl.load(cb + 3 * HC + jj) * r3
+                 + tl.load(post_ptr + t * HC + jj) * x)
+            tl.store(out_ptr + t * HC * H + jj * H + offs, o.to(out_ptr.dtype.element_ty))
+        return
     res = tl.load(res_ptr + t * stride_rt + j[:, None] * stride_rm + offs[None, :]).to(tl.float32)
     comb = tl.load(comb_ptr + t * HC * HC + j[:, None] * HC + j[None, :])  # [i, j]
     post = tl.load(post_ptr + t * HC + j)
@@ -308,13 +326,13 @@ def mhc_post_triton(x, residual, post_layer_mix, comb_res_mix):
     out = torch.empty(t, hc, hidden, dtype=residual.dtype, device=residual.device)
     if t == 0:
         return out
-    assert hidden % BLOCK_H == 0
+    assert hidden % POST_BLOCK == 0 and (hc == 4 or not POST_ROWS)
     x, residual = _rows(x), _rows(residual)
     post = post_layer_mix.float().reshape(t, hc).contiguous()
     comb = comb_res_mix.float().reshape(t, hc, hc).contiguous()
-    _post_kernel[(t, hidden // BLOCK_H)](
+    _post_kernel[(t, hidden // POST_BLOCK)](
         x, residual, post, comb, out,
         x.stride(0), residual.stride(0), residual.stride(1),
-        H=hidden, HC=hc, BLOCK=BLOCK_H, num_warps=4,
+        H=hidden, HC=hc, BLOCK=POST_BLOCK, ROWS=POST_ROWS, num_warps=POST_WARPS,
     )
     return out
