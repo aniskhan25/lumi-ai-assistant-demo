@@ -788,7 +788,11 @@ the same way, was already at its limit (0.171 → 0.168 ms at 2048). All outputs
 reference tolerances. Serving (job 23982702): GSM8K 99 % (200), sanity 5/5, needles; agentic
 load at 32 conversations 159 output tok/s against 144 (1223 turns against 1141 in the
 15-min window), TPOT 154 against 164 ms, median TTFT 7.0 / 3.5 / 4.0 s at 8–16k / 16–24k /
-24–32k, answers 92.3 % right.
+24–32k, answers 92.3 % right. Decode on 1k-token natural prompts (job 23983327, same sweep as
+job 23902280): 64.2 / 471.1 / 729.6 / 963.2 tok/s at 1 / 16 / 32 / 64 users against 64.9 /
+484.7 / 732.1 / 932.3, TPOT 15.4 / 26.0 / 34.1 / 54.1 ms against 14.7 / 25.7 / 35.0 / 56.2:
++3 % at 64 users (384-row verify batches), the rest within run-to-run spread (the c=1 TPOT
+of 15.4–15.5 ms also appeared before this change, job 23908978).
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
