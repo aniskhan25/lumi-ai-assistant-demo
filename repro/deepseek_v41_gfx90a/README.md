@@ -4,6 +4,10 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-25, later): balanced expert placement (`EXPERT_PLACEMENT=1`, from
+> measured router counts): agentic load 175 output tok/s at 32 conversations against 168
+> on the same code (+4.2 %), GSM8K 99 % (jobs 24005517 / 24005990).**
+>
 > **Status (2026-11-25): production defaults. Prefix caching with sparse sliding-window
 > retention is on by default (the plugin sets it); preemption after a hit is correct (14
 > preemptions, outputs unchanged, job 23987665); 2 h 20 min of 64 agentic conversations at
@@ -940,6 +944,27 @@ floor is ~1.0 ms, not the ~0.84 ms estimated from peak bandwidth; the math adds 
 it does not hide. A new kernel (better overlap, the 128-row SWA window shared across
 consecutive queries: ~20 % of the bytes) might reach ~1.4 ms: ~15 ms of a ~600 ms chunk,
 ~2 %. Not pursued; the BLOCK_K 32 copy (−6 %, ~4 ms a chunk) is not wired in either.
+
+*Balanced expert placement* (`EXPERT_PLACEMENT=1`, `hooks.py:_expert_placement`,
+`expert_placement_gsm8k.json` from the job 23995740 counts): each target MoE layer's
+`ExpertMapManager` map is replaced before weights load, so the weight loader (global →
+local expert id, others skipped) and the Triton MoE path (`remap_topk_to_local`) follow the
+same placement; 48 experts a rank, local ids in ascending global order; the drafter's layers
+stay linear. Same code, one variant an allocation, 32 agentic conversations:
+
+| | linear (job 24005990) | balanced (job 24005517) |
+|---|---|---|
+| output tok/s | 168 | **175** (+4.2 %) |
+| turns in the 15-min window | 1315 | 1371 |
+| TPOT median | 144 ms | 138 ms |
+| TTFT median, 8–16k / 16–24k / 24–32k | 6.9 / 3.9 / 4.5 s | 6.4 / 3.5 / 4.1 s |
+| answers right | 92.7 % | 92.0 % |
+| GSM8K probe (200) | 98.5 % | 99 % |
+
+As timed beforehand (~4 %). The placement comes from GSM8K-style traffic; it helps as long
+as other traffic loads broadly the same experts (re-count with `EXPERT_COUNTS=1` and
+regenerate with `expert_placement.py` for a different workload). In `best.env`; off by
+default in `run_v4_serve.sh`.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
