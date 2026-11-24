@@ -550,6 +550,49 @@ def _gc_control(module) -> None:
         runner.capture_model = capture_model
 
 
+def _expert_counts(module) -> None:
+    """DSV41_EXPERT_COUNTS=<path>: count, per MoE layer, how often the router picks each
+    global expert (forward_modular's top-k ids, before the EP remap), on rank 0 only (every
+    rank routes the same tokens), on the GPU and outside graph capture (so: eager steps,
+    i.e. every step carrying a prefill chunk). Written to <path> as JSON every 60 s, for a
+    balanced expert placement (the linear one leaves rank 0 ~20 % busier than rank 2 in
+    every profile, README)."""
+    import json
+    import os
+    import time
+
+    path = os.environ.get("DSV41_EXPERT_COUNTS")
+    if not path:
+        return
+    import torch
+
+    cls = module.RoutedExperts
+    stock = cls.forward_modular
+    state = {"counts": {}, "last": time.monotonic(), "rank": None}
+
+    def forward_modular(self, x, topk_weights, topk_ids, *args, **kwargs):
+        if state["rank"] is None:
+            dist = torch.distributed
+            state["rank"] = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        if state["rank"] == 0 and not torch.cuda.is_current_stream_capturing():
+            n = self.global_num_experts if hasattr(self, "global_num_experts") else 384
+            c = state["counts"].get(self.layer_name)
+            if c is None:
+                c = state["counts"][self.layer_name] = torch.zeros(n, dtype=torch.int64,
+                                                                    device=topk_ids.device)
+            ids = topk_ids.reshape(-1).long()
+            c += torch.bincount(ids[ids >= 0], minlength=n)[:n]
+            if time.monotonic() - state["last"] > 60:
+                state["last"] = time.monotonic()
+                tmp = path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({k: v.tolist() for k, v in state["counts"].items()}, f)
+                os.replace(tmp, path)
+        return stock(self, x, topk_weights, topk_ids, *args, **kwargs)
+
+    cls.forward_modular = forward_modular
+
+
 HOOKS = {name: [graft.apply] for name in graft.GRAFTS}
 HOOKS["vllm.config.utils"].append(_config_replace)
 HOOKS["vllm.model_executor.models.qwen3_dspark"] = [_dspark_confidence_head]
@@ -557,6 +600,7 @@ HOOKS["vllm.v1.attention.backend"].append(_backend_block_dim)
 HOOKS["vllm.v1.worker.gpu.attn_utils"] = [_kv_cache_shapes, _debug_kv_views]
 HOOKS["vllm.v1.worker.utils"] = [_metadata_builders]
 HOOKS.setdefault("vllm.v1.worker.gpu.model_runner", []).append(_gc_control)
+HOOKS.setdefault("vllm.model_executor.layers.fused_moe.routed_experts", []).append(_expert_counts)
 HOOKS["vllm.v1.core.kv_cache_utils"] = [_group_rings, _debug_kv_groups]
 HOOKS["vllm.utils.multi_stream_utils"] = [_multi_stream_utils]
 HOOKS["vllm.model_executor.layers.quantization.utils.fp8_utils"] = [_fp8_utils]

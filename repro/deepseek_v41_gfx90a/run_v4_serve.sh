@@ -183,6 +183,8 @@ echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEX
 # N run their graphable parts as graphs instead of ~1,800 eager launches.
 # GC_LOG=1 / GC_FREEZE=1: Python GC timing / gc.freeze after capture (hooks.py:_gc_control).
 export DSV41_GC_LOG="${GC_LOG:-0}" DSV41_GC_FREEZE="${GC_FREEZE:-0}"
+# EXPERT_COUNTS=1: per-layer router expert counts to ${LOG}/expert_counts.json (hooks.py)
+if [ "${EXPERT_COUNTS:-0}" = 1 ]; then export DSV41_EXPERT_COUNTS="${LOG}/expert_counts.json"; fi
 if [ "${COMPILE:-0}" = 1 ]; then
   DEFAULT_EXTRA="--moe-backend triton_unfused --compilation-config {\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\"$([ -n "${MAX_CAPTURE:-}" ] && echo ",\"max_cudagraph_capture_size\":${MAX_CAPTURE}" || true)}"
 else DEFAULT_EXTRA="--moe-backend triton_unfused --enforce-eager"; fi
