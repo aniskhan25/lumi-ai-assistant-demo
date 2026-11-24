@@ -903,6 +903,27 @@ placement (48 consecutive experts per rank), not batch noise (~1,500 routed pair
 rank per chunk, ±2.5 %). vLLM's EPLB is not available: the Triton MXFP4 experts refuse
 `enable_eplb`, and the vendored V4.1 model has no rebalancing interface.
 
+*Expert popularity* (`EXPERT_COUNTS=1`, `hooks.py:_expert_counts`, job 23995740): router
+top-6 counts per MoE layer on rank 0 during the probe and 20 min of 32 agentic
+conversations, eager steps (every step with a prefill chunk), 1.04 billion routed
+assignments. Layers 40–42 are the DSpark drafter's; the 40 target layers
+(`expert_placement.py`): the hottest expert gets 22–63× the mean, the top 10 take 20–50 %
+of a layer's tokens, and under the linear placement the busiest rank gets 1.69× the mean
+per layer (1.35–2.0), but a different rank in each layer (averaged over layers every rank
+is 0.87–1.08×). A balanced placement (per layer, hottest first to the least-loaded rank
+with room for its 48) brings that to 1.03× (up to 1.3 where one expert takes most tokens).
+Timed, not estimated (`test_moe_placement.py`, job 23997455): each layer's counts scaled to
+a 2048-token chunk and replayed as each rank's routing through the served kernels:
+
+| placement | MoE critical path a chunk (slowest rank per layer, summed) | mean rank | waiting |
+|---|---|---|---|
+| linear | 146.6 ms | 113.7 ms | 32.9 ms |
+| balanced | **120.6 ms** | 113.0 ms | 7.5 ms |
+
+−26 ms per chunk (−18 % of the MoE critical path; one GCD, cold weights, so the absolute
+times run above serving's ~88 ms mean). It accounts for about half of the ~60 ms of
+all-reduce waiting in the profile.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
