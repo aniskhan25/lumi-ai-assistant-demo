@@ -95,11 +95,13 @@ def install() -> None:
     fake_quant = fp8_round_torch if os.environ.get("DSV4_FP8_ROUND") == "torch" else fp8_round_triton
     state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
 
-    # DSV4_FP8_FUSE=1 (default) with DSV4_DENSE_GEMM: the rounding inside the Triton GEMM
-    # where its tile allows (dense_gemm.gemm_fp8_round); 256 launches a step fewer at 32 users.
+    # DSV4_FP8_FUSE=1 with DSV4_DENSE_GEMM: the rounding inside the Triton GEMM where its tile
+    # allows (dense_gemm.gemm_fp8_round). Bit-identical, but 0.4-8 us slower per call than
+    # rounding first (test_fp8_fuse.py, job 23974177): every program re-rounds the same
+    # activation tile, which costs more than the launch saved. Off by default.
     fused = None
     if (act_fp8 and fake_quant is fp8_round_triton and os.environ.get("DSV4_DENSE_GEMM") == "1"
-            and os.environ.get("DSV4_FP8_FUSE", "1") == "1"):
+            and os.environ.get("DSV4_FP8_FUSE", "0") == "1"):
         from .dense_gemm import gemm_fp8_round as fused
 
     def run(self, layer, x, bias):
