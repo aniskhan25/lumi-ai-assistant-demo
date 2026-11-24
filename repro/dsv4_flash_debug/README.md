@@ -97,10 +97,13 @@ hyper-connections' post and prenorm GEMM in Triton (from the V4.1 port), closer 
 torch reference than TileLang and TPOT 0.4–1.2 ms lower from 4 users up (see
 "Hyper-connections from the V4.1 port"). Use `--max-num-seqs 64` for every load: with
 short natural prompts, 32 sequences was 13 % slower at 32 users (same section).
+`MOE_SMALL`'s expert GEMM table v2 (default) and `MOE_GLUE=1` cut the MoE's small kernels:
+**71 tok/s for one user** on GSM8K prompts, TPOT 0.9–1.3 ms lower at every load (see
+"Small kernels around the MoE").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -111,7 +114,8 @@ garbage, no runaway answers):
 
 | hyper-connections | `--max-num-seqs` | job | GSM8K | out tok/s at 1 / 4 / 16 / 32 / 64 users | TPOT at 1 / 32 / 64 |
 |---|---|---|---|---|---|
-| **the command above**, GSM8K-question prompts (`BENCH_DATA=gsm8k`) | 64 | 23898747 | 97.4 % | 57.0 / 184.7 / 513.4 / 709.5 / 1054.5 | 17 / 34 / 52 ms |
+| **the command above**, GSM8K-question prompts (`BENCH_DATA=gsm8k`) | 64 | 23983908 | 97.4 % | **70.7 / 210.3 / 576.2 / 783.5 / 1098.2** | 14 / 32 / 50 ms |
+| without `MOE_GLUE` and MoE table v2, GSM8K-question prompts | 64 | 23898747 | 97.4 % | 57.0 / 184.7 / 513.4 / 709.5 / 1054.5 | 17 / 34 / 52 ms |
 | the same, GSM8K-question prompts | 32 | 23898749 | 97.0 % | 54.3 / 181.5 / 485.8 / 618.5 / – | 17 / 42 / – ms |
 | without `MHC_FAST`, 1024-token random prompts | 32 | 23896453 | 97.2 % | **51.8** / 141.3 / 360.9 / **538.7** / – | 18 / 49 / – ms |
 | without `MHC_FAST`, 1024-token random prompts | 64 | 23880589 | 97.0 % | 44.8 / **169.7** / **364.4** / 524.1 / **717.1** | 22 / 50 / 73 ms |
@@ -1037,6 +1041,54 @@ programs per call. At 128 tokens there is also MFMA time. The bytes per decode s
 larger calls: GEMMs that share an input fused into one (wq_a+wkv with the compressor score
 GEMMs, the shared expert's w1+w3 with the router), or a split-K that reduces in-kernel.
 
+### Small kernels around the MoE (Nov 23–24)
+
+At 32 users a graph-replayed step held ~700 launches of small torch kernels:
+
+| kernel | launches a step | ms a step |
+|---|---|---|
+| strided copies | 140 | 1.75 |
+| elementwise | 142 | 1.43 |
+| FP8 rounding | 256 | 0.99 |
+| split-K sums | 252 | 0.86 |
+| buffer copies | 188 | 0.61 |
+| about ten per-layer fills, adds, casts and sigmoids | 46 each | ~2 |
+
+A replayed kernel carries no Python stack, so `small_kernels.py` reads an eager profile
+(`CUDAGRAPH_MODE=NONE`, job 23974135; CPU job 23983635) to find what launches them. Most
+come from vLLM's MoE glue for the unfused MXFP4 experts. `make_routing_data` runs int16 and
+bf16 casts, a zero fill, `pack_bitmatrix`, `ids == -1` and a `where`: six launches per layer,
+most on torch's non-vectorised path. `UnfusedOAITritonExperts.apply` and the `gate_scal`
+gather index with int32 tensors, which torch first casts to int64 in a strided copy. The
+shared expert's `SiluAndMulWithClamp` is sent to `forward_native` on ROCm: two clamps, two
+muls, a sigmoid and an add per layer.
+
+`MOE_GLUE=1` (`moe_glue.py`) replaces them:
+- one Triton kernel for the routing prologue: the int16 ids, the bf16 weights (−1 for empty
+  slots) and the bitmatrix;
+- a Triton row gather that takes int32 indices directly;
+- one kernel for the activation, with `forward_native`'s bf16 rounding after each op.
+
+`test_moe_glue.py` (jobs 23983883, 23983907): routing outputs equal to vLLM's on every
+routed entry. With −1 slots vLLM's own padding differs between two runs on the same input.
+Gathers and the activation are bit-identical. The replaced glue takes 101–116 → 70–83 µs per
+MoE layer at 2–128 tokens, 1.2–1.6 ms a step.
+
+| 64 seqs, GSM8K prompts, same day | job | GSM8K | tok/s at 1 / 4 / 16 / 32 / 64 | TPOT at 1 / 4 / 16 / 32 / 64 |
+|---|---|---|---|---|
+| control | 23983909 | 97.0 % | 65.1 / 198.5 / 543.4 / 750.7 / 1067.9 | 14.9 / 18.1 / 25.0 / 32.8 / 51.3 ms |
+| **`MOE_GLUE=1`** | 23983908 | 97.4 % | **70.7 / 210.3 / 576.2 / 783.5 / 1098.2** | **13.6 / 17.1 / 23.7 / 31.9 / 50.1** ms |
+
+TPOT is 0.9–1.3 ms lower at every load, 9 % at one user. Sanity 5/5, needles 2/2, no
+garbage, MTP acceptance 1.91 vs 1.92. The one-user runs generate the same 653 tokens.
+
+Two things tried here did not help. Fusing BF16_LINEAR's FP8 activation rounding into the
+GEMM's tile load (`FP8_FUSE=1`, `test_fp8_fuse.py`, job 23974177) is bit-identical but
+0.4–8 µs slower per call. Every program re-rounds the same activation tile, which costs
+more than the launch it saves; it stays off. The buffer copies are mostly needed: the custom
+all-reduce's copy into its uncached buffer, and the sparse decode and MoE finalize output
+copies (~0.25 ms together).
+
 ### Split-K sparse attention decode; DP2×TP4; 128 sequences (Nov 11–12)
 
 - **`SPARSE_SPLIT=1`** (`sparse_split.py`): vLLM's split-K decode kernels are gated to
@@ -1086,6 +1138,9 @@ GEMMs, the shared expert's w1+w3 with the router), or a split-K that reduces in-
       big fuse with runtime loops (cold instruction cache), mHC 7.1 → 3.5 ms a step at 32
       users. Next by size: MoE expert GEMMs (~30 % of the step), the 370 dense-GEMM calls,
       sparse attention, all-reduce.
+  16. ~~Small kernels around the MoE~~: done, `MOE_GLUE=1`, TPOT 0.9–1.3 ms lower at every
+      load. Left: the split-K sum kernels (252 a step, 0.86 ms), FP8 rounding (0.99 ms; fusing
+      it was slower), the routing metadata kernels.
   15. ~~Expert GEMM tiles, second pass~~: done, `MOE_SMALL` table v2 (block_m 16, 4 warps,
       one stage), down −15 % in serving, TPOT 0.1–1.8 ms lower. Open: the FP4 → bf16
       conversion bounds both GEMMs (0.5–0.7 TB/s against 1.25), ~7 ms a step at 32 users.
@@ -1155,6 +1210,10 @@ GEMMs, the shared expert's w1+w3 with the router), or a split-K that reduces in-
 | `plugin/lumi_dsv4_debug/moe_small.py` | `pack_bitmatrix` row blocks and expert GEMM tiles at decode sizes (`DSV4_MOE_SMALL`), router GEMM via `score_mm` (`DSV4_GATE_GEMM`) |
 | `test_moe_small.py`, `run_moe_small_test.sh` | `pack_bitmatrix` bit-identity and timing per block size; router GEMM sweep |
 | `test_moe_matmul.py`, `run_moe_matmul_test.sh` | MXFP4 expert GEMMs: default vs forced block_n / split_k per token count |
+| `plugin/lumi_dsv4_debug/moe_glue.py` | one-kernel MoE routing prologue, int32 row gathers, fused shared-expert activation (`DSV4_MOE_GLUE`) |
+| `test_moe_glue.py`, `run_moe_glue_test.sh` | those vs vLLM's code: routing outputs, gathers, activation, us per MoE layer |
+| `small_kernels.py` | small kernels per step by issuing call, with Python stacks (eager traces) |
+| `test_fp8_fuse.py`, `run_fp8_fuse_test.sh` | FP8 activation rounding fused into the dense GEMM: bit-identity and time (slower) |
 | `test_dense_bw.py`, `run_dense_bw_test.sh` | dense bf16 GEMMs vs the memory bound: tiles, grid order, warps/stages, per-step total |
 | `test_fp4_upcast.py`, `run_fp4_upcast_test.sh` | MXFP4 upcast: `tl.dot_scaled` vs bit-trick conversions vs bf16 weights in one decode-shaped GEMM |
 | `test_moe_roofline.py`, `run_moe_roofline_test.sh` | expert GEMMs against HBM bandwidth and bf16 weights; block_m/n/k, split_k, warps/stages sweep |
