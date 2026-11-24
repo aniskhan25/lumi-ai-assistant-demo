@@ -187,9 +187,11 @@ def _gates_kernel(
              mask=tmask[:, None, None])
 
 
-# Gates in their own token-blocked kernel from this many tokens on (None: never).
-GATES_MIN_TOKENS = 1
-GATES_BLOCK_T = 64
+# Gates in their own token-blocked kernel from this many tokens on (None: never). Off:
+# no faster at 2048-4096 tokens (0.743 vs 0.750 ms a call), slower at decode sizes (0.116
+# vs 0.087 at 16; test_mhc_triton.py section 5, job 23982520).
+GATES_MIN_TOKENS = None
+GATES_BLOCK_T = 16
 
 
 @triton.jit

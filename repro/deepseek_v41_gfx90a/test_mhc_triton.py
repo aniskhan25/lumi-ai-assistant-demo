@@ -164,4 +164,26 @@ for t in (1, 16, 96, 384, 2048, 4096):
         f"{bt}:{times[bt]:.3f}" for bt in times) + f"  (best BLOCK_T {best}, "
         f"{t_fused / times[best]:.1f}x)", flush=True)
 
+print("6. kernels inside one delayed-pre call at prefill sizes (torch profiler, us per call)")
+from torch.profiler import ProfilerActivity, profile  # noqa: E402
+
+for t in (2048, 4096):
+    residual = torch.randn(t, HC, H, device=dev).bfloat16()
+    fn = torch.randn(HC3, HC * H, device=dev) * 0.02
+    scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5
+    pre_mix = torch.rand(t, HC, device=dev) + 0.1
+    args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
+    for _ in range(3):
+        mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(10):
+            mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+        torch.cuda.synchronize()
+    rows = sorted(((e.key, e.device_time_total / 10) for e in prof.key_averages()
+                   if e.device_time_total > 0), key=lambda r: -r[1])
+    gb = t * HC * H * 2 / 1e9
+    print(f"  T={t}: residual {gb * 1e3:.0f} MB; " + "; ".join(f"{k[:40]} {v:.0f}" for k, v in rows[:6]),
+          flush=True)
+
 print("FAILED:", failures or "none")
