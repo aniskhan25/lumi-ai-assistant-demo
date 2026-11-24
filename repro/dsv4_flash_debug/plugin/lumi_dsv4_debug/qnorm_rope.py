@@ -46,13 +46,13 @@ def _qnorm_rope_kv_insert_kernel(
         cos = tl.load(cs_ptr + pos * ROPE_DIM + i).to(tl.float32)
         sin = tl.load(cs_ptr + pos * ROPE_DIM + HALF + i).to(tl.float32)
         base = q_ptr + t.to(tl.int64) * stride_qt + h * stride_qh
-        x = tl.load(base + offs).to(tl.float32)
-        rms = tl.rsqrt(tl.sum(x * x, 0) / HEAD_DIM + eps)
-        tl.store(out + offs, (x * rms).to(tl.bfloat16), mask=offs < NOPE)
-        ev = tl.load(base + NOPE + 2 * i).to(tl.float32) * rms
-        od = tl.load(base + NOPE + 2 * i + 1).to(tl.float32) * rms
-        tl.store(out + NOPE + 2 * i, (ev * cos - od * sin).to(tl.bfloat16))
-        tl.store(out + NOPE + 2 * i + 1, (ev * sin + od * cos).to(tl.bfloat16))
+        xq = tl.load(base + offs).to(tl.float32)
+        rms = tl.rsqrt(tl.sum(xq * xq, 0) / HEAD_DIM + eps)
+        tl.store(out + offs, (xq * rms).to(tl.bfloat16), mask=offs < NOPE)
+        qe = tl.load(base + NOPE + 2 * i).to(tl.float32) * rms
+        qo = tl.load(base + NOPE + 2 * i + 1).to(tl.float32) * rms
+        tl.store(out + NOPE + 2 * i, (qe * cos - qo * sin).to(tl.bfloat16))
+        tl.store(out + NOPE + 2 * i + 1, (qe * sin + qo * cos).to(tl.bfloat16))
     else:  # the KV row of token t
         if t >= num_kv:
             return
@@ -69,18 +69,18 @@ def _qnorm_rope_kv_insert_kernel(
         scales = blk + CACHE_BLOCK * (NOPE + 2 * ROPE_DIM) + p * 8
         for qb in tl.static_range(NOPE // 64):
             o = qb * 64 + tl.arange(0, 64)
-            x = tl.load(row + o)
-            amax = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
+            xk = tl.load(row + o)
+            amax = tl.maximum(tl.max(tl.abs(xk), axis=0), 1e-4)
             e = tl.ceil(tl.log2(amax / 448.0))
-            xs = tl.clamp(x / tl.exp2(e), -448.0, 448.0)
+            xs = tl.clamp(xk / tl.exp2(e), -448.0, 448.0)
             tl.store(data + o, xs.to(tl.float8e4nv).to(tl.uint8, bitcast=True))
             tl.store(scales + qb, tl.maximum(tl.minimum(e + 127.0, 255.0), 0.0).to(tl.uint8))
         tl.store(scales + 7, tl.zeros((), dtype=tl.uint8))
-        ev = tl.load(row + NOPE + 2 * i).to(tl.float32)
-        od = tl.load(row + NOPE + 2 * i + 1).to(tl.float32)
+        ke = tl.load(row + NOPE + 2 * i).to(tl.float32)
+        ko = tl.load(row + NOPE + 2 * i + 1).to(tl.float32)
         rp = (data + NOPE).to(tl.pointer_type(tl.bfloat16))
-        tl.store(rp + 2 * i, (ev * cos - od * sin).to(tl.bfloat16))
-        tl.store(rp + 2 * i + 1, (ev * sin + od * cos).to(tl.bfloat16))
+        tl.store(rp + 2 * i, (ke * cos - ko * sin).to(tl.bfloat16))
+        tl.store(rp + 2 * i + 1, (ke * sin + ko * cos).to(tl.bfloat16))
 
 
 def qnorm_rope_kv_insert(q, kv, cache_2d, slot_mapping, positions, cos_sin_cache,
