@@ -120,14 +120,18 @@ if [ "${V41:-0}" = 1 ]; then
   export DSV41_PREFILL_LOGITS="${PREFILL_LOGITS:-0}"
   # SPARSE_PREFILL=1: the sparse-attention prefill kernel without software pipelining (2.2x)
   export DSV41_SPARSE_PREFILL="${SPARSE_PREFILL:-0}"
-  # PREFIX_CACHING=1: prefix caching without replay (lumi_dsv41/circular_buffer.py);
-  # PREFIX_CHECK=1 then compares hit and cold outputs (prefix_cache_check.py)
-  export DSV41_PREFIX_CACHING="${PREFIX_CACHING:-0}"
+  # Prefix caching without replay (lumi_dsv41/circular_buffer.py), on by default for V4.1
+  # (PREFIX_CACHING=0 turns it off); PREFIX_CHECK=1 compares hit and cold outputs
+  # (prefix_cache_check.py). The plugin sets the sparse sliding-window retention below
+  # itself too, for a plain `vllm serve`.
+  PREFIX_CACHING="${PREFIX_CACHING:-1}"
+  export DSV41_PREFIX_CACHING="${PREFIX_CACHING}"
   # V4.1 has 43 sliding-window layers in 15 groups of 32-token blocks and 4 compressed
   # layers in one: with dense retention every sliding-window block is hashed and queued
   # for reuse, so a cached prefix is evicted after 200-400k tokens of other prefill (job
   # 23910870), not the 2.24M the pool holds. Keep sliding-window tails once per
   # RETENTION tokens and at each prompt's end (the next agentic turn's hit) only.
+  export DSV41_RETENTION="${RETENTION:-4096}"
   if [ "${PREFIX_CACHING:-0}" = 1 ] && [ "${RETENTION:-4096}" != dense ]; then
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${RETENTION:-4096}"
   fi

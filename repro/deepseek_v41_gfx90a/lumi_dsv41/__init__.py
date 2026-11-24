@@ -103,13 +103,21 @@ def _config_class(model_configs):
                     "only its DSpark drafter (method dspark) is ported")
             import os
 
-            if (vllm_config.cache_config.enable_prefix_caching
-                    and os.environ.get("DSV41_PREFIX_CACHING") != "1"):
-                # Works without replay (see circular_buffer.py), but opt-in until
-                # tested under load: DSV41_PREFIX_CACHING=1.
-                raise NotImplementedError(
-                    "DeepSeek-V4.1 on vLLM 0.26: pass --no-enable-prefix-caching, or "
-                    "DSV41_PREFIX_CACHING=1 to use it")
+            if vllm_config.cache_config.enable_prefix_caching:
+                if os.environ.get("DSV41_PREFIX_CACHING") == "0":
+                    raise NotImplementedError(
+                        "DeepSeek-V4.1: DSV41_PREFIX_CACHING=0 but prefix caching is on; "
+                        "pass --no-enable-prefix-caching")
+                # Without replay (see circular_buffer.py). V4.1's 43 sliding-window layers
+                # in 15 groups of 32-token blocks make dense retention hash and queue every
+                # sliding-window block: a cached prefix is evicted after 200-400k tokens of
+                # other prefill, not the pool's 2.24M (README, agentic load). Keep their
+                # tails once per 4096 tokens and at each prompt's end. Set here, in the API
+                # process before the engine core starts, so a plain `vllm serve` gets it;
+                # DSV41_RETENTION=dense keeps 0.26's default, or set the variable yourself.
+                retention = os.environ.get("DSV41_RETENTION", "4096")
+                if retention != "dense":
+                    os.environ.setdefault("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", retention)
             if not vllm_config.use_v2_model_runner:
                 # Engram reads each request's previous tokens from the model state,
                 # which only Model Runner V2 calls.
