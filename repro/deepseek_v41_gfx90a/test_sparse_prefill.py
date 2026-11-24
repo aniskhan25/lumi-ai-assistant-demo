@@ -120,4 +120,39 @@ for T, n_kv in ((2048, 16384), (2048, 30000)):
     top = sorted(times, key=times.get)[:6]
     print(f"kv={n_kv}: served {served:.2f} ms; best (BLOCK_H, BLOCK_K, warps, nonkdim, "
           f"waves_per_eu, kpack): " + "  ".join(f"{c}:{times[c]:.2f}" for c in top), flush=True)
+print("Diagnosis: lumi_dsv41/sparse_prefill.py variants (ms per call; output columns split "
+      "over DV_SPLIT programs per query; loads only = the gathers without the math)")
+import sys  # noqa: E402
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from lumi_dsv41.sparse_prefill import sparse_prefill  # noqa: E402
+
+for T, n_kv in ((2048, 16384), (2048, 30000)):
+    q, kv, idx, ptr = inputs(T, n_kv)
+    sink = torch.randn(H, device=dev)
+    ref = m._rocm_sparse_attn_prefill_ragged_triton(q, kv, idx, ptr, SCALE, sink, NOPE, ROPE)
+    gb = (idx >= 0).sum().item() * D * 2 / 1e9
+    served = timeit(lambda: launch(q, kv, idx, ptr, sink, torch.empty_like(q), 16, 2, 1,
+                                   matrix_instr_nonkdim=16, waves_per_eu=1))
+    row = [f"served {served:.2f}"]
+    for split, bk, nw in itertools.product((1, 2, 4), (16, 32), (2, 4)):
+        try:
+            got = sparse_prefill(q, kv, idx, ptr, SCALE, sink, dv_split=split, block_k=bk, num_warps=nw)
+        except Exception as e:
+            row.append(f"s{split}/k{bk}/w{nw}: {type(e).__name__}")
+            continue
+        err = ((got.float() - ref.float()).abs().max() / ref.float().abs().max()).item()
+        if err > 2e-2:
+            bad.append(("variant", n_kv, split, bk, nw, err))
+            continue
+        t = timeit(lambda: sparse_prefill(q, kv, idx, ptr, SCALE, sink, dv_split=split,
+                                          block_k=bk, num_warps=nw))
+        row.append(f"s{split}/k{bk}/w{nw} {t:.2f}")
+    lo = {}
+    for split, nw in ((1, 2), (1, 4), (2, 2), (4, 2)):
+        lo[(split, nw)] = timeit(lambda: sparse_prefill(q, kv, idx, ptr, SCALE, sink, dv_split=split,
+                                                        num_warps=nw, loads_only=True))
+    print(f"kv={n_kv}: {gb:.2f} GB gathered; " + "  ".join(row), flush=True)
+    print(f"   loads only: " + "  ".join(f"s{s_}/w{w}: {t:.2f} ms ({gb / t:.0f} GB/s)"
+                                         for (s_, w), t in lo.items()), flush=True)
 print("FAILED:", bad if bad else "none")
