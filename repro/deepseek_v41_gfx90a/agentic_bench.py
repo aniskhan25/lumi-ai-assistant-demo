@@ -36,6 +36,7 @@ START = int(os.environ.get("AGENT_START", 8000))
 END = int(os.environ.get("AGENT_END", 30000))
 GROW = int(os.environ.get("AGENT_GROW", 1500))
 OUT = int(os.environ.get("AGENT_OUT", 384))
+EVERY = float(os.environ.get("AGENT_REPORT_EVERY", 0))  # s between progress lines (0: none)
 CHARS_PER_TOKEN = 3.6  # GSM8K text, roughly; real counts come from usage
 
 df = pd.read_parquet(parquet)
@@ -179,6 +180,25 @@ with open(out_path, "w") as f:
                    for c in range(n_convs)]
         for t in threads:
             t.start()
+
+        def progress():
+            last = 0.0
+            while any(t.is_alive() for t in threads):
+                time.sleep(EVERY)
+                now = time.time() - t_start
+                with lock:
+                    rs = [r for r in records if last <= r["done"] < now]
+                ok = [r for r in rs if "error" not in r]
+                prompt = sum(r["prompt_tokens"] for r in ok)
+                print(f"  [{now / 60:5.1f} min] last {now - last:.0f} s: {len(ok)} turns, "
+                      f"{sum(r['out_tokens'] for r in ok) / (now - last):.0f} output tok/s, "
+                      f"{100 * sum(r['cached'] for r in ok) / max(prompt, 1):.0f} % cached, "
+                      f"right {sum(r['right'] for r in ok)}/{len(ok)}, "
+                      f"errors {len(rs) - len(ok)}", flush=True)
+                last = now
+
+        if EVERY > 0:
+            threading.Thread(target=progress, daemon=True).start()
         for t in threads:
             t.join()
         m1 = metrics()

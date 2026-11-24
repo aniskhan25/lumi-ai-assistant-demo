@@ -251,6 +251,15 @@ if [ "${PLUGIN}" = 1 ]; then
     done ) &
   WATCH=$!
 fi
+# SAMPLE_MEM=N: every N s, GPU memory in use per GCD and the vLLM processes' host RSS,
+# to ${LOG}/mem.txt (long-run stability).
+if [ -n "${SAMPLE_MEM:-}" ]; then
+  ( while sleep "${SAMPLE_MEM}"; do
+      gpu=$("${RUN[@]}" rocm-smi --showmeminfo vram --csv 2>/dev/null | awk -F, '/^card/ {printf "%.1f ", $3/2^30}')
+      rss=$(ps -u "${USER}" -o rss=,args= | awk '/VLLM::|vllm serve/ {s += $1} END {printf "%.1f", s/2^20}')
+      echo "$(date +%T) gpu_used_GiB ${gpu}host_rss_GiB ${rss}" >> "${LOG}/mem.txt"
+    done ) &
+fi
 SECONDS=0
 until curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; do
   if ! kill -0 "${SERVER}" 2>/dev/null || [ "${SECONDS}" -gt "${READY_TIMEOUT:-3600}" ]; then
