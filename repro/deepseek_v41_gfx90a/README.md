@@ -834,6 +834,22 @@ other 63 prefill ~950k tokens, every prefix is evicted before reuse, and LRU thr
 request only when its blocks fit, and agentic turns decode too little to outgrow them.
 At the default 0.92 the pool is 2.24M tokens: 64 conversations at up to 30k fit.
 
+*Preemption after a hit* (`preempt_check.py`, `PREEMPT_CHECK=1`): 64 requests share an
+8k-token few-shot prefix (each starts from a hit, ~8.8k tokens cached), ask one more
+GSM8K question and generate 12,000 tokens with EOS ignored, on a 288k-token pool
+(`--gpu-memory-utilization 0.68`); first 16 at a time (no preemption), then all 64 (job
+23987665). With 6,000 tokens the pool still held them all (80 % peak, job 23987088).
+
+| | 16 at a time | 64 at once |
+|---|---|---|
+| preemptions | 0 | **14** |
+| answers right | 59 / 64 | 58 / 64 |
+| mean logprob, first / last 1000 generated tokens | −0.102 / −0.000 | −0.096 / −0.000 |
+| repeated-8-gram share, mean / max | 0.007 / 0.047 | 0.006 / 0.026 |
+
+The tail is the model copying few-shot text at near-certainty, so state corrupted on
+resume would show as a drop there; there is none.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
