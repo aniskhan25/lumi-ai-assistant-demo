@@ -65,7 +65,8 @@ def same(a, b):
     return a.shape == b.shape and torch.equal(a.cpu(), b.cpu())
 
 
-print(torch.cuda.get_device_name())
+print(torch.cuda.get_device_name(), "legacy triton_kernels routing:", m.use_legacy_triton_kernels,
+      "| make_routing_data replaced:", new_routing is not stock_routing)
 print("1. routing outputs (gate_scal, src/dst indices, block sizes)")
 for M in (1, 2, 7, 64, 128, 300):
     for invalid in (False, True):

@@ -23,6 +23,8 @@ SiluAndMulWithClamp (the shared expert; vLLM sends ROCm to forward_native)
 Everything else (the routing metadata kernels, matmul_ogs, the masked top-k sum) is vLLM's.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -102,7 +104,10 @@ def install() -> None:
         return
     m._lumi_glue = True
 
-    if not m.use_legacy_triton_kernels:
+    # The routing prologue. This container's triton_kernels lacks SparseMatrix, so vLLM takes
+    # its legacy path (routing_from_bitmatrix); both paths are covered.
+    # DSV4_MOE_GLUE_ROUTE=0 keeps vLLM's prologue (A/B).
+    if os.environ.get("DSV4_MOE_GLUE_ROUTE", "1") == "1":
         def make_routing_data(topk_ids, topk_weights, num_local_experts):
             n_rows, topk = topk_ids.shape
             if topk_ids.stride(-1) != 1 or topk_weights.stride(-1) != 1 or n_rows == 0:
@@ -116,6 +121,12 @@ def install() -> None:
                 topk_ids, topk_weights, ids16, w16, bitmatrix, n_rows, TOPK=topk,
                 TOPK_P2=triton.next_power_of_2(topk), BM_COLS=bm_cols,
                 BM_P2=triton.next_power_of_2(bm_cols), BLOCK=16, num_warps=4)
+            if m.use_legacy_triton_kernels:
+                from triton_kernels.routing import routing_from_bitmatrix  # as vLLM (patched)
+
+                bitmatrix = m.Bitmatrix(bitmatrix, shape=[n_rows, bm_cols * 32],
+                                        shape_max=[n_rows, None], scratchpad=None)
+                return routing_from_bitmatrix(bitmatrix, w16, ids16, num_local_experts, topk)
             bitmatrix = m.Bitmatrix(bitmatrix, dtype=m.BIT, shape=[n_rows, bm_cols * 32],
                                     shape_max=[n_rows, None])
             sparse_logits = m.SparseMatrix(indx=ids16, vals=w16, mask=bitmatrix)
