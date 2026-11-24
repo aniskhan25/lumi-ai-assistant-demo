@@ -4,6 +4,11 @@ Should we try to port `deepseek-ai/DeepSeek-V4.1-Flash` to LAIF's vLLM 0.26, as 
 Qwen3.8-Flash (branch `exp/qwen38-flash-gfx90a`)? This is the de-risking pass, before any
 port work and before downloading its 475 GiB.
 
+> **Status (2026-11-24, later): AMD launch options for the sparse-attention prefill (2
+> warps, 16-wide MFMA: 2.90 → 1.77 ms a call) and the indexer logits (−10 %): agentic load
+> 166 output tok/s at 32 conversations (159 before, 144 before the mHC fix), GSM8K 99 %
+> (job 23983987).**
+>
 > **Status (2026-11-24): mHC delayed pre rewritten (per-stream row loads, 1 warp): 551 →
 > 112 µs a call at 2048 tokens; agentic load 159 output tok/s at 32 conversations (+10 %),
 > GSM8K 99 % (job 23982702).**
@@ -793,6 +798,21 @@ job 23902280): 64.2 / 471.1 / 729.6 / 963.2 tok/s at 1 / 16 / 32 / 64 users agai
 484.7 / 732.1 / 932.3, TPOT 15.4 / 26.0 / 34.1 / 54.1 ms against 14.7 / 25.7 / 35.0 / 56.2:
 +3 % at 64 users (384-row verify batches), the rest within run-to-run spread (the c=1 TPOT
 of 15.4–15.5 ms also appeared before this change, job 23908978).
+
+*AMD launch options* (Triton's `matrix_instr_nonkdim`, `waves_per_eu`, `kpack`), which
+the earlier tile sweeps did not cover. Indexer prefill logits (`test_mqa_logits.py`, job
+23983712): 4.23 → 3.77 ms at 16k keys, 7.91 → 7.12 at 30k with nonkdim 32, waves_per_eu 2,
+kpack 2 (`mqa_logits.LAUNCH_KW`). The kernel is near its roof: a chunk at the end of a 20k
+context is ~335 GFLOP, about a third of bf16 MFMA peak with the FP8 inputs converted in
+software. Sparse-attention prefill (`test_sparse_prefill.py`, job 23983859; bound by its
+gathers, ~1.34 GB a call, floor ~0.84 ms): 2.90 → **1.77 ms** at 16k, 2.92 → 1.79 at 30k
+with 2 warps, nonkdim 16 and waves_per_eu 1 (nonkdim 16 is the main term: 1.80 with 4
+warps); 8-row head blocks compile but bring nothing. Same outputs (max rel diff ≤ 2e-2,
+the kernel's sweep tolerance, and identical masks). Folded into `SPARSE_PREFILL=1`
+(`hooks.py:_prefill_stages`). Serving (job 23983987): GSM8K 99 % (200), sanity 5/5, needles;
+agentic load at 32 conversations **166** output tok/s (159 with the mHC fix alone), 1281
+turns in the window, TPOT 146 ms, median TTFT 7.3 / 3.8 / 4.6 s at 8–16k / 16–24k /
+24–32k, answers 93.4 % right.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
