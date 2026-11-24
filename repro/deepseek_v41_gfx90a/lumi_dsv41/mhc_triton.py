@@ -86,6 +86,8 @@ def _prenorm_gemm_tiled_kernel(
 # (6 tokens per sequence) are 96-384 rows at 16-64 users.
 TILED_MIN_TOKENS = 96
 TILED_CFG = (64, 64, 512, 4)
+# Extra AMD launch options for the tiled prenorm GEMM.
+TILED_KW: dict = {}
 
 
 @triton.jit
@@ -282,7 +284,7 @@ def mhc_pre_delayed_triton(residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
         _prenorm_gemm_tiled_kernel[(triton.cdiv(t, bm), splits)](
             src, fn, mixes, sqrsum, t, src.stride(0), k,
             HC3=hc3, BLOCK_M=bm, BLOCK_N=triton.next_power_of_2(hc3), BLOCK_K=bk,
-            CHUNK=chunk, num_warps=warps,
+            CHUNK=chunk, num_warps=warps, **TILED_KW,
         )
     elif t <= GEMM_MAX_TOKENS and k % GEMM_CHUNK == 0 and fn.is_contiguous():
         src = _rows(src)

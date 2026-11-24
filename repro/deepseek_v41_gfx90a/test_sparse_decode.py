@@ -185,4 +185,34 @@ for B, extra in itertools.product((1, 16, 32, 64, 128), (0, 512)):
     t0 = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, deq=0, **kw))
     t2 = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, deq=2, **kw))
     print(f"  {'top-k' if extra else 'SWA':<6} B={B:4d}: equal {same}  deq0 {t0:6.1f}  deq2 {t2:6.1f}")
+print("4. AMD launch options on the auto split count (us per call; DSpark verify batches "
+      "are 6 queries per user)")
+for layer, extra in (("SWA", 0), ("top-k", 512)):
+    for B in (6, 96, 192, 384):
+        q = torch.randn(B, H, HD, device=dev).bfloat16()
+        mi, mp = ragged(B, 128, swa.shape[0] * BS)
+        kw = {}
+        if extra:
+            ei, ep = ragged(B, extra, comp.shape[0] * BS)
+            kw = dict(extra_cache=comp, extra_indices=ei, extra_indptr=ep)
+        base = sparse_decode(q, swa, mi, mp, SCALE, sink, **kw).float()
+        t0 = timed(lambda: sparse_decode(q, swa, mi, mp, SCALE, sink, **kw))
+        times = {}
+        for bk, nw, nk, we, kp in itertools.product((16, 32), (2, 4, 8), (16, 32), (0, 1, 2, 4), (1, 2)):
+            lk = dict(matrix_instr_nonkdim=nk, waves_per_eu=we, kpack=kp)
+            try:
+                got = sparse_decode(q, swa, mi, mp, SCALE, sink, block_k=bk, num_warps=nw,
+                                    launch_kw=lk, **kw).float()
+            except Exception:  # unsupported or out of resources
+                continue
+            err = ((got - base).abs().max() / base.abs().max()).item()
+            if not err <= 2e-2:
+                bad.append(("launch", layer, B, bk, nw, lk, err))
+                continue
+            times[(bk, nw, nk, we, kp)] = timed(lambda: sparse_decode(
+                q, swa, mi, mp, SCALE, sink, block_k=bk, num_warps=nw, launch_kw=lk, **kw))
+        top = sorted(times, key=times.get)[:5]
+        print(f"  {layer:<6} B={B:>4}: served {t0:7.1f}  best {times[top[0]]:7.1f} "
+              f"(BLOCK_K, warps, nonkdim, waves_per_eu, kpack)={top[0]} ({t0 / times[top[0]]:.2f}x)  "
+              + " ".join(f"{c}:{times[c]:.0f}" for c in top[1:]), flush=True)
 print("FAILED:", bad if bad else "none")

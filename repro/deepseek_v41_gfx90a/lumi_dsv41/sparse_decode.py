@@ -189,9 +189,14 @@ def num_splits(num_queries: int, has_extra: bool) -> int:
     return 1 << (s.bit_length() - 1)
 
 
+# Extra AMD launch options for the partial kernel (waves_per_eu, matrix_instr_nonkdim, kpack).
+LAUNCH_KW: dict = {}
+
+
 def sparse_decode(q, main_cache, main_indices, main_indptr, scale, attn_sink,
                   extra_cache=None, extra_indices=None, extra_indptr=None, out=None,
-                  is_fnuz=False, splits=None, block_k=16, num_warps=4, num_stages=1, deq=0):
+                  is_fnuz=False, splits=None, block_k=16, num_warps=4, num_stages=1, deq=0,
+                  launch_kw=None):
     """Decode attention like rocm_aiter_mla_sparse._rocm_sparse_attn_decode_ragged_triton
     for V4/V4.1's fp8_ds_mla record (448 FP8 NoPE + 64 bf16 RoPE, head dim 512) and up
     to 16 heads per rank. q [B, H, 512] bf16; indices/indptr int32 ragged lists."""
@@ -216,6 +221,7 @@ def sparse_decode(q, main_cache, main_indices, main_indptr, scale, attn_sink,
         main_cache.shape[1], extra_cache.shape[1], main_cache.stride(0), extra_cache.stride(0),
         scale, H, NUM_SPLITS=S, BLOCK_H=BH, BLOCK_K=block_k, HAS_EXTRA=has_extra,
         IS_FNUZ=is_fnuz, NUM_STAGES=num_stages, DEQ=deq, num_warps=num_warps,
+        **(LAUNCH_KW if launch_kw is None else launch_kw),
     )
     sink = attn_sink if attn_sink is not None else pm
     _reduce_kernel[(B, H)](

@@ -237,4 +237,35 @@ for t in (16, 384, 2048):
     print(f"  T={t:5d}: tile/512/4 (old) {times.get((False, 512, 4)):.3f}  default "
           f"{times.get(saved):.3f}  best {times[best]:.3f} {best}", flush=True)
 
+print("9. tiled prenorm GEMM: AMD launch options on (BLOCK_M, BLOCK_K, CHUNK, warps) "
+      "(whole delayed-pre call, ms)")
+for t in (96, 384, 2048):
+    residual = torch.randn(t, HC, H, device=dev).bfloat16()
+    fn = torch.randn(HC3, HC * H, device=dev) * 0.02
+    scale, base = torch.rand(3, device=dev) + 0.5, torch.randn(HC3, device=dev) * 0.5
+    pre_mix = torch.rand(t, HC, device=dev) + 0.1
+    args = (residual, fn, scale, base, *EPS[:3], EPS[3], SK)
+    want = ref.mhc_pre_delayed_torch(*args, pre_mix=pre_mix)
+    saved = (mt.TILED_CFG, mt.TILED_KW, mt.TILED_MIN_TOKENS)
+    mt.TILED_MIN_TOKENS = 1
+    t0 = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    times = {}
+    for cfg, nk, we, kp in itertools.product(
+            ((64, 64, 512, 4), (64, 32, 2048, 4), (32, 64, 1024, 4), (64, 64, 1024, 8),
+             (128, 64, 2048, 8), (128, 32, 1024, 4)), (16, 32), (0, 1, 2), (1, 2)):
+        mt.TILED_CFG, mt.TILED_KW = cfg, dict(matrix_instr_nonkdim=nk, waves_per_eu=we, kpack=kp)
+        try:
+            got = mhc_pre_delayed_triton(*args, pre_mix=pre_mix)
+        except Exception:
+            continue
+        err = max(rel(x, y) for x, y in zip(got, want))
+        if err > 1e-4:
+            failures.append(f"tiled launch {cfg} nk{nk} we{we} kp{kp} T={t}: {err:.1e}")
+            continue
+        times[(cfg, nk, we, kp)] = timeit(lambda: mhc_pre_delayed_triton(*args, pre_mix=pre_mix))
+    mt.TILED_CFG, mt.TILED_KW, mt.TILED_MIN_TOKENS = saved
+    top = sorted(times, key=times.get)[:4]
+    print(f"  T={t:5d}: served {t0:.3f}  best {times[top[0]]:.3f} {top[0]} ({t0 / times[top[0]]:.2f}x)  "
+          + " ".join(f"{c}:{times[c]:.3f}" for c in top[1:]), flush=True)
+
 print("FAILED:", failures or "none")
