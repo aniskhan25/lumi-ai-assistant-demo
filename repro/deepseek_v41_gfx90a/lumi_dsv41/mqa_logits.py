@@ -65,8 +65,9 @@ def _mqa_logits_kernel(q_ptr, k_ptr, s_ptr, w_ptr, ks_ptr, ke_ptr, o_ptr, M, N,
         tl.store(out, tl.where(valid, acc, neg_inf), mask=omask)
 
 
-# Extra launch options (AMD: matrix_instr_nonkdim, waves_per_eu, kpack, num_stages).
-LAUNCH_KW: dict = {}
+# Extra launch options (AMD). test_mqa_logits.py (job 23983712), 2048 rows: 4.23 -> 3.77 ms
+# at 16k keys, 7.91 -> 7.12 at 30k (-10 %); same mask, max rel diff <= 1e-3.
+LAUNCH_KW: dict = {"matrix_instr_nonkdim": 32, "waves_per_eu": 2, "kpack": 2}
 
 
 def fp8_mqa_logits_triton(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke,

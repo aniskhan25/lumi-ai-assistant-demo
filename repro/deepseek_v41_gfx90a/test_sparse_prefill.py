@@ -44,14 +44,14 @@ def inputs(T, n_kv, swa=128, topk=512):
     return q, kv, torch.cat(lists).to(dev), indptr
 
 
-def launch(q, kv, idx, ptr, sink, out, block_k, warps, stages, block_h=16):
+def launch(q, kv, idx, ptr, sink, out, block_k, warps, stages, block_h=16, **kw):
     kernel[(q.shape[0], triton_cdiv(H, block_h))](
         q, kv, idx, ptr, sink, out,
         q.stride(0), q.stride(1), q.stride(2), kv.stride(0), kv.stride(1),
         out.stride(0), out.stride(1), out.stride(2),
         H, D, kv.shape[0], float(SCALE),
         HAS_ATTN_SINK=True, OUT_DV=out.shape[-1], BLOCK_H=block_h, BLOCK_D=D,
-        BLOCK_K=block_k, num_warps=warps, num_stages=stages,
+        BLOCK_K=block_k, num_warps=warps, num_stages=stages, **kw,
     )
     return out
 
@@ -96,4 +96,28 @@ for T, n_kv in ((2048, 4096), (2048, 16384)):
     print(f"T={T} kv={n_kv}: stock {t_stock:6.2f} ms  best {times[best]:6.2f} ms "
           f"(BLOCK_K, warps, stages)={best}  " + " ".join(f"{c}:{times[c]:.2f}" for c in top[1:]),
           flush=True)
+print("AMD launch options, num_stages 1 (ms per call; served: BLOCK_K 16, 4 warps)")
+for T, n_kv in ((2048, 16384), (2048, 30000)):
+    q, kv, idx, ptr = inputs(T, n_kv)
+    sink = torch.randn(H, device=dev)
+    ref = m._rocm_sparse_attn_prefill_ragged_triton(q, kv, idx, ptr, SCALE, sink, NOPE, ROPE)
+    times = {}
+    for bh, bk, nw, nk, we, kp in itertools.product(
+            (8, 16), (16, 32, 64), (2, 4, 8), (16, 32), (0, 1, 2, 4), (1, 2)):
+        kw = dict(matrix_instr_nonkdim=nk, waves_per_eu=we, kpack=kp)
+        out = torch.empty_like(q)
+        try:
+            launch(q, kv, idx, ptr, sink, out, bk, nw, 1, block_h=bh, **kw)
+        except Exception:  # unsupported or out of resources
+            continue
+        err = ((out.float() - ref.float()).abs().max() / ref.float().abs().max()).item()
+        if err > 2e-2:
+            bad.append((T, n_kv, bh, bk, nw, kw, err))
+            continue
+        times[(bh, bk, nw, nk, we, kp)] = timeit(
+            lambda: launch(q, kv, idx, ptr, sink, out, bk, nw, 1, block_h=bh, **kw))
+    served = timeit(lambda: launch(q, kv, idx, ptr, sink, torch.empty_like(q), 16, 4, 1))
+    top = sorted(times, key=times.get)[:6]
+    print(f"kv={n_kv}: served {served:.2f} ms; best (BLOCK_H, BLOCK_K, warps, nonkdim, "
+          f"waves_per_eu, kpack): " + "  ".join(f"{c}:{times[c]:.2f}" for c in top), flush=True)
 print("FAILED:", bad if bad else "none")
