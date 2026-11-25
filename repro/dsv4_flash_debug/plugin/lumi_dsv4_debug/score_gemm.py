@@ -103,6 +103,26 @@ CONFIGS: dict[int, list[tuple[int, tuple[int, int, int, int, int]]]] = {
 }
 
 
+# Prefill chunks (256-2048 tokens), where torch.mm ran hipBLASLt's fp32-MFMA kernel (1.4 ms a
+# call, 13 % of a prefill; profile job 24005447). test_score_prefill.py (job 24014949),
+# us per call torch.mm -> score_mm: N 2048: 346 -> 71 at 256 tokens, 2397 -> 384 at 2048;
+# N 1024: 1203 -> 220 at 2048; N 512: 595 -> 119; N 256 (router): 298 -> 69. 3.3-6.2x,
+# error vs fp64 equal or lower. DSV4_SCORE_PREFILL=0 leaves prefill sizes on torch.mm.
+PREFILL_CONFIGS = {
+    2048: [(256, (64, 64, 64, 1, 4, 2, False)), (512, (64, 128, 128, 1, 8, 1, False)),
+           (1024, (64, 64, 64, 1, 4, 2, False)), (2048, (128, 64, 64, 1, 8, 2, False))],
+    1024: [(256, (64, 128, 128, 4, 8, 1, False)), (512, (64, 64, 64, 2, 4, 2, False)),
+           (1024, (64, 64, 64, 1, 4, 2, False)), (2048, (64, 64, 64, 1, 4, 2, False))],
+    512: [(256, (128, 64, 128, 4, 8, 2, False)), (512, (64, 64, 64, 2, 4, 2, False)),
+          (1024, (64, 64, 64, 2, 4, 2, False)), (2048, (64, 64, 64, 1, 4, 2, False))],
+    256: [(256, (64, 64, 128, 4, 4, 2, False)), (512, (128, 64, 128, 4, 8, 2, False)),
+          (1024, (128, 64, 128, 2, 8, 2, False)), (2048, (64, 64, 64, 2, 4, 2, False))],
+}
+if os.environ.get("DSV4_SCORE_PREFILL", "1") == "1":
+    for _n, _rows in PREFILL_CONFIGS.items():
+        CONFIGS[_n] = CONFIGS[_n] + _rows
+
+
 def pick(M: int, N: int):
     for m_max, cfg in CONFIGS.get(N, ()):
         if M <= m_max:
