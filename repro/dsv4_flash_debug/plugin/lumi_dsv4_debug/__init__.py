@@ -43,6 +43,8 @@ DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel wit
 DSV4_MOE_SMALL=1     MoE at decode sizes: pack_bitmatrix with 16-row blocks, expert GEMM
                      tiles, warps and stages by token count (moe_small.py; DSV4_MOE_TABLE=v1
                      for the earlier block_n / split_k table).
+DSV4_SPARSE_PREFILL=1  Sparse-attention prefill kernel with 2 warps, one stage and AMD launch
+                     options (sparse_prefill.py, from the V4.1 branch).
 DSV4_QNORM_ROPE=1    Attention's q-norm / RoPE / KV RoPE + FP8 cache insert in one Triton kernel
                      instead of vLLM's HIP op (qnorm_rope.py).
 DSV4_MOE_GLUE=1      Fewer small kernels around the MoE: one routing-prologue kernel, int32 row
@@ -286,6 +288,11 @@ def register() -> None:
 
         wo_a.install()
         _log("DSV4_WO_A=1: attention wo_a GEMM via wvSplitK / Triton instead of einsum")
+    if os.environ.get("DSV4_SPARSE_PREFILL") == "1":
+        from . import sparse_prefill
+
+        sparse_prefill.install()
+        _log("DSV4_SPARSE_PREFILL=1: sparse-attention prefill kernel, 2 warps / 1 stage / AMD launch options")
     if os.environ.get("DSV4_QNORM_ROPE") == "1":
         from . import qnorm_rope
 
