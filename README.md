@@ -44,7 +44,7 @@ after `serve.sh` go to `vllm serve`.
 | setting | value | why |
 |---|---|---|
 | parallelism | TP 8 + expert parallel | tensor-parallel MoE does not fit (expert shards padded to 512) |
-| `--max-model-len` | 32768 | tested context |
+| `--max-model-len` | 32768 | most concurrent sessions; 131072 also validated (see Tuning) |
 | `--max-num-seqs` / `--max-num-batched-tokens` | 64 / 2048 | best throughput for decode and agentic load |
 | `--kv-cache-dtype` | fp8 | required by V4.1's cache layout |
 | `--moe-backend` | triton_unfused | the MXFP4 expert path that runs on gfx90a |
@@ -67,6 +67,17 @@ others with the same kernels and settings on the development branch.
 | accuracy | GSM8K 98–99 % (200 questions) |
 
 ## Tuning
+
+- **Long contexts:** `sbatch serve.sh --max-model-len 131072` (the model supports up to
+  1M; 128k is the validated range). Tested with the image:
+  - retrieval: needles found 9/9 at ~31k / 62k / 114k tokens, at 10 / 50 / 90 % depth;
+  - accuracy: GSM8K 98.5 %, no out-of-memory errors;
+  - cold time to first token: ~7 / 15 / 30 s at 31k / 62k / 114k;
+  - KV cache: 3.2M tokens, 24 full-length requests.
+
+  Decode is unchanged at 1 user and 2.6 / 3.3 % slower at 32 / 64 users (682 / 917 against
+  700 / 948 tok/s). The decode indexer's score buffer is sized by `--max-model-len`, not
+  by the actual context.
 
 - **Interactive agents:** `sbatch serve.sh --max-num-batched-tokens 8192` roughly halves
   time to first token under load. Tokens stream about 10–20 % slower.
@@ -131,7 +142,8 @@ Then serve with the arguments in `serve.sh`, and set `VLLM_USE_V2_MODEL_RUNNER=1
 
 ## Limitations
 
-- One node only (TP 8 with expert parallelism); tested up to 32k tokens of context.
+- One node only (TP 8 with expert parallelism); validated up to 128k tokens of context
+  (prompts to ~114k).
 - Language model only: no vision input.
 - gfx90a (MI250X) with this container only.
 - DSpark is the only speculative method.
