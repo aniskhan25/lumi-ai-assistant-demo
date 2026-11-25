@@ -1,11 +1,10 @@
 """vLLM 0.26 plugin: DeepSeek-V4.1-Flash (upstream AMD path, language model only) on LUMI-G
 (MI250X, gfx90a).
 
-Loaded by vLLM's `vllm.general_plugins` entry point (../lumi_dsv41-0.1.dist-info) in every
-vLLM process. ../sitecustomize.py installs the module loader (loader.py) at interpreter
-start, so the vendored V4.1 modules (../vendor) resolve; register() adds the model, config
-and quantization registrations and the gfx90a kernels. Put the parent directory on
-PYTHONPATH.
+Installed with pip: lumi_dsv41.pth installs the module loader (loader.py) at interpreter
+start, so the vendored V4.1 modules (vendor/) resolve in every process, and vLLM's
+`vllm.general_plugins` entry point calls register(), which adds the model, config and
+quantization registrations and the gfx90a kernels.
 """
 
 ARCH = "DeepseekV41ForCausalLM"

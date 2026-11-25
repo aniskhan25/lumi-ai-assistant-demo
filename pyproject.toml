@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lumi-dsv41"
+version = "0.1.0"
+description = "vLLM 0.26 plugin: DeepSeek-V4.1-Flash on LUMI-G (MI250X, gfx90a)"
+readme = "README.md"
+requires-python = ">=3.12"
+# vLLM 0.26, torch and Triton come from LAIF's lumi-multitorch container: declaring them
+# would let pip replace the container's builds.
+dependencies = []
+
+[project.entry-points."vllm.general_plugins"]
+lumi_dsv41 = "lumi_dsv41:register"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lumi_dsv41"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Runs at interpreter start in every process, before anything imports vllm (see loader.py).
+"lumi_dsv41.pth" = "lumi_dsv41.pth"

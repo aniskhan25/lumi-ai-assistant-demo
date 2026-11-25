@@ -1,8 +1,8 @@
-"""Serve the vendored upstream modules (../vendor/vllm) in place of, or next to, vLLM 0.26's.
+"""Serve the vendored upstream modules (vendor/vllm) in place of, or next to, vLLM 0.26's.
 
-Installed at interpreter start by ../sitecustomize.py, before anything imports vllm, so
-every process (API server, engine core, workers, spawned helpers) sees the same modules.
-It does not import vllm itself.
+Installed at interpreter start by lumi_dsv41.pth (in site-packages), before anything
+imports vllm, so every process (API server, engine core, workers, spawned helpers) sees
+the same modules. It does not import vllm itself.
 
 - A `vllm.*` module with a file under vendor/vllm is loaded from there. If 0.26 has the
   same module (a "shadow"), names that only 0.26's version defines stay reachable through
@@ -22,8 +22,7 @@ import pathlib
 import sys
 import types
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-VENDOR = ROOT / "vendor"
+VENDOR = pathlib.Path(__file__).resolve().parent / "vendor"
 # Our own edits of whole vendored files (e.g. a language-model-only package __init__);
 # searched before vendor/.
 OVERRIDES = pathlib.Path(__file__).resolve().parent / "overrides"

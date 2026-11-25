@@ -10,7 +10,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=dsv41-serve-%j.out
 # DeepSeek-V4.1-Flash on one LUMI-G node (8 GCDs) with the lumi_dsv41 plugin and the best
-# measured settings. Usage (from the repository root):
+# measured settings, from the image build.sh makes. Usage (from the repository root):
 #
 #   MODEL=/path/to/DeepSeek-V4.1-Flash sbatch serve.sh [extra vllm serve arguments]
 #
@@ -19,9 +19,10 @@ set -euo pipefail
 
 REPO="${SLURM_SUBMIT_DIR:-$(pwd)}"
 MODEL="${MODEL:-/flash/${SLURM_JOB_ACCOUNT}/${USER}/DeepSeek-V4.1-Flash}"
-CONTAINER="${CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif}"
+IMAGE="${IMAGE:-${REPO}/lumi-dsv41.sif}"
 PORT="${PORT:-8000}"
 [ -f "${MODEL}/config.json" ] || { echo "MODEL=${MODEL}: no config.json"; exit 1; }
+[ -f "${IMAGE}" ] || { echo "IMAGE=${IMAGE}: not found; build it with: sbatch build.sh"; exit 1; }
 
 module load Local-LAIF lumi-aif-singularity-bindings
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
@@ -34,8 +35,7 @@ export MIOPEN_CUSTOM_CACHE_DIR="/tmp/miopen-cache-${USER}" MIOPEN_USER_DB_PATH="
 # which kills vLLM's shared-memory broadcast.
 SHM="/tmp/shm-${SLURM_JOB_ID}"; mkdir -p "${SHM}"
 
-exec singularity exec -B "${SHM}:/dev/shm" \
-  --env "PYTHONPATH=${REPO}/plugin:/opt/venv/lib/python3.12/site-packages" "${CONTAINER}" \
+exec singularity exec -B "${SHM}:/dev/shm" "${IMAGE}" \
   vllm serve "${MODEL}" --served-model-name deepseek-v4.1-flash --host 0.0.0.0 --port "${PORT}" \
     --tensor-parallel-size 8 --enable-expert-parallel \
     --max-model-len 32768 --max-num-seqs 64 --max-num-batched-tokens 2048 \

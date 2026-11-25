@@ -1,0 +1,18 @@
+Bootstrap: localimage
+From: {{ BASE }}
+
+# LAIF's lumi-multitorch image (vLLM 0.26.0) with the lumi_dsv41 wheel installed into
+# /opt/venv. Built by build.sh: singularity build --build-arg BASE=... --build-arg WHEEL=...
+
+%files
+    {{ WHEEL }} /tmp/
+
+%post
+    /opt/venv/bin/python -m pip install --no-deps --no-index --no-cache-dir /tmp/lumi_dsv41-*.whl
+    rm -f /tmp/lumi_dsv41-*.whl
+    # The .pth file must load the module loader at start-up, without importing vllm.
+    /opt/venv/bin/python -c "import sys; assert 'lumi_dsv41.loader' in sys.modules"
+
+%labels
+    org.lumi.dsv41.plugin lumi-dsv41
+    org.lumi.dsv41.base {{ BASE }}

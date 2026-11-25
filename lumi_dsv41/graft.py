@@ -14,8 +14,7 @@ import ast
 import builtins
 import pathlib
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-GRAFT_ROOT = ROOT / "vendor" / "graft" / "vllm"
+GRAFT_ROOT = pathlib.Path(__file__).resolve().parent / "vendor" / "graft" / "vllm"
 
 GRAFTS = {
     "vllm.config.multimodal": ["MultiModalDummyOptions"],
