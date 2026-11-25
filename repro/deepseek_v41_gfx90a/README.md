@@ -990,6 +990,19 @@ and balanced placement; gate/up) matmul_ogs is as fast or faster than a ragged g
 expert dominates. The earlier gap (1148 vs ~1545 µs) came from uniform test routing. The
 MoE kernel work is closed: no Triton-level lever left.
 
+*Long context* (production image, `long_context_check.py`; jobs 24021643 at
+`--max-model-len 131072`, 24021947 at 32768). At 128k:
+- needles 9/9 at ~31k / 62k / 114k tokens (10 / 50 / 90 % depth, past YaRN's 65,536 base);
+- cold TTFT 6.9–7.0 / 14.7–15.4 / 30.0–30.1 s;
+- GSM8K 98.5 %, no OOM;
+- KV cache 3.22M tokens (24.6 full requests; 2.24M at 32k).
+
+Decode on short natural prompts, 32k against 128k: 62.2 / 62.2 tok/s at 1 user,
+699.8 / 681.9 at 32 users (TPOT 36.3 / 37.2 ms), 947.9 / 916.6 at 64 (54.3 / 57.6 ms). The
+~3 ms a step at 64 users is the decode indexer's [rows, max_model_len] fp32 score buffer,
+filled with −inf past each row's length (`paged_logits.py`). Skipping that fill is possible
+if the decode top-k reads only up to each row's length; not done.
+
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
 sequences: more graph sizes and 2.05M instead of 2.24M tokens of KV cache). GSM8K 98.5 %,
