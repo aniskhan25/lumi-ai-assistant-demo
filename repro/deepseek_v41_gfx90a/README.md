@@ -982,7 +982,13 @@ integer upcast in Triton (sign / 2-bit exponent / mantissa to bf16 bits, the e8m
 added to the exponent; bit-exact for all 16 codes). `dot_scaled` sits within 1.34× / 1.56×
 / 2.2× of the load-only floor at 16 / 32 / 64 tokens an expert, and that floor itself reads
 at ~50 % of peak bandwidth. bf16 weights would read 4× the bytes and do not fit anyway. A
-faster upcast would need code below Triton; not pursued.
+faster upcast would need code below Triton; not pursued. On real routing (`test_moe_ragged.py`, job 24014691: router
+counts of layers 0 / 10 / 20 / 39 scaled to a 2048-token chunk, rank 0's experts, linear
+and balanced placement; gate/up) matmul_ogs is as fast or faster than a ragged grouped
+`dot_scaled` kernel on expert-sorted rows (`mxfp4_gemm.ragged_gemm`, within 2e-3 of fp32):
+0.76–0.86× where one expert holds 700–1530 of the chunk's rows, 1.06–1.08× only where no
+expert dominates. The earlier gap (1148 vs ~1545 µs) came from uniform test routing. The
+MoE kernel work is closed: no Triton-level lever left.
 
 **128 sequences** (`--max-num-seqs 128`, with DSpark, job 23870587): **970 tok/s at 128
 users** (TPOT 98 ms, mean TTFT 2.3 s), 548 / 729 at 32 / 64 (−1 / −4 % against 64
