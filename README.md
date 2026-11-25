@@ -1,15 +1,21 @@
 # DeepSeek-V4.1-Flash on LUMI-G
 
-A vLLM plugin that serves `deepseek-ai/DeepSeek-V4.1-Flash` on one LUMI-G node (8 × MI250X
-GCDs, gfx90a) in LAIF's `lumi-multitorch` container (vLLM 0.26.0), with the fastest settings
-measured.
+A vLLM plugin, packaged as a pip wheel, that serves `deepseek-ai/DeepSeek-V4.1-Flash` on
+one LUMI-G node (8 × MI250X GCDs, gfx90a) in LAIF's `lumi-multitorch` container (vLLM
+0.26.0), with the fastest settings measured.
 
 ## Quick start
 
 ```bash
 # from the repository root, on LUMI
+sbatch build.sh                                                   # once: wheel + image
 MODEL=/flash/<project>/<user>/DeepSeek-V4.1-Flash sbatch serve.sh
 ```
+
+`build.sh` builds the wheel (`dist/lumi_dsv41-0.1.0-py3-none-any.whl`) and the serving
+image `lumi-dsv41.sif`: LAIF's image with the wheel installed into its `/opt/venv`
+(`container/lumi-dsv41.def`). It takes about <BUILD_TIME>. The build is unprivileged, using
+LUMI's proot mode (`module load systools`).
 
 The server is ready after ~8 minutes (`Application startup complete` in
 `dsv41-serve-<jobid>.out`). It serves the OpenAI API on port 8000 of the compute node under
@@ -20,15 +26,16 @@ curl http://<node>:8000/v1/chat/completions -H 'Content-Type: application/json' 
   -d '{"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-Set `#SBATCH --account` in `serve.sh` to your project. `CONTAINER` and `PORT` can be
-overridden in the environment; arguments after `serve.sh` go to `vllm serve`.
+Set `#SBATCH --account` in `build.sh` and `serve.sh` to your project. `IMAGE`, `MODEL` and
+`PORT` can be overridden in the environment (`BASE` and `IMAGE` for `build.sh`); arguments
+after `serve.sh` go to `vllm serve`.
 
 ## Requirements
 
 - One LUMI-G node, all 8 GCDs.
-- The LAIF container
+- The LAIF base image
   `lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif` (vLLM 0.26.0), the default
-  in `serve.sh`.
+  `BASE` in `build.sh`. The derived image takes about <IMAGE_SIZE> on disk.
 - The model checkpoint (~475 GiB), ideally on `/flash`, since loading from `/scratch` is
   slower.
 
@@ -69,7 +76,7 @@ with the same kernels and settings on the development branch.
   up to 30k tokens). Beyond that, hits drop to zero. Turn it off with
   `--no-enable-prefix-caching`.
 - **Expert placement:** experts are spread over the 8 GCDs by measured popularity
-  (`plugin/lumi_dsv41/expert_placement.json`, +4 % on agentic load). The placement was
+  (`lumi_dsv41/expert_placement.json`, +4 % on agentic load). The placement was
   measured on GSM8K-style text. `DSV41_EXPERT_PLACEMENT=none` restores vLLM's default
   placement; `DSV41_EXPERT_PLACEMENT=<file>` uses another file in the same format.
 
@@ -78,7 +85,7 @@ with the same kernels and settings on the development branch.
 vLLM 0.26 has DeepSeek-V4 but not V4.1, and its V4 ROCm path needs aiter or TileLang
 kernels that do not run correctly on gfx90a. The plugin:
 
-- **Loads upstream's V4.1 model code** (`plugin/vendor`, the AMD path, language model only)
+- **Loads upstream's V4.1 model code** (`lumi_dsv41/vendor`, the AMD path, language model only)
   into 0.26. Small hooks adapt it to 0.26's KV-cache, scheduler and config interfaces.
 - **Adds the missing gfx90a kernels** (Triton):
   - sparse-attention decode;
@@ -99,17 +106,28 @@ kernels that do not run correctly on gfx90a. The plugin:
 ## Layout
 
 ```
-serve.sh                      Slurm script: one node, best settings
-plugin/
-  sitecustomize.py            installs the module loader at interpreter start
-  lumi_dsv41-0.1.dist-info/   vLLM plugin entry point
-  lumi_dsv41/                 the plugin
+pyproject.toml                the package: lumi-dsv41, vLLM plugin entry point, no dependencies
+lumi_dsv41.pth                installs the module loader at interpreter start (site-packages)
+lumi_dsv41/                   the plugin
   vendor/                     upstream DeepSeek-V4.1 modules, loaded in place of 0.26's
+container/lumi-dsv41.def      serving image: LAIF base + the wheel
+build.sh                      Slurm script: wheel + image
+serve.sh                      Slurm script: one node, best settings
 ```
 
-To use the plugin outside `serve.sh`: put `plugin/` first on `PYTHONPATH` inside the
-container, and set `VLLM_USE_V2_MODEL_RUNNER=1`, `VLLM_USE_BREAKABLE_CUDAGRAPH=1` and
-`AMDGCN_USE_BUFFER_OPS=0`. Then pass the `vllm serve` arguments from `serve.sh`.
+## Installing the wheel elsewhere
+
+`pip install --no-deps lumi_dsv41-0.1.0-py3-none-any.whl` into any Python environment
+that has LAIF's vLLM 0.26.0. `--no-deps` keeps pip away from the container's vLLM, torch
+and Triton; the package declares no dependencies anyway.
+
+It must go into a real site-packages directory. `lumi_dsv41.pth` loads the plugin's module
+loader when Python starts, before vLLM is imported, and Python reads `.pth` files only from
+site-packages, not from `PYTHONPATH` or `--target` directories. LAIF's `/opt/venv` is
+read-only inside the image, which is why `build.sh` bakes the wheel into a derived image.
+
+Then serve with the arguments in `serve.sh`, and set `VLLM_USE_V2_MODEL_RUNNER=1`,
+`VLLM_USE_BREAKABLE_CUDAGRAPH=1` and `AMDGCN_USE_BUFFER_OPS=0`.
 
 ## Limitations
 

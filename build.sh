@@ -24,7 +24,7 @@ WHEEL="$(ls dist/lumi_dsv41-*.whl)"
 echo "built ${WHEEL}"
 
 # 2. The image: an unprivileged build in LUMI's proot mode (proot from the systools module).
-module load systools
+module load LUMI/25.09 partition/C systools/25.09-2
 export SINGULARITY_TMPDIR="${SINGULARITY_TMPDIR:-/scratch/${SLURM_JOB_ACCOUNT}/${USER}/singularity-tmp}"
 export SINGULARITY_CACHEDIR="${SINGULARITY_CACHEDIR:-/scratch/${SLURM_JOB_ACCOUNT}/${USER}/singularity-cache}"
 mkdir -p "${SINGULARITY_TMPDIR}" "${SINGULARITY_CACHEDIR}"
