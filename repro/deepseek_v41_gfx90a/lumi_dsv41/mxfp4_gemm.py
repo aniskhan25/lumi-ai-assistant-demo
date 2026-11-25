@@ -91,3 +91,44 @@ def dequant(w, scales):
     vals = torch.stack([lo, hi], dim=2).reshape(E, K2 * 2, N)  # k = 2i (lo), 2i+1 (hi)
     s = torch.exp2(scales.float() - 127).transpose(1, 2)  # [E, K/32, N]
     return vals * s.repeat_interleave(32, dim=1)
+
+
+@triton.jit
+def _ragged_kernel(x_ptr, w_ptr, s_ptr, y_ptr, offs_ptr, N, K,
+                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    """tl.dot_scaled over ragged experts: expert e owns rows [offs[e], offs[e + 1]) of the
+    expert-sorted x [rows, K] and y [rows, N]."""
+    pm, pn, ex = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    start = tl.load(offs_ptr + ex)
+    cnt = tl.load(offs_ptr + ex + 1) - start
+    if pm * BLOCK_M >= cnt:
+        return
+    rm = pm * BLOCK_M + tl.arange(0, BLOCK_M)
+    rmask = rm < cnt
+    rows = (start + rm).to(tl.int64)
+    rn = pn * BLOCK_N + tl.arange(0, BLOCK_N)
+    kk = tl.arange(0, BLOCK_K)
+    kp = tl.arange(0, BLOCK_K // 2)
+    ks = tl.arange(0, BLOCK_K // 32)
+    exl = ex.to(tl.int64)
+    wb = w_ptr + exl * (K // 2) * N
+    sb = s_ptr + exl * N * (K // 32) + rn[:, None] * (K // 32)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        x = tl.load(x_ptr + rows[:, None] * K + k0 + kk[None, :], mask=rmask[:, None], other=0.0)
+        w = tl.load(wb + (k0 // 2 + kp)[:, None] * N + rn[None, :])
+        sc = tl.load(sb + k0 // 32 + ks[None, :])
+        acc = tl.dot_scaled(x, None, "bf16", w, sc, "e2m1", acc=acc, fast_math=True)
+    tl.store(y_ptr + rows[:, None] * N + rn[None, :], acc.to(tl.bfloat16), mask=rmask[:, None])
+
+
+def ragged_gemm(x, w, scales, offs, max_rows, block_m=32, block_n=128, block_k=128,
+                num_warps=4, **launch):
+    """x [rows, K] bf16 sorted by expert, offs [E + 1] int32 -> y [rows, N] bf16."""
+    E = w.shape[0]
+    K, N = x.shape[1], w.shape[-1]
+    y = torch.empty(x.shape[0], N, dtype=torch.bfloat16, device=x.device)
+    _ragged_kernel[(max(1, triton.cdiv(max_rows, block_m)), triton.cdiv(N, block_n), E)](
+        x, w, scales, y, offs, N, K, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        num_warps=num_warps, **launch)
+    return y
