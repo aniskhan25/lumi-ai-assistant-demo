@@ -14,7 +14,7 @@ MODEL=/flash/<project>/<user>/DeepSeek-V4.1-Flash sbatch serve.sh
 
 `build.sh` builds the wheel (`dist/lumi_dsv41-0.1.0-py3-none-any.whl`) and the serving
 image `lumi-dsv41.sif`: LAIF's image with the wheel installed into its `/opt/venv`
-(`container/lumi-dsv41.def`). It takes about <BUILD_TIME>. The build is unprivileged, using
+(`container/lumi-dsv41.def`). It takes about an hour (54 min on a `small` node). The build is unprivileged, using
 LUMI's proot mode (`module load systools`).
 
 The server is ready after ~8 minutes (`Application startup complete` in
@@ -35,7 +35,7 @@ after `serve.sh` go to `vllm serve`.
 - One LUMI-G node, all 8 GCDs.
 - The LAIF base image
   `lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif` (vLLM 0.26.0), the default
-  `BASE` in `build.sh`. The derived image takes about <IMAGE_SIZE> on disk.
+  `BASE` in `build.sh`. The derived image takes 10.3 GB on disk.
 - The model checkpoint (~475 GiB), ideally on `/flash`, since loading from `/scratch` is
   slower.
 
@@ -55,13 +55,13 @@ after `serve.sh` go to `vllm serve`.
 
 ## Performance (one node, natural-language prompts)
 
-The agentic and accuracy rows were measured with this branch's `serve.sh`; the others
-with the same kernels and settings on the development branch.
+The agentic and accuracy rows were measured with this branch's image and `serve.sh`; the
+others with the same kernels and settings on the development branch.
 
 | workload | result |
 |---|---|
 | decode, 1k-token prompts | 64 / 471 / 730 / 963 output tok/s at 1 / 16 / 32 / 64 users |
-| agentic: 32 conversations resending 8–30k-token contexts | 174 output tok/s, 87 % of prompt tokens from the cache, median time to first token 3.1–6.8 s |
+| agentic: 32 conversations resending 8–30k-token contexts | 171–174 output tok/s, 87 % of prompt tokens from the cache, median time to first token 3.1–7.3 s |
 | resent 17k-token context | first token in ~0.2 s, against 4.5 s uncached |
 | cold prefill, one request | time to first token 1.2 / 3.8 / 7.0 s at 4k / 16k / 30k tokens |
 | accuracy | GSM8K 98–99 % (200 questions) |
