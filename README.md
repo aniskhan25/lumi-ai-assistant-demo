@@ -44,7 +44,7 @@ after `serve.sh` go to `vllm serve`.
 | setting | value | why |
 |---|---|---|
 | parallelism | TP 8 + expert parallel | tensor-parallel MoE does not fit (expert shards padded to 512) |
-| `--max-model-len` | 32768 | most concurrent sessions; 131072 also validated (see Tuning) |
+| `--max-model-len` | 131072 | covers thinking, agentic and long-document workloads; validated to ~114k-token prompts |
 | `--max-num-seqs` / `--max-num-batched-tokens` | 64 / 2048 | best throughput for decode and agentic load |
 | `--kv-cache-dtype` | fp8 | required by V4.1's cache layout |
 | `--moe-backend` | triton_unfused | the MXFP4 expert path that runs on gfx90a |
@@ -55,36 +55,37 @@ after `serve.sh` go to `vllm serve`.
 
 ## Performance (one node, natural-language prompts)
 
-The agentic and accuracy rows were measured with this branch's image and `serve.sh`; the
-others with the same kernels and settings on the development branch.
+Measured with this branch's image and `serve.sh`, except the agentic row (at
+`--max-model-len 32768`), the resent-context row and the prefill times below 31k, which
+come from the same kernels and settings on the development branch.
 
 | workload | result |
 |---|---|
-| decode, 1k-token prompts | 64 / 471 / 730 / 963 output tok/s at 1 / 16 / 32 / 64 users |
+| decode, 1k-token prompts | 62 / 682 / 917 output tok/s at 1 / 32 / 64 users |
 | agentic: 32 conversations resending 8–30k-token contexts | 171–174 output tok/s, 87 % of prompt tokens from the cache, median time to first token 3.1–7.3 s |
 | resent 17k-token context | first token in ~0.2 s, against 4.5 s uncached |
-| cold prefill, one request | time to first token 1.2 / 3.8 / 7.0 s at 4k / 16k / 30k tokens |
-| accuracy | GSM8K 98–99 % (200 questions) |
+| cold prefill, one request | time to first token 1.2 / 3.8 / 7 / 15 / 30 s at 4k / 16k / 31k / 62k / 114k tokens |
+| long-context retrieval | needles found 9/9 at ~31k / 62k / 114k tokens, at 10 / 50 / 90 % depth |
+| accuracy | GSM8K 98.5–99 % (200 questions), no out-of-memory errors |
+| KV cache | 3.2M tokens, room for 24 requests at the full 131k |
 
 ## Tuning
 
-- **Long contexts:** `sbatch serve.sh --max-model-len 131072` (the model supports up to
-  1M; 128k is the validated range). Tested with the image:
-  - retrieval: needles found 9/9 at ~31k / 62k / 114k tokens, at 10 / 50 / 90 % depth;
-  - accuracy: GSM8K 98.5 %, no out-of-memory errors;
-  - cold time to first token: ~7 / 15 / 30 s at 31k / 62k / 114k;
-  - KV cache: 3.2M tokens, 24 full-length requests.
-
-  Decode is unchanged at 1 user and 2.6 / 3.3 % slower at 32 / 64 users (682 / 917 against
-  700 / 948 tok/s). The decode indexer's score buffer is sized by `--max-model-len`, not
-  by the actual context.
+- **Context length:** the model supports up to 1M tokens (YaRN ×16 over a 64k training
+  window); 128k is the validated range and the default.
+  - For many concurrent short sessions (chat or RAG without thinking), use
+    `sbatch serve.sh --max-model-len 32768`. Decode is then 2.6 / 3.3 % faster at
+    32 / 64 users (700 / 948 tok/s) and the same at 1 user, because the decode indexer's
+    score buffer is sized by `--max-model-len`, not by the actual context.
+  - Requests longer than `--max-model-len`, prompt plus output, are rejected. With thinking
+    on, the reasoning output counts too.
 
 - **Interactive agents:** `sbatch serve.sh --max-num-batched-tokens 8192` roughly halves
   time to first token under load. Tokens stream about 10–20 % slower.
 - **Throughput-bound serving:** `--max-num-seqs 128` gives 970 tok/s at 128 users.
 - **Prefix caching:** it helps only while the conversations' live contexts fit in the KV
-  cache (2.24M tokens at `--gpu-memory-utilization 0.92`, enough for 64 conversations of
-  up to 30k tokens). Beyond that, hits drop to zero. Turn it off with
+  cache (3.2M tokens at `--gpu-memory-utilization 0.92`, e.g. 64 conversations of up to
+  ~45k tokens). Beyond that, hits drop to zero. Turn it off with
   `--no-enable-prefix-caching`.
 - **Expert placement:** experts are spread over the 8 GCDs by measured popularity
   (`lumi_dsv41/expert_placement.json`, +4 % on agentic load). The placement was
@@ -143,7 +144,8 @@ Then serve with the arguments in `serve.sh`, and set `VLLM_USE_V2_MODEL_RUNNER=1
 ## Limitations
 
 - One node only (TP 8 with expert parallelism); validated up to 128k tokens of context
-  (prompts to ~114k).
+  (prompts to ~114k). Beyond 128k is untested, and the decode cost above grows with
+  `--max-model-len`.
 - Language model only: no vision input.
 - gfx90a (MI250X) with this container only.
 - DSpark is the only speculative method.

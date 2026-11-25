@@ -38,7 +38,7 @@ SHM="/tmp/shm-${SLURM_JOB_ID}"; mkdir -p "${SHM}"
 exec singularity exec -B "${SHM}:/dev/shm" "${IMAGE}" \
   vllm serve "${MODEL}" --served-model-name deepseek-v4.1-flash --host 0.0.0.0 --port "${PORT}" \
     --tensor-parallel-size 8 --enable-expert-parallel \
-    --max-model-len 32768 --max-num-seqs 64 --max-num-batched-tokens 2048 \
+    --max-model-len 131072 --max-num-seqs 64 --max-num-batched-tokens 2048 \
     --gpu-memory-utilization 0.92 --kv-cache-dtype fp8 \
     --moe-backend triton_unfused \
     --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
