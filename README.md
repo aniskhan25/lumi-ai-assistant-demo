@@ -84,8 +84,10 @@ come from the same kernels and settings on the development branch.
   time to first token under load. Tokens stream about 10–20 % slower.
 - **Throughput-bound serving:** `--max-num-seqs 128` gives 970 tok/s at 128 users.
 - **Prefix caching:** it helps only while the conversations' live contexts fit in the KV
-  cache (3.2M tokens at `--gpu-memory-utilization 0.92`, e.g. 64 conversations of up to
-  ~45k tokens). Beyond that, hits drop to zero. Turn it off with
+  cache. vLLM reports 3.2M tokens at `--gpu-memory-utilization 0.92`, but that assumes
+  full-length requests. Each request also holds a fixed sliding-window share, so 64
+  concurrent conversations fit about 36k tokens each; fewer conversations fit longer
+  ones. Beyond that, hits drop to zero. Turn it off with
   `--no-enable-prefix-caching`.
 - **Expert placement:** experts are spread over the 8 GCDs by measured popularity
   (`lumi_dsv41/expert_placement.json`, +4 % on agentic load). The placement was
