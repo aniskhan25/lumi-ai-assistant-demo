@@ -1,2 +1,0 @@
-[vllm.general_plugins]
-lumi_dsv4_indexer_gate = lumi_dsv4_indexer_gate:register

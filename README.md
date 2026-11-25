@@ -1,362 +1,120 @@
-# Benchmarking LLM Serving on LUMI with vLLM
+# DeepSeek-V4.1-Flash on LUMI-G
 
-Minimal runbook to launch vLLM on LUMI and run simple benchmarks.
+A vLLM plugin that serves `deepseek-ai/DeepSeek-V4.1-Flash` on one LUMI-G node (8 × MI250X
+GCDs, gfx90a) in LAIF's `lumi-multitorch` container (vLLM 0.26.0), with the fastest settings
+measured.
 
-Run commands from the repository root on LUMI:
-
-```bash
-cd /scratch/project_462000131/$USER/lumi-ai-assistant-demo
-module load cray-python
-```
-
-## Prerequisites
-
-Edit the Slurm account and container path in the launcher scripts if needed:
+## Quick start
 
 ```bash
-run_vllm_demo.sh
-run_vllm_demo_multinode.sh
+# from the repository root, on LUMI
+MODEL=/flash/<project>/<user>/DeepSeek-V4.1-Flash sbatch serve.sh
 ```
 
-If the model is not already cached, export a Hugging Face token before submitting:
+The server is ready after ~8 minutes (`Application startup complete` in
+`dsv41-serve-<jobid>.out`). It serves the OpenAI API on port 8000 of the compute node under
+the name `deepseek-v4.1-flash`:
 
 ```bash
-export HF_TOKEN=<your-token>
+curl http://<node>:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-## Single Node
+Set `#SBATCH --account` in `serve.sh` to your project. `CONTAINER` and `PORT` can be
+overridden in the environment; arguments after `serve.sh` go to `vllm serve`.
 
-Start vLLM:
+## Requirements
 
-```bash
-sbatch run_vllm_demo.sh
+- One LUMI-G node, all 8 GCDs.
+- The LAIF container
+  `lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif` (vLLM 0.26.0), the default
+  in `serve.sh`.
+- The model checkpoint (~475 GiB), ideally on `/flash`, since loading from `/scratch` is
+  slower.
+
+## Settings
+
+| setting | value | why |
+|---|---|---|
+| parallelism | TP 8 + expert parallel | tensor-parallel MoE does not fit (expert shards padded to 512) |
+| `--max-model-len` | 32768 | tested context |
+| `--max-num-seqs` / `--max-num-batched-tokens` | 64 / 2048 | best throughput for decode and agentic load |
+| `--kv-cache-dtype` | fp8 | required by V4.1's cache layout |
+| `--moe-backend` | triton_unfused | the MXFP4 expert path that runs on gfx90a |
+| CUDA graphs | PIECEWISE, breakable | attention and indexer run as graph breaks |
+| speculative decoding | DSpark, 5 drafts | V4.1's own drafter; 1.5–1.8× decode throughput |
+| prefix caching | on (vLLM default) | resent contexts skip prefill; sliding-window retention 4096 is set by the plugin |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | required | V4.1's Engram state needs Model Runner V2 |
+
+## Performance (one node, natural-language prompts)
+
+| workload | result |
+|---|---|
+| decode, 1k-token prompts | 64 / 471 / 730 / 963 output tok/s at 1 / 16 / 32 / 64 users |
+| agentic: 32 conversations resending 8–30k-token contexts | 175 output tok/s, 87 % of prompt tokens from the cache, median time to first token 3.5–6.4 s |
+| resent 17k-token context | first token in ~0.2 s, against 4.5 s uncached |
+| cold prefill, one request | time to first token 1.2 / 3.8 / 7.0 s at 4k / 16k / 30k tokens |
+| accuracy | GSM8K 99 % (200 questions) |
+
+## Tuning
+
+- **Interactive agents:** `sbatch serve.sh --max-num-batched-tokens 8192` roughly halves
+  time to first token under load. Tokens stream about 10–20 % slower.
+- **Throughput-bound serving:** `--max-num-seqs 128` gives 970 tok/s at 128 users.
+- **Prefix caching:** it helps only while the conversations' live contexts fit in the KV
+  cache (2.24M tokens at `--gpu-memory-utilization 0.92`, enough for 64 conversations of
+  up to 30k tokens). Beyond that, hits drop to zero. Turn it off with
+  `--no-enable-prefix-caching`.
+- **Expert placement:** experts are spread over the 8 GCDs by measured popularity
+  (`plugin/lumi_dsv41/expert_placement.json`, +4 % on agentic load). The placement was
+  measured on GSM8K-style text. `DSV41_EXPERT_PLACEMENT=none` restores vLLM's default
+  placement; `DSV41_EXPERT_PLACEMENT=<file>` uses another file in the same format.
+
+## What the plugin does
+
+vLLM 0.26 has DeepSeek-V4 but not V4.1, and its V4 ROCm path needs aiter or TileLang
+kernels that do not run correctly on gfx90a. The plugin:
+
+- **Loads upstream's V4.1 model code** (`plugin/vendor`, the AMD path, language model only)
+  into 0.26. Small hooks adapt it to 0.26's KV-cache, scheduler and config interfaces.
+- **Adds the missing gfx90a kernels** (Triton):
+  - sparse-attention decode;
+  - indexer prefill and decode logits;
+  - mHC (hyper-connection) pre and post;
+  - the query RoPE.
+  It also sets faster launch settings for the upstream sparse-attention prefill kernel.
+- **Speeds up the dense layers and communication:**
+  - runs the block-FP8 dense layers as bf16 GEMMs (gfx90a has no FP8 units);
+  - enables vLLM's custom all-reduce on gfx90a, made coherent across GCDs;
+  - tunes the MoE routing blocks and expert GEMM tiles.
+- **Fixes correctness issues:**
+  - guards the MoE router against NaN rows in graph padding;
+  - fixes two upstream gfx90a bugs: decode inverse RoPE, and the tiled indexer-cache read.
+- **Enables the rest of the configuration:** prefix caching without replay, the DSpark
+  drafter, and the balanced expert placement.
+
+## Layout
+
+```
+serve.sh                      Slurm script: one node, best settings
+plugin/
+  sitecustomize.py            installs the module loader at interpreter start
+  lumi_dsv41-0.1.dist-info/   vLLM plugin entry point
+  lumi_dsv41/                 the plugin
+  vendor/                     upstream DeepSeek-V4.1 modules, loaded in place of 0.26's
 ```
 
-Set the job id once:
-
-```bash
-JOBID=<jobid>
-```
-
-## Multi Node
-
-Start vLLM:
-
-```bash
-sbatch run_vllm_demo_multinode.sh
-```
-
-Set the job id once:
-
-```bash
-JOBID=<jobid>
-```
-
-Set the head node once:
-
-```bash
-NODELIST=$(squeue -j "$JOBID" -h -o %N)
-HEAD_NODE=$(scontrol show hostnames "$NODELIST" | head -n1)
-echo "$HEAD_NODE"
-```
-
-## Benchmarks
-
-Single-node benchmark:
-
-```bash
-BENCH_PROFILE=small benchmarks/run_benchmark.sh "$JOBID" 40 4 128
-```
-
-```bash
-BENCH_PROFILE=small benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 96"
-```
-
-```bash
-python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile small
-```
-
-Multi-node benchmark:
-
-```bash
-SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_benchmark.sh "$JOBID" 40 4 128
-```
-
-```bash
-SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "8 16 32 64 128"
-```
-
-```bash
-python3 benchmarks/summarize_results.py --job-id "$JOBID" --bench-profile large
-```
-
-For slow models, increase the per-request timeout:
-
-```bash
-REQUEST_TIMEOUT_S=600 SRUN_NODELIST="$HEAD_NODE" BENCH_PROFILE=large benchmarks/run_saturation.sh "$JOBID" 120 128 "1 2 4 8 16"
-```
-
-## Common Overrides
-
-Set these at submit time when needed:
-
-```bash
-MODEL=<model-id-or-local-path> \
-TP_SIZE=<gpus-per-node> \
-PP_SIZE=<nodes> \
-EXTRA_VLLM_ARGS="--max-model-len 32768" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-The multi-node default uses:
-
-```bash
-MODEL=openai/gpt-oss-120b
-TP_SIZE=$SLURM_GPUS_ON_NODE
-PP_SIZE=$SLURM_JOB_NUM_NODES
-EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching"
-```
-
-## Successful Launch Commands
-
-Single node, 2 GCDs:
-
-```bash
-MODEL=Qwen/Qwen2.5-32B-Instruct \
-TP_SIZE=2 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--dtype bfloat16 --max-model-len 16384 --max-num-seqs 16 --gpu-memory-utilization 0.90" \
-sbatch --gpus-per-node=2 run_vllm_demo.sh
-```
-
-Single node, 4 GCDs:
-
-```bash
-MODEL=Qwen/Qwen2.5-72B-Instruct \
-TP_SIZE=4 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--dtype bfloat16 --max-model-len 32768 --max-num-seqs 32 --gpu-memory-utilization 0.90" \
-sbatch --gpus-per-node=4 run_vllm_demo.sh
-```
-
-Single node, 8 GCDs:
-
-```bash
-STARTUP_TIMEOUT_S=1800 \
-MODEL=mistralai/Mixtral-8x22B-Instruct-v0.1 \
-TP_SIZE=8 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--dtype bfloat16 --max-model-len 32768 --max-num-seqs 32 --gpu-memory-utilization 0.90" \
-sbatch --gpus-per-node=8 run_vllm_demo.sh
-```
-
-```bash
-MODEL=openai/gpt-oss-120b \
-TP_SIZE=8 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--max-model-len 32768 --max-num-seqs 128 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching" \
-sbatch --gpus-per-node=8 run_vllm_demo.sh
-```
-
-Two full nodes:
-
-```bash
-STARTUP_TIMEOUT_S=2700 \
-MODEL=deepseek-ai/DeepSeek-R1-0528 \
-TP_SIZE=8 \
-PP_SIZE=2 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughput --max-model-len 32768 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-Two full nodes (avoid PP bubble):
-
-```bash
-STARTUP_TIMEOUT_S=2700 \
-MODEL=deepseek-ai/DeepSeek-R1-0528 \
-TP_SIZE=16 \
-PP_SIZE=1 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughput --max-model-len 32768 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-Two full nodes (larger micro-batches):
-
-```bash
-STARTUP_TIMEOUT_S=2700 \
-MODEL=deepseek-ai/DeepSeek-R1-0528 \
-TP_SIZE=8 \
-PP_SIZE=2 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--enable-expert-parallel --all2all-backend deepep_high_throughput --max-model-len 16384 --max-num-seqs 64 --max-num-batched-tokens 16384 --gpu-memory-utilization 0.95" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-Two full nodes
-
-```bash
-STARTUP_TIMEOUT_S=3600 \
-MODEL=meta-llama/Llama-3.1-405B-Instruct \
-TP_SIZE=8 \
-PP_SIZE=2 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--max-model-len 16384 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 --no-enable-prefix-caching" \
-sbatch run_vllm_demo_multinode.sh
-```
-
-Four full nodes, Kimi-K2 — best configuration measured: **3.648 tok/s per GCD**, 1.86x
-the original recipe, with p95 down from 121.8 s to 125.8 s at nearly double the
-throughput and startup down from ~2 h to ~31 min. `TP=16 PP=2` to halve the pipeline
-bubble, expert parallelism for the startup win, `--max-num-seqs 64` for the throughput:
-
-```bash
-MODE=bench BENCH_PROFILE=kimi MODEL=moonshotai/Kimi-K2-Instruct-0905 \
-TP_SIZE=16 PP_SIZE=2 STARTUP_TIMEOUT_S=5400 CONCURRENCIES="64 128" \
-EXTRA_VLLM_ARGS="--trust-remote-code --quantization fp8 --kv-cache-dtype fp8 \
-  --enable-expert-parallel --max-model-len 16384 --max-num-seqs 64 \
-  --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
-sbatch --nodes=4 --time=03:00:00 run_vllm_bench_multinode.sh
-```
-
-Four full nodes, original recipe (kept for comparison; 1.961 tok/s per GCD, ~2 h startup):
-
-```bash
-STARTUP_TIMEOUT_S=14400 \
-MODEL=moonshotai/Kimi-K2-Instruct-0905 \
-TP_SIZE=8 \
-PP_SIZE=4 \
-RUNAI_STREAMER_CONCURRENCY=4 \
-EXTRA_VLLM_ARGS="--trust-remote-code --quantization fp8 --kv-cache-dtype fp8 --max-model-len 16384 --max-num-seqs 32 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95" \
-sbatch --nodes=4 --time=02:00:00 run_vllm_demo_multinode.sh
-```
-
-## Logs
-
-Slurm logs:
-
-```bash
-demo-<jobid>.out
-demo-<jobid>.err
-demo-mn-<jobid>.out
-demo-mn-<jobid>.err
-```
-
-vLLM logs:
-
-```bash
-/scratch/project_462000131/$USER/vllm_runtime/<jobid>/vllm_server.log
-/scratch/project_462000131/$USER/vllm_runtime/<jobid>/vllm_server_rank*.log
-```
-
-## Benchmark Results
-
-| Scenario | Model | Resources | Best concurrency | p95 latency (s) | Completion throughput (tokens/s) | Completion throughput/GCD (tokens/s) |
-|---|---|---:|---:|---:|---:|---:|
-| Single GCD default | `mistralai/Mistral-7B-Instruct-v0.2` | 1 GCD | 32 | 2.923 | 1340.821 | 1340.821 |
-| Multi-node default | `openai/gpt-oss-120b` | 2 nodes, 16 GCDs | 128 | 10.395 | 1473.234 | 92.077 |
-| Single node | `Qwen/Qwen2.5-32B-Instruct` | 2 GCDs | 64 | 26.397 | 293.506 | 146.753 |
-|  | `Qwen/Qwen2.5-72B-Instruct` | 4 GCDs | 64 | 3.336 | 2319.813 | 579.953 |
-|  | `mistralai/Mixtral-8x22B-Instruct-v0.1` | 8 GCDs | 96 | 25.226 | 455.677 | 56.960 |
-|  | `openai/gpt-oss-120b` | 8 GCDs | 128 | 19.365 | 791.917 | 98.990 |
-| Multi-node | `deepseek-ai/DeepSeek-R1-0528` | 2 nodes, 16 GCDs | 32 | 64.133 | 60.773 | 3.798 |
-|  | `deepseek-ai/DeepSeek-R1-0528` (avoid PP bubble) | 2 nodes, 16 GCDs | 64 | 103.529 | 74.789 | 4.674 |
-|  | `deepseek-ai/DeepSeek-R1-0528` (larger micro-batches) | 2 nodes, 16 GCDs | 64 | 70.551 | 110.600 | 6.912 |
-|  | `meta-llama/Llama-3.1-405B-Instruct` | 2 nodes, 16 GCDs | 32 | 34.373 | 113.057 | 7.066 |
-|  | `meta-llama/Llama-3.1-405B-Instruct` | 4 nodes, 32 GCDs | 160 | 66.241 | 227.973 | 7.124 |
-|  | `moonshotai/Kimi-K2-Instruct-0905` | 4 nodes, 32 GCDs | 64 | 121.763 | 62.749 | 1.961 |
-|  | `moonshotai/Kimi-K2-Instruct-0905` (re-measured, job 22028722) | 4 nodes, 32 GCDs | 32 | 62.142 | 61.620 | 1.926 |
-|  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, job 22028721) | 4 nodes, 32 GCDs | 64 | 139.097 | 54.403 | 1.700 |
-|  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 64`, job 22060642) | 4 nodes, 32 GCDs | 128 | 156.561 | 93.695 | **2.928** |
-|  | `moonshotai/Kimi-K2-Instruct-0905` (expert parallel, `--max-num-seqs 128`, job 22065599) | 4 nodes, 32 GCDs | 256 | 189.897 | 77.048 | 2.408 |
-|  | `moonshotai/Kimi-K2-Instruct-0905` (`TP=8 PP=4`, default all2all, job 22088253) | 4 nodes, 32 GCDs | 128 | 157.663 | 92.834 | 2.901 |
-|  | **`moonshotai/Kimi-K2-Instruct-0905` (`TP=16 PP=2`, default all2all, job 22088252)** | 4 nodes, 32 GCDs | 128 | **125.847** | **116.732** | **3.648** |
-|  | `moonshotai/Kimi-K2-Instruct-0905` (`TP=16 PP=2`, `--max-num-seqs 96`, job 22092278) | 4 nodes, 32 GCDs | 128 | 196.703 | 75.284 | 2.353 |
-
-### Expert parallelism for Kimi-K2: a startup win, not a throughput win
-
-Measured head to head on 4 nodes, same day, same harness (jobs 22028721 / 22028722):
-
-| | startup | best concurrency | p95 | tok/s per GCD |
-| --- | ---: | ---: | ---: | ---: |
-| no expert parallelism | **7603 s** | 32 | 62.1 s | **1.926** |
-| `--enable-expert-parallel --all2all-backend deepep_high_throughput` | **1547 s** | 64 | 139.1 s | 1.700 |
-
-Best configuration: **`TP=16 PP=2`, expert parallelism, `--max-num-seqs 64`, default
-all2all** — 3.648 tok/s per GCD, 1.86x the original recipe.
-
-Three independent levers, each measured against a same-day control:
-
-| lever | gain | why |
-| --- | --- | --- |
-| `--max-num-seqs` 32 -> 64 | **1.72x** | 32 was the throughput ceiling; the server saturated at concurrency 32 while p95 quadrupled. 64 is a sharp optimum — at `TP=16 PP=2`, 96 gives 2.353 and 128 times out every request |
-| `TP=16 PP=2` instead of `TP=8 PP=4` | **1.26x** | halves the pipeline bubble; p95 also improves 20% (157.7 s -> 125.8 s) |
-| `--enable-expert-parallel` | 5x faster startup | each rank loads only its own experts from a 958 GiB checkpoint |
-
-Two things that turned out not to matter, and one hard constraint:
-
-- **`--all2all-backend deepep_high_throughput` is not worth setting here.** At
-  `TP=8 PP=4` it measured 2.928 against 2.901 for vLLM's default — within noise. It is
-  also actively harmful at `TP=16`: the expert-parallel group tracks TP width, so EP goes
-  from 8 to 16 and the DeepEP buffers double, which killed a worker during startup.
-  Dropping it is what made the wider layout possible.
-- **`--max-num-batched-tokens` 8192 -> 16384 gave nothing** (2.866 vs 2.928). This
-  benchmark is decode-dominated at 128 output tokens.
-- **`TP=32` is impossible**, not merely slow: the fp8 checkpoint is block-quantized with
-  `block_k=128` and the full weight dimension is 18432, so valid widths are those where
-  18432/TP is a multiple of 128 — TP=8 (2304) and TP=16 (1152) work, TP=32 (576) fails
-  with `Weight input_size_per_partition = 576 is not divisible by ... block_k = 128`.
-
-Expert parallelism makes startup **5x faster** — each rank loads only its own experts
-rather than the full expert set for TP sharding, which matters a lot for a 958 GiB
-checkpoint on Lustre (weight loading alone took 6459-7117 s without it). It costs about
-12% of throughput, so enable it when iteration speed or queue time matters and leave it
-off when steady-state throughput is the goal.
-
-The re-measured no-EP row reproduces the original 1.961 to within 2%, so the original
-measurement was sound.
-
-**The throughput ceiling was `--max-num-seqs`, not the parallelism strategy.** Both
-configurations above saturate at concurrency 32 — flat throughput from 32 to 128 while
-p95 quadruples — because the recipe sets `--max-num-seqs 32`. Raising it to 64, changing
-nothing else, gives **1.72x** the throughput (54.4 -> 93.7 tok/s) and beats the original
-row by 1.5x:
-
-| `--max-num-seqs` | best concurrency | p95 | tok/s | per GCD |
-| ---: | ---: | ---: | ---: | ---: |
-| 32 | 64 | 139.1 s | 54.403 | 1.700 |
-| **64** | **128** | **156.6 s** | **93.695** | **2.928** |
-| 128 | 256 | 189.9 s | 77.048 | 2.408 |
-
-**64 is an optimum, not a floor.** Going to 128 costs 18% of throughput and pushes p95 to
-190 s. It is not a memory limit — rank 0 reports 28.77 GiB / 2,914,560 KV tokens and
-`Maximum concurrency for 16,384 tokens per request: 177.89x`, so 128 sequences fit
-comfortably. Admitting more sequences than the batched-token budget can feed just trades
-throughput for queueing, most likely prefill/decode interference at a fixed
-`--max-num-batched-tokens 8192`. The untested middle is 96; the useful pairing to try
-next is a higher `--max-num-seqs` **with** a higher `--max-num-batched-tokens`, which
-needs care because that combination lost a worker (see below).
-
-What does bind is **activation memory**: a run at `--max-num-seqs 128
---max-num-batched-tokens 16384` lost a worker during startup before KV sizing (job
-22032772). Since the KV figures show 128 sequences fit, the batched-token increase is the
-likely cause — raise `--max-num-seqs` alone and leave `--max-num-batched-tokens` at 8192.
-
-## Known Issues
-
-**Fixed in the launchers.** Multi-node RCCL hung indefinitely while creating additional
-communicators, which is why the multi-node recipes above carry `STARTUP_TIMEOUT_S` of
-2700-14400 s. Cause: libfabric's vendor-default MR cache monitor (`memhooks`) does not
-see ROCm memory remapping, so a stale registration makes an RDMA silently never complete.
-The launchers now set `FI_MR_CACHE_MONITOR=userfaultfd` — 0 hangs in 18 attempts against
-21/23 without it, at no bandwidth cost. Tracked upstream as
-[laifs-container-recipes#44](https://github.com/lumi-ai-factory/laifs-container-recipes/issues/44);
-the fix here is a workaround, so keep generous startup timeouts until that closes.
-
-Also do **not** set `NCCL_NET_GDR_LEVEL=PHB`: harmless on one node, hangs every rank from
-two nodes upward ([#30](https://github.com/lumi-ai-factory/laifs-container-recipes/issues/30)).
-
-The full investigation — a phase-by-phase RCCL probe, the monitor comparison, and the
-collective-bandwidth cost of the alternatives — lives on the `bug/vllm-rccl-startup-gfx90a`
-branch under `repro/rccl_startup_gfx90a/`, with every figure carrying its Slurm job id.
+To use the plugin outside `serve.sh`: put `plugin/` first on `PYTHONPATH` inside the
+container, and set `VLLM_USE_V2_MODEL_RUNNER=1`, `VLLM_USE_BREAKABLE_CUDAGRAPH=1` and
+`AMDGCN_USE_BUFFER_OPS=0`. Then pass the `vllm serve` arguments from `serve.sh`.
+
+## Limitations
+
+- One node only (TP 8 with expert parallelism); tested up to 32k tokens of context.
+- Language model only: no vision input.
+- gfx90a (MI250X) with this container only.
+- DSpark is the only speculative method.
+- If vLLM fails at start-up with a shared-memory broadcast error, check that `/dev/shm`
+  is private. `serve.sh` binds a per-job directory for this.
+
+The development history, measurements and tests are on branch `exp/deepseek-v41-gfx90a`.

@@ -1,4 +1,0 @@
-Metadata-Version: 2.1
-Name: lumi-dsv4-debug
-Version: 0.1
-Summary: DeepSeek-V4 on gfx90a debugging switches for vLLM 0.26

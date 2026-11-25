@@ -1,6 +1,2 @@
-.DS_Store
-benchmarks/.DS_Store
-benchmarks/results/
-vllm_runtime/
-repro/*/results/
 __pycache__/
+.DS_Store

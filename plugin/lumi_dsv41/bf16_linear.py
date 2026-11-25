@@ -1,0 +1,156 @@
+"""Run block-FP8 dense linears in bf16 on MI250X.
+
+On gfx90a, which has no FP8 units, vLLM's W8A8 block-scaled FP8 GEMM is 20-90x slower than
+a bf16 GEMM of the same shape. After vLLM's own weight processing, each block-quantised
+Fp8LinearMethod layer gets its weight dequantised once to bf16 (exact: an e4m3 value times
+a power-of-two block scale fits bf16), its scales dropped, and is then served by vLLM's
+ROCm bf16 GEMM dispatch. The dense weights take twice the memory.
+
+The activations are still rounded to FP8 per 128-group first, as the stock W8A8 path does:
+the model needs that (with bf16 activations GSM8K drops from 98 % to 90 %).
+"""
+
+import torch
+
+from vllm.triton_utils import tl, triton
+
+FP8_MAX = 448.0  # float8_e4m3fn
+
+
+@triton.jit
+def _fp8_round_kernel(x_ptr, out_ptr, stride_xm, stride_om, eps, GROUP: tl.constexpr):
+    """One (row, group): scale to the e4m3 range as vLLM's per-token-group quantiser does
+    (scale = max(amax, eps) / 448, fp32), round to e4m3 precision in registers, scale back,
+    write bf16. Rounding: 3 mantissa bits, round-to-nearest-even; below 2^-6 (e4m3's smallest
+    normal) the grid is the subnormal spacing 2^-9."""
+    m = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * GROUP + tl.arange(0, GROUP)
+    x = tl.load(x_ptr + m * stride_xm + offs).to(tl.float32)
+    s = tl.maximum(tl.max(tl.abs(x)), eps) / 448.0
+    v = tl.minimum(tl.maximum(x / s, -448.0), 448.0)
+    bits = v.to(tl.int32, bitcast=True)
+    bits = (bits + 0x7FFFF + ((bits >> 20) & 1)) & -1048576  # keep 3 of 23 mantissa bits, RNE
+    normal = bits.to(tl.float32, bitcast=True)
+    sub = ((v * 512.0 + 12582912.0) - 12582912.0) / 512.0  # RNE to multiples of 2^-9
+    q = tl.where(tl.abs(v) < 0.015625, sub, normal)
+    tl.store(out_ptr + m * stride_om + offs, (q * s).to(tl.bfloat16))
+
+
+@triton.jit
+def _fp8_round_block_kernel(x_ptr, out_ptr, stride_xm, stride_om, eps, K,
+                            GROUP: tl.constexpr, BLOCK: tl.constexpr):
+    """As _fp8_round_kernel, for BLOCK // GROUP groups of one row per program: one program
+    per (row, group) is mostly launch overhead with 32-column groups (V4.1's 32x32 blocks):
+    ~190 us for a 2048-row prefill chunk where moving the data takes ~26."""
+    m = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < K
+    x = tl.load(x_ptr + m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
+    xg = tl.reshape(x, (BLOCK // GROUP, GROUP))
+    s = tl.maximum(tl.max(tl.abs(xg), 1), eps) / 448.0
+    v = tl.minimum(tl.maximum(xg / s[:, None], -448.0), 448.0)
+    bits = v.to(tl.int32, bitcast=True)
+    bits = (bits + 0x7FFFF + ((bits >> 20) & 1)) & -1048576
+    normal = bits.to(tl.float32, bitcast=True)
+    sub = ((v * 512.0 + 12582912.0) - 12582912.0) / 512.0
+    q = tl.where(tl.abs(v) < 0.015625, sub, normal)
+    y = tl.reshape(q * s[:, None], (BLOCK,))
+    tl.store(out_ptr + m * stride_om + offs, y.to(tl.bfloat16), mask=mask)
+
+
+FP8_ROUND_BLOCK = 2048  # columns per program in the blocked kernel; 0: per-group kernel
+# (bit-identical; 32-col groups at K=5120: 438 -> 45 us at
+# 2048 rows, 84 -> 11 at 384, 8.9 -> 2.8 at 32; 128-col groups 115 -> 46 at 2048)
+
+
+def fp8_round_triton(x2d: torch.Tensor, group: int, eps: float = 1e-10,
+                     block: int | None = None) -> torch.Tensor:
+    """x2d (M, K) bf16 -> bf16 rounded through FP8 e4m3 per `group` columns, in one kernel."""
+    m, k = x2d.shape
+    assert k % group == 0 and x2d.stride(-1) == 1
+    out = torch.empty(m, k, dtype=torch.bfloat16, device=x2d.device)
+    block = FP8_ROUND_BLOCK if block is None else block
+    if m and block:
+        blk = min(block, triton.next_power_of_2(k))
+        blk = max(blk, group)
+        _fp8_round_block_kernel[(m, triton.cdiv(k, blk))](
+            x2d, out, x2d.stride(0), out.stride(0), eps, k, GROUP=group, BLOCK=blk,
+            num_warps=4 if blk >= 512 else 1)
+    elif m:
+        _fp8_round_kernel[(m, k // group)](x2d, out, x2d.stride(0), out.stride(0), eps,
+                                           GROUP=group, num_warps=1)
+    return out
+
+
+def _dequant(weight: torch.Tensor, scale: torch.Tensor, block: list[int]) -> torch.Tensor:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import _upcast_e8m0_to_fp32
+
+    n, k = weight.shape
+    if scale.dtype == torch.float8_e8m0fnu:
+        scale = _upcast_e8m0_to_fp32(scale)
+    scale = scale.float().repeat_interleave(block[0], 0).repeat_interleave(block[1], 1)[:n, :k]
+    return (weight.float() * scale).to(torch.bfloat16)
+
+
+def install() -> None:
+    from vllm.logger import init_logger
+    from vllm.model_executor.layers.quantization import fp8 as fp8_module
+    from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+
+    log = init_logger("vllm.lumi_dsv41")
+    cls = fp8_module.Fp8LinearMethod
+    if getattr(cls, "_lumi_bf16", False):
+        return
+    stock_process, stock_apply = cls.process_weights_after_loading, cls.apply
+    gemm = dispatch_unquantized_gemm()
+    # Round the activations to FP8 per 128-group (fp32 scales) as the stock W8A8 path does,
+    # then dequantise and run the bf16 GEMM: stock numerics up to bf16 rounding of q*s.
+    state = {"layers": 0, "bytes": 0, "max_diff": 0.0}
+
+    def run(self, layer, x, bias):
+        x2d = fp8_round_triton(x.reshape(-1, x.shape[-1]), self.weight_block_size[1])
+        return gemm(layer, x2d, layer.weight, bias).view(*x.shape[:-1], layer.weight.shape[0])
+
+    def process_weights_after_loading(self, layer):
+        stock_process(self, layer)
+        weight = getattr(layer, "weight", None)
+        if (not self.block_quant or self.use_marlin or weight is None
+                or weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)):
+            return
+        scale = getattr(layer, "weight_scale_inv", None)
+        if scale is None:
+            scale = getattr(layer, "weight_scale", None)
+        if scale is None or weight.dim() != 2:
+            return
+        bf16 = _dequant(weight, scale, self.weight_block_size)
+        x = None
+        if not getattr(layer, "is_bmm", False):  # every layer: one small GEMM each at load
+            x = torch.randn(4, weight.shape[1], dtype=torch.bfloat16, device=weight.device)
+            want = stock_apply(self, layer, x).float()
+        layer.weight = torch.nn.Parameter(bf16, requires_grad=False)
+        for name in ("weight_scale_inv", "weight_scale", "input_scale"):
+            if hasattr(layer, name):
+                delattr(layer, name)
+        layer._lumi_bf16 = True
+        state["layers"] += 1
+        state["bytes"] += bf16.numel()
+        if x is not None:
+            got = run(self, layer, x, None).float()
+            rel = ((got - want).norm() / want.norm()).item()
+            state["max_diff"] = max(state["max_diff"], rel)
+            if rel > 1e-2:  # typically ~2.7e-3
+                log.warning("bf16 linear outlier %s %s: rel diff vs W8A8 %.2e",
+                            getattr(layer, "prefix", "?"), tuple(bf16.shape), rel)
+        n = state["layers"]
+        if n & (n - 1) == 0 or n % 100 == 0:
+            log.info("%d block-FP8 linears now bf16 (+%.2f GiB vs FP8), max rel diff vs "
+                     "W8A8 so far %.2e", n, state["bytes"] / 2**30, state["max_diff"])
+
+    def apply(self, layer, x, bias=None):
+        if getattr(layer, "_lumi_bf16", False):
+            return run(self, layer, x, bias)
+        return stock_apply(self, layer, x, bias)
+
+    cls.process_weights_after_loading = process_weights_after_loading
+    cls.apply = apply
+    cls._lumi_bf16 = True

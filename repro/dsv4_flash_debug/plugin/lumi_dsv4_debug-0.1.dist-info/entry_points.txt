@@ -1,2 +1,0 @@
-[vllm.general_plugins]
-lumi_dsv4_debug = lumi_dsv4_debug:register
