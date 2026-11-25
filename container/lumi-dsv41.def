@@ -5,11 +5,12 @@ From: {{ BASE }}
 # /opt/venv. Built by build.sh: singularity build --build-arg BASE=... --build-arg WHEEL=...
 
 %files
-    {{ WHEEL }} /tmp/
+    {{ WHEEL }} /opt/lumi-dsv41-wheel/
 
 %post
-    /opt/venv/bin/python -m pip install --no-deps --no-index --no-cache-dir /tmp/lumi_dsv41-*.whl
-    rm -f /tmp/lumi_dsv41-*.whl
+    # Not /tmp: unprivileged (proot) builds run %post with the host's /tmp mounted over it.
+    /opt/venv/bin/python -m pip install --no-deps --no-index --no-cache-dir /opt/lumi-dsv41-wheel/lumi_dsv41-*.whl
+    rm -rf /opt/lumi-dsv41-wheel
     # The .pth file must load the module loader at start-up, without importing vllm.
     /opt/venv/bin/python -c "import sys; assert 'lumi_dsv41.loader' in sys.modules"
 
