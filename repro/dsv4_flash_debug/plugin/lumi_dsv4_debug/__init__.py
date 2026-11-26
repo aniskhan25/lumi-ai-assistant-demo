@@ -290,15 +290,6 @@ def register() -> None:
 
         wo_a.install()
         _log("DSV4_WO_A=1: attention wo_a GEMM via wvSplitK / Triton instead of einsum")
-    if os.environ.get("DSV4_PREFILL_LOGITS") == "1":
-        if os.environ.get("DSV4_INDEXER_GATE") != "1":
-            raise ValueError("DSV4_PREFILL_LOGITS=1 needs DSV4_INDEXER_GATE=1")
-        import vllm.v1.attention.ops.rocm_aiter_mla_sparse as ops
-
-        from .mqa_logits import fp8_mqa_logits_triton
-
-        ops.fp8_mqa_logits_torch = fp8_mqa_logits_triton  # replaces the chunked wrapper
-        _log("DSV4_PREFILL_LOGITS=1: indexer prefill logits in one Triton kernel")
     if os.environ.get("DSV4_SPARSE_PREFILL") == "1":
         from . import sparse_prefill
 
@@ -342,3 +333,12 @@ def register() -> None:
 
             paged_logits.install()
             _log("DSV4_TRITON_PAGED_LOGITS: indexer decode logits via one batched Triton kernel")
+        if os.environ.get("DSV4_PREFILL_LOGITS") == "1":
+            if os.environ.get("DSV4_INDEXER_GATE") != "1":
+                raise ValueError("DSV4_PREFILL_LOGITS=1 needs DSV4_INDEXER_GATE=1")
+            import vllm.v1.attention.ops.rocm_aiter_mla_sparse as ops
+
+            from .mqa_logits import fp8_mqa_logits_triton
+
+            ops.fp8_mqa_logits_torch = fp8_mqa_logits_triton  # replaces the chunked wrapper
+            _log("DSV4_PREFILL_LOGITS=1: indexer prefill logits in one Triton kernel")
