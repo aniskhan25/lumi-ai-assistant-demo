@@ -43,6 +43,8 @@ DSV4_SCORE_GEMM=1    Compressor score GEMMs (fp32 output) in a Triton kernel wit
 DSV4_MOE_SMALL=1     MoE at decode sizes: pack_bitmatrix with 16-row blocks, expert GEMM
                      tiles, warps and stages by token count (moe_small.py; DSV4_MOE_TABLE=v1
                      for the earlier block_n / split_k table).
+DSV4_PREFILL_LOGITS=1  With DSV4_INDEXER_GATE: the indexer's prefill logits in one Triton kernel
+                     instead of the row-chunked torch fallback (mqa_logits.py, from V4.1).
 DSV4_SPARSE_PREFILL=1  Sparse-attention prefill kernel with 2 warps, one stage and AMD launch
                      options (sparse_prefill.py, from the V4.1 branch).
 DSV4_QNORM_ROPE=1    Attention's q-norm / RoPE / KV RoPE + FP8 cache insert in one Triton kernel
@@ -288,6 +290,15 @@ def register() -> None:
 
         wo_a.install()
         _log("DSV4_WO_A=1: attention wo_a GEMM via wvSplitK / Triton instead of einsum")
+    if os.environ.get("DSV4_PREFILL_LOGITS") == "1":
+        if os.environ.get("DSV4_INDEXER_GATE") != "1":
+            raise ValueError("DSV4_PREFILL_LOGITS=1 needs DSV4_INDEXER_GATE=1")
+        import vllm.v1.attention.ops.rocm_aiter_mla_sparse as ops
+
+        from .mqa_logits import fp8_mqa_logits_triton
+
+        ops.fp8_mqa_logits_torch = fp8_mqa_logits_triton  # replaces the chunked wrapper
+        _log("DSV4_PREFILL_LOGITS=1: indexer prefill logits in one Triton kernel")
     if os.environ.get("DSV4_SPARSE_PREFILL") == "1":
         from . import sparse_prefill
 
