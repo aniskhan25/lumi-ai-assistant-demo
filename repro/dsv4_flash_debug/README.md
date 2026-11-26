@@ -102,11 +102,14 @@ short natural prompts, 32 sequences was 13 % slower at 32 users (same section).
 "Small kernels around the MoE"). Its routing prologue now also covers the legacy
 `triton_kernels` path this container takes, and `QNORM_ROPE=1` runs attention's q-norm /
 RoPE / KV insert in one Triton kernel: **75.6 tok/s for one user**, 824 at 32 (see
-"The routing prologue on the legacy path; q-norm / RoPE / KV insert").
+"The routing prologue on the legacy path; q-norm / RoPE / KV insert"). For prefill,
+`SPARSE_PREFILL=1` (V4.1's launch options for the sparse-attention prefill kernel) and the
+score-GEMM tiles for prefill chunks (on by default) take a 16k-token prompt's time to the
+first token from 6.45 to **4.97 s** (see "Prefill").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 QNORM_ROPE=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 QNORM_ROPE=1 SPARSE_PREFILL=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -1124,6 +1127,47 @@ The prologue lowers TPOT by 0.6–1.3 ms at every load. `QNORM_ROPE` adds 0–0.
 three runs. The one "garbage" flag in 23989320 is a correct answer (15). The same question
 was flagged in control 23898748: the checker reacts to its formatting.
 
+### Prefill (Nov 25–26)
+
+A profile of one 8,275-token prefill on the recipe (`PROFILE_PREFILL=8192`, job 24005447:
+2.78 s, ~2,970 tokens/s) splits it into:
+
+| component | share | main cost |
+|---|---|---|
+| sparse attention | 23 % | `_sparse_attn_prefill_ragged_kernel`, 2.8 ms a call |
+| sparse indexer | 18 % | vLLM's torch fallback for the prefill logits (elementwise passes, 0.2–0.6 ms each) |
+| hyper-connections | 14 % | TileLang prenorm GEMM, unrolled big fuse, TileLang post |
+| attention (other) | 13 % | the compressor score GEMMs on hipBLASLt's fp32-MFMA kernel, 1.4 ms a call |
+| MoE experts | 12.5 % | `matmul_ogs` on the library's default tile, 0.73 ms a call |
+| dense GEMMs / all-reduce | 7 / 6 % | hipBLASLt; RCCL, mostly waiting for the slowest rank |
+
+(A 16k profile's trace was cut off when the job ran out of time while writing it; 8k keeps
+the same 2048-token chunks.)
+
+- **`SPARSE_PREFILL=1`** (`sparse_prefill.py`): the V4.1 branch's text patch of 0.26's
+  `_rocm_sparse_attn_prefill_ragged_triton` launch. 2 warps, one stage, `matrix_instr_nonkdim=16`,
+  `waves_per_eu=1`, same tile and output (V4.1: 5.99 → 1.77 ms a chunk at 16k).
+- **Score GEMMs at prefill sizes**: `score_mm` had tiles only up to 128 tokens. Above that,
+  the compressor score GEMMs and the router fell back to `torch.mm`.
+  `test_score_prefill.py` (job 24014949): 3.3–6.2× faster at 256–2048 tokens (N 2048: 2.40
+  → 0.38 ms at 2048), error against fp64 equal or lower. On by default; `SCORE_PREFILL=0`
+  turns them off.
+
+16k-token random prompts, 16 output tokens, time to the first token (one allocation each):
+
+| | job | 1 user | 4 users |
+|---|---|---|---|
+| recipe before | 24014951 | 6.45 s | 18.7 s |
+| `SPARSE_PREFILL=1` | 24014950 | 5.51 s | 16.0 s |
+| `SPARSE_PREFILL=1`, score tiles off (same day as the next row) | 24019176 | 5.53 s | 16.1 s |
+| **`SPARSE_PREFILL=1` + score tiles** | 24019175 | **4.97 s** | **14.6 s** |
+
+−23 % together. GSM8K 97.2 / 97.4 %, sanity 5/5 and both needles (the ~18k one included) in
+the runs with them. Decode on GSM8K prompts with both (job 24019177): TPOT 12.5 / 16.6 / 23.0
+/ 30.0 / 48.9 ms at 1 / 4 / 16 / 32 / 64 users, within earlier runs' spread. Next, by
+the profile: the indexer's prefill logits in Triton (the V4.1 branch's `mqa_logits.py`),
+`MHC_FAST` at prefill sizes, and MoE tiles for prefill.
+
 ### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
 
 Two changes the V4.1 port made to this plugin, measured on V4:
@@ -1270,6 +1314,9 @@ where the V4.1 port, a larger model, takes 3.77 s after its prefill work.
 | `test_moe_glue.py`, `run_moe_glue_test.sh` | those vs vLLM's code: routing outputs, gathers, activation, us per MoE layer |
 | `plugin/lumi_dsv4_debug/qnorm_rope.py` | attention q-norm / RoPE / KV RoPE + FP8 cache insert in one Triton kernel (`DSV4_QNORM_ROPE`) |
 | `test_qnorm_rope.py`, `run_qnorm_rope_test.sh` | that kernel vs vLLM's HIP op: q, cache bytes, dequantised KV, us per call |
+| `plugin/lumi_dsv4_debug/sparse_prefill.py` | sparse-attention prefill launch options from the V4.1 branch (`DSV4_SPARSE_PREFILL`) |
+| `test_score_prefill.py`, `run_score_prefill_test.sh` | `score_mm` tiles at prefill sizes vs `torch.mm` |
+| `profile_prefill.py` | profile one long prefill (`PROFILE_PREFILL=N`), from the V4.1 branch |
 | `small_kernels.py` | small kernels per step by issuing call, with Python stacks (eager traces) |
 | `test_fp8_fuse.py`, `run_fp8_fuse_test.sh` | FP8 activation rounding fused into the dense GEMM: bit-identity and time (slower) |
 | `test_dense_bw.py`, `run_dense_bw_test.sh` | dense bf16 GEMMs vs the memory bound: tiles, grid order, warps/stages, per-step total |
