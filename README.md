@@ -1,157 +1,115 @@
 # DeepSeek-V4.1-Flash on LUMI-G
 
-A vLLM plugin, packaged as a pip wheel, that serves `deepseek-ai/DeepSeek-V4.1-Flash` on
-one LUMI-G node (8 × MI250X GCDs, gfx90a) in LAIF's `lumi-multitorch` container (vLLM
-0.26.0), with the fastest settings measured.
+A vLLM plugin (pip wheel) that serves `deepseek-ai/DeepSeek-V4.1-Flash` on one LUMI-G node
+(8 × MI250X GCDs) in LAIF's `lumi-multitorch` container (vLLM 0.26.0), with the fastest
+settings measured.
 
-## Quick start
+## Serve it
 
-```bash
-# from the repository root, on LUMI
-sbatch build.sh                                                   # once: wheel + image
-MODEL=/flash/<project>/<user>/DeepSeek-V4.1-Flash sbatch serve.sh
-```
+1. **Clone** (on LUMI):
+   ```bash
+   git clone --branch prod/deepseek-v41-gfx90a --single-branch \
+       https://github.com/aniskhan25/lumi-ai-assistant-demo.git dsv41 && cd dsv41
+   ```
+2. **Get the model** (~475 GiB) onto `/flash`, which loads faster than `/scratch`. For
+   example:
+   ```bash
+   BASE=/appl/local/laifs/containers/lumi-multitorch-u24r72f21m50t211-20261028_090706/lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif
+   singularity exec $BASE hf download deepseek-ai/DeepSeek-V4.1-Flash \
+       --local-dir /flash/<project>/$USER/DeepSeek-V4.1-Flash
+   ```
+3. **Set your project** in `#SBATCH --account` of `build.sh` and `serve.sh`.
+4. **Build the image** once (54 min, 10.3 GB): `sbatch build.sh` → `lumi-dsv41.sif`.
+5. **Start the server:**
+   ```bash
+   MODEL=/flash/<project>/$USER/DeepSeek-V4.1-Flash sbatch serve.sh
+   ```
+   It is ready after ~9 minutes, when `dsv41-serve-<jobid>.out` shows
+   `Application startup complete`. `squeue --me` shows the node.
+6. **Use it** from your laptop through a tunnel:
+   ```bash
+   ssh -N -L 8000:<node>:8000 <user>@lumi.csc.fi
+   curl http://localhost:8000/v1/models
+   ```
+   Any OpenAI client then works with `base_url="http://localhost:8000/v1"`, any `api_key`
+   string, and `model="deepseek-v4.1-flash"`.
+7. **Stop it:** `scancel <jobid>`. The node is billed while the job runs.
 
-`build.sh` builds the wheel (`dist/lumi_dsv41-0.1.0-py3-none-any.whl`) and the serving
-image `lumi-dsv41.sif`: LAIF's image with the wheel installed into its `/opt/venv`
-(`container/lumi-dsv41.def`). It takes about an hour (54 min on a `small` node). The build is unprivileged, using
-LUMI's proot mode (`module load systools`).
-
-The server is ready after ~8 minutes (`Application startup complete` in
-`dsv41-serve-<jobid>.out`). It serves the OpenAI API on port 8000 of the compute node under
-the name `deepseek-v4.1-flash`:
-
-```bash
-curl http://<node>:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-Set `#SBATCH --account` in `build.sh` and `serve.sh` to your project. `IMAGE`, `MODEL` and
-`PORT` can be overridden in the environment (`BASE` and `IMAGE` for `build.sh`); arguments
-after `serve.sh` go to `vllm serve`.
-
-## Requirements
-
-- One LUMI-G node, all 8 GCDs.
-- The LAIF base image
-  `lumi-multitorch-full-u24r72f21m50t211-20261028_090706.sif` (vLLM 0.26.0), the default
-  `BASE` in `build.sh`. The derived image takes 10.3 GB on disk.
-- The model checkpoint (~475 GiB), ideally on `/flash`, since loading from `/scratch` is
-  slower.
+`IMAGE`, `MODEL` and `PORT` can be set in the environment. Arguments after `serve.sh` go to
+`vllm serve`.
 
 ## Settings
 
 | setting | value | why |
 |---|---|---|
 | parallelism | TP 8 + expert parallel | tensor-parallel MoE does not fit (expert shards padded to 512) |
-| `--max-model-len` | 131072 | covers thinking, agentic and long-document workloads; validated to ~114k-token prompts |
-| `--max-num-seqs` / `--max-num-batched-tokens` | 64 / 2048 | best throughput for decode and agentic load |
+| `--max-model-len` | 131072 | room for thinking, agentic and long-document work; validated to ~114k-token prompts |
+| `--max-num-seqs` / `--max-num-batched-tokens` | 64 / 2048 | best decode and agentic throughput |
 | `--kv-cache-dtype` | fp8 | required by V4.1's cache layout |
 | `--moe-backend` | triton_unfused | the MXFP4 expert path that runs on gfx90a |
 | CUDA graphs | PIECEWISE, breakable | attention and indexer run as graph breaks |
-| speculative decoding | DSpark, 5 drafts | V4.1's own drafter; 1.5–1.8× decode throughput |
-| prefix caching | on (vLLM default) | resent contexts skip prefill; sliding-window retention 4096 is set by the plugin |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | required | V4.1's Engram state needs Model Runner V2 |
+| speculative decoding | DSpark, 5 drafts | V4.1's own drafter: 1.5–1.8× decode throughput |
+| prefix caching | on | sliding-window retention 4096, set by the plugin |
 
 ## Performance (one node, natural-language prompts)
-
-Measured with this branch's image and `serve.sh`, except the agentic row (at
-`--max-model-len 32768`), the resent-context row and the prefill times below 31k, which
-come from the same kernels and settings on the development branch.
 
 | workload | result |
 |---|---|
 | decode, 1k-token prompts | 62 / 682 / 917 output tok/s at 1 / 32 / 64 users |
-| agentic: 32 conversations resending 8–30k-token contexts | 171–174 output tok/s, 87 % of prompt tokens from the cache, median time to first token 3.1–7.3 s |
-| resent 17k-token context | first token in ~0.2 s, against 4.5 s uncached |
+| agentic: 32 conversations resending 8–30k-token contexts¹ | 171–174 output tok/s, 87 % of prompt tokens from the cache, median time to first token 3.1–7.3 s |
+| resent 17k-token context¹ | first token in ~0.2 s, against 4.5 s uncached |
 | cold prefill, one request | time to first token 1.2 / 3.8 / 7 / 15 / 30 s at 4k / 16k / 31k / 62k / 114k tokens |
-| long-context retrieval | needles found 9/9 at ~31k / 62k / 114k tokens, at 10 / 50 / 90 % depth |
+| long-context retrieval | needles found 9/9 at ~31k / 62k / 114k tokens, 10 / 50 / 90 % depth |
 | accuracy | GSM8K 98.5–99 % (200 questions), no out-of-memory errors |
 | KV cache | 3.2M tokens, room for 24 requests at the full 131k |
 
+¹ At `--max-model-len 32768`. The resent-context row and the prefill times below 31k come
+from the development branch, with the same kernels.
+
 ## Tuning
 
-- **Context length:** the model supports up to 1M tokens (YaRN ×16 over a 64k training
-  window); 128k is the validated range and the default.
-  - For many concurrent short sessions (chat or RAG without thinking), use
-    `sbatch serve.sh --max-model-len 32768`. Decode is then 2.6 / 3.3 % faster at
-    32 / 64 users (700 / 948 tok/s) and the same at 1 user, because the decode indexer's
-    score buffer is sized by `--max-model-len`, not by the actual context.
-  - Requests longer than `--max-model-len`, prompt plus output, are rejected. With thinking
-    on, the reasoning output counts too.
+- **Many short sessions:** `--max-model-len 32768`. Decode is 2.6 / 3.3 % faster at
+  32 / 64 users (700 / 948 tok/s), because the decode indexer's score buffer is sized by
+  the limit, not the actual context.
+- **Interactive agents:** `--max-num-batched-tokens 8192` roughly halves time to first
+  token under load; tokens stream 10–20 % slower.
+- **Throughput:** `--max-num-seqs 128` gives 970 tok/s at 128 users.
+- **Prefix caching** helps only while live contexts fit in the KV cache. Each request also
+  holds a fixed sliding-window share, so 64 concurrent conversations fit about 36k tokens
+  each.
+- **Expert placement:** experts are spread over the GCDs by measured popularity (+4 % on
+  agentic load, measured on GSM8K-style text). `DSV41_EXPERT_PLACEMENT=none` restores
+  vLLM's default placement.
 
-- **Interactive agents:** `sbatch serve.sh --max-num-batched-tokens 8192` roughly halves
-  time to first token under load. Tokens stream about 10–20 % slower.
-- **Throughput-bound serving:** `--max-num-seqs 128` gives 970 tok/s at 128 users.
-- **Prefix caching:** it helps only while the conversations' live contexts fit in the KV
-  cache. vLLM reports 3.2M tokens at `--gpu-memory-utilization 0.92`, but that assumes
-  full-length requests. Each request also holds a fixed sliding-window share, so 64
-  concurrent conversations fit about 36k tokens each; fewer conversations fit longer
-  ones. Beyond that, hits drop to zero. Turn it off with
-  `--no-enable-prefix-caching`.
-- **Expert placement:** experts are spread over the 8 GCDs by measured popularity
-  (`lumi_dsv41/expert_placement.json`, +4 % on agentic load). The placement was
-  measured on GSM8K-style text. `DSV41_EXPERT_PLACEMENT=none` restores vLLM's default
-  placement; `DSV41_EXPERT_PLACEMENT=<file>` uses another file in the same format.
+The prompt plus output must fit in `--max-model-len`, and with thinking on the reasoning
+counts as output. The model supports up to 1M tokens (YaRN ×16 over a 64k training window);
+128k is the validated range.
 
 ## What the plugin does
 
-vLLM 0.26 has DeepSeek-V4 but not V4.1, and its V4 ROCm path needs aiter or TileLang
-kernels that do not run correctly on gfx90a. The plugin:
+vLLM 0.26 has DeepSeek-V4 but not V4.1, and its ROCm path needs aiter or TileLang kernels
+that do not run correctly on gfx90a. The plugin:
 
-- **Loads upstream's V4.1 model code** (`lumi_dsv41/vendor`, the AMD path, language model only)
-  into 0.26. Small hooks adapt it to 0.26's KV-cache, scheduler and config interfaces.
-- **Adds the missing gfx90a kernels** (Triton):
-  - sparse-attention decode;
-  - indexer prefill and decode logits;
-  - mHC (hyper-connection) pre and post;
-  - the query RoPE.
-  It also sets faster launch settings for the upstream sparse-attention prefill kernel.
-- **Speeds up the dense layers and communication:**
-  - runs the block-FP8 dense layers as bf16 GEMMs (gfx90a has no FP8 units);
-  - enables vLLM's custom all-reduce on gfx90a, made coherent across GCDs;
-  - tunes the MoE routing blocks and expert GEMM tiles.
-- **Fixes correctness issues:**
-  - guards the MoE router against NaN rows in graph padding;
-  - fixes two upstream gfx90a bugs: decode inverse RoPE, and the tiled indexer-cache read.
-- **Enables the rest of the configuration:** prefix caching without replay, the DSpark
-  drafter, and the balanced expert placement.
+- **loads upstream's V4.1 model code** (`lumi_dsv41/vendor`) into 0.26;
+- **adds the missing gfx90a kernels** in Triton: sparse-attention decode, indexer logits,
+  mHC and the query RoPE;
+- **speeds up the dense layers and communication:** block-FP8 dense layers as bf16 GEMMs
+  (no FP8 units on gfx90a), a coherent custom all-reduce, tuned MoE tiles;
+- **fixes two upstream gfx90a bugs** (decode inverse RoPE, the tiled indexer-cache read)
+  and guards the MoE router against NaN padding rows;
+- **enables** prefix caching without replay, the DSpark drafter and the balanced expert
+  placement.
 
-## Layout
-
-```
-pyproject.toml                the package: lumi-dsv41, vLLM plugin entry point, no dependencies
-lumi_dsv41.pth                installs the module loader at interpreter start (site-packages)
-lumi_dsv41/                   the plugin
-  vendor/                     upstream DeepSeek-V4.1 modules, loaded in place of 0.26's
-container/lumi-dsv41.def      serving image: LAIF base + the wheel
-build.sh                      Slurm script: wheel + image
-serve.sh                      Slurm script: one node, best settings
-```
-
-## Installing the wheel elsewhere
-
-`pip install --no-deps lumi_dsv41-0.1.0-py3-none-any.whl` into any Python environment
-that has LAIF's vLLM 0.26.0. `--no-deps` keeps pip away from the container's vLLM, torch
-and Triton; the package declares no dependencies anyway.
-
-It must go into a real site-packages directory. `lumi_dsv41.pth` loads the plugin's module
-loader when Python starts, before vLLM is imported, and Python reads `.pth` files only from
-site-packages, not from `PYTHONPATH` or `--target` directories. LAIF's `/opt/venv` is
-read-only inside the image, which is why `build.sh` bakes the wheel into a derived image.
-
-Then serve with the arguments in `serve.sh`, and set `VLLM_USE_V2_MODEL_RUNNER=1`,
-`VLLM_USE_BREAKABLE_CUDAGRAPH=1` and `AMDGCN_USE_BUFFER_OPS=0`.
+The wheel can also be installed with `pip install --no-deps` into any environment with
+LAIF's vLLM 0.26.0. It must go into a real site-packages directory, where
+`lumi_dsv41.pth` starts the plugin with Python. LAIF's image is read-only, hence the
+derived image.
 
 ## Limitations
 
-- One node only (TP 8 with expert parallelism); validated up to 128k tokens of context
-  (prompts to ~114k). Beyond 128k is untested, and the decode cost above grows with
-  `--max-model-len`.
+- One node; validated to 128k context.
 - Language model only: no vision input.
 - gfx90a (MI250X) with this container only.
 - DSpark is the only speculative method.
-- If vLLM fails at start-up with a shared-memory broadcast error, check that `/dev/shm`
-  is private. `serve.sh` binds a per-job directory for this.
 
-The development history, measurements and tests are on branch `exp/deepseek-v41-gfx90a`.
+Development history, measurements and tests: branch `exp/deepseek-v41-gfx90a`.
