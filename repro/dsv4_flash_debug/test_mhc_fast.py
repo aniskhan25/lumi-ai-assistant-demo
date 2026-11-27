@@ -106,7 +106,7 @@ def served(x, residual, post_mix, comb_mix):
 
 if "1" in PARTS:
     print("\n1. rel err vs torch references (residual_cur / post / comb / layer_input; FAIL > 2e-2)")
-    for t in (1, 2, 5, 16, 17, 64, 100, 128):
+    for t in [int(v) for v in os.environ.get("MHC_ACC_TOKENS", "1 2 5 16 17 64 100 128").split()]:
         x, residual, post_mix, comb_mix = inputs(t)
         cur = mhc_post_torch(x, residual, post_mix, comb_mix)
         want = (cur, *mhc_pre_torch(cur, *ffn, *ARGS))
