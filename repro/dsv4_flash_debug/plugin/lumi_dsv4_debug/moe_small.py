@@ -49,6 +49,14 @@ GATE_UP_V2 = [(2, (16, 64, 128, 4, 4, 1)), (8, (16, 128, 256, 4, 4, 1)),
               (64, (16, 128, 256, 2, 4, 1)), (128, (16, 128, 256, 1, 8, 2))]
 DOWN_V2 = [(2, (16, 64, 128, 1, 2, 1)), (32, (16, 128, 128, 1, 4, 1)),
            (128, (16, 256, 128, 1, 4, 1))]
+# Prefill chunks, 256-2048 tokens (test_moe_roofline.py, job 24069742, all 256 experts hit),
+# us per call default -> table: gate/up 712 -> 516 at 256 tokens, 718 -> 533 at 512, 766 ->
+# 558 at 1024, 929 -> 828 at 2048; down 336 -> 297, 385 -> 334, 460 -> 402, 744 -> 632.
+# Bit-identical. DSV4_MOE_PREFILL=0 leaves prefill on the library's tile.
+if os.environ.get("DSV4_MOE_PREFILL", "1") == "1":
+    GATE_UP_V2 += [(1024, (32, 128, 256, 1, 8, 2)), (2048, (64, 128, 128, 1, 2, 2))]
+    DOWN_V2 += [(256, (32, 256, 128, 1, 4, 1)), (1024, (32, 128, 128, 1, 4, 1)),
+                (2048, (64, 128, 128, 1, 4, 1))]
 V1 = os.environ.get("DSV4_MOE_TABLE", "v2") == "v1"
 GATE_UP = GATE_UP_V1 if V1 else GATE_UP_V2
 DOWN = DOWN_V1 if V1 else DOWN_V2
