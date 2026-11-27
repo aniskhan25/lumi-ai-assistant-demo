@@ -105,8 +105,8 @@ RoPE / KV insert in one Triton kernel: **75.6 tok/s for one user**, 824 at 32 (s
 "The routing prologue on the legacy path; q-norm / RoPE / KV insert"). For prefill,
 `SPARSE_PREFILL=1` (V4.1's launch options for the sparse-attention prefill kernel) and the
 score-GEMM tiles for prefill chunks (on by default) and `PREFILL_LOGITS=1` (the indexer's
-prefill logits in Triton) take a 16k-token prompt's time to the first token from 6.45 to
-**3.47 s** (see "Prefill").
+prefill logits in Triton) and `MHC_FAST` at prefill sizes (on by default) take a 16k-token
+prompt's time to the first token from 6.45 to **3.06 s** (see "Prefill").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
@@ -1163,7 +1163,9 @@ the same 2048-token chunks.)
 | `SPARSE_PREFILL=1`, score tiles off (same day as the next row) | 24019176 | 5.53 s | 16.1 s |
 | `SPARSE_PREFILL=1` + score tiles | 24019175 | 4.97 s | 14.6 s |
 | the same (control, same day as the next row) | 24049247 | 4.98 s | 14.7 s |
-| **+ `PREFILL_LOGITS=1`** | 24049246 | **3.47 s** | **9.38 s** |
+| + `PREFILL_LOGITS=1` | 24049246 | 3.47 s | 9.38 s |
+| the same (control, same day as the next row) | 24068559 | 3.48 s | 9.37 s |
+| **+ `MHC_FAST` at prefill sizes** | 24068558 | **3.06 s** | **8.21 s** |
 
 The first two together: −23 %. GSM8K 97.2 / 97.4 %, sanity 5/5 and both needles (the ~18k one included) in
 the runs with them. Decode on GSM8K prompts with both (job 24019177): TPOT 12.5 / 16.6 / 23.0
@@ -1180,7 +1182,16 @@ the runs with them. Decode on GSM8K prompts with both (job 24019177): TPOT 12.5 
   serving, −30 % at one user and −36 % at four. GSM8K 97.0 %, sanity 5/5, needles 2/2.
   V4 now prefills 16k tokens in less time than the V4.1 port (3.77 s).
 
-Left, by the profile: `MHC_FAST` at prefill sizes (~14 %), MoE tiles for prefill (~12 %).
+- **`MHC_FAST` at prefill sizes** (`MHC_PREFILL=1`, the default; `=0` leaves chunks above
+  128 tokens on vLLM's path): the tiled prenorm GEMM (64 × 64 tiles, 512-wide K chunks) and
+  the loop big fuse on one warp, now up to 2048 tokens. `test_mhc_fast.py` (job 24068455):
+  one fused post+pre call 191 → 69 µs at 256 tokens, 360 → 123 at 512, 550 → 231 at 1024,
+  1034 → 475 at 2048. Layer-input error against the torch reference is 2.5–4e-5, against
+  1.7e-4 for the served path. In serving, −12 % at one and four users. GSM8K 97.4 %, sanity
+  5/5, needles 2/2 (one "garbage" flag: the known false positive on a correct LaTeX answer).
+
+Together −53 % since the prefill profile: 6.45 → 3.06 s for 16k tokens at one user, 18.7 →
+8.2 s at four. Left, by the profile: MoE tiles for prefill sizes (~12 %).
 
 ### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
 
