@@ -106,11 +106,14 @@ RoPE / KV insert in one Triton kernel: **75.6 tok/s for one user**, 824 at 32 (s
 `SPARSE_PREFILL=1` (V4.1's launch options for the sparse-attention prefill kernel) and the
 score-GEMM tiles for prefill chunks (on by default) and `PREFILL_LOGITS=1` (the indexer's
 prefill logits in Triton) and `MHC_FAST` at prefill sizes (on by default) take a 16k-token
-prompt's time to the first token from 6.45 to **3.06 s** (see "Prefill").
+prompt's time to the first token from 6.45 to **3.06 s** (see "Prefill"). `PREFIX_CACHING=1`
+reuses resent prefixes (time to first token 3.2 s → 0.13–0.32 s on 17k-token prompts) and
+gives an agentic load 7× the throughput (see "Prefix caching").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
   MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 QNORM_ROPE=1 SPARSE_PREFILL=1 PREFILL_LOGITS=1 \
+  PREFIX_CACHING=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -1201,6 +1204,65 @@ Together −53 % since the prefill profile: 6.45 → 3.06 s for 16k tokens at on
 8.2 s at four, ahead of the V4.1 port's 3.77 s. What is left has no single cheap fix: sparse
 attention, the MoE FP4 conversion, dense GEMMs and the all-reduce (mostly ranks waiting).
 
+### Prefix caching (Nov 27)
+
+An agent or a chat resends its growing context every turn, so without prefix caching every
+turn prefills it again: 3.2 s at 17k tokens, and under load the queue of such prefills
+dominates. `run_v4_serve.sh` passed `--no-enable-prefix-caching`. The V4.1 port had to
+change its own plugin to allow caching. V4, on vLLM's own model, needs no change. It only
+needs the V4.1 port's retention setting, `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: with 0.26's
+dense retention, every sliding-window block is hashed and queued for reuse, and V4.1 found
+cached prefixes evicted after a few hundred thousand tokens of other prefill.
+`PREFIX_CACHING=1` adds `--enable-prefix-caching --enable-prompt-tokens-details` and sets the
+interval to 4096 (`RETENTION`, `=dense` for 0.26's). The V4.1 branch's checks run as they
+are: `PREFIX_CHECK=1` (`prefix_cache_check.py`), `AGENTIC=1` (`agentic_bench.py`) and
+`PREFIX_EVICT=1` (`prefix_evict_probe.py`).
+
+**Hit against cold** (`PREFIX_CHECK=1`, job 24087028, 24 few-shot prompts of ~17.3k tokens,
+each sent cold twice and then as a hit):
+
+| | cold | hit |
+|---|---|---|
+| time to first token | 3.2–4.5 s | **0.12–0.32 s** (16,384–17,408 tokens from the cache) |
+| GSM8K answers right | 24 / 24 | 24 / 24 |
+| first token's top-5 logprobs, mean gap to a cold run | 0.150 (cold to cold) | 0.148 |
+| tokens shared with a cold run from the start, mean | 42.7 (cold to cold) | 54.9 |
+| MTP acceptance length | 1.96 | 1.95 |
+
+A hit is as close to a cold run as two cold runs are to each other. Greedy output is not
+repeatable run to run here, so hits are judged against that spread. Agentic turns (2 ×
+6, each resending a ~9k-token context with the previous answers): every turn after the
+first reuses all but 200–700 tokens, 0.18–0.52 s to the first token against 1.75 s cold.
+11/12 right; the miss is a last turn whose cold re-run also diverged after 59 of 151
+tokens. GSM8K probe 97.5 %, sanity 5/5, needles 2/2.
+
+**Agentic load** (`AGENTIC=1`, jobs 24087235 / 24087236): 32, then 64 conversations at once,
+each resending a shared preamble, a ~8k-token document, the turns so far and a new GSM8K
+question (≤ 384 output tokens), growing by ~1.5k tokens a turn to 30k. 15-minute windows
+after 5 minutes of warm-up.
+
+| | no prefix caching (24087236) | **prefix caching** (24087235) |
+|---|---|---|
+| 32 conversations: output tok/s | 24 | **174** |
+| turns completed | 213 | 1610 |
+| prompt tokens from the cache | 0 % | 87 % |
+| TTFT median, 16–24k / 24–32k context | 99 / 141 s | **1.7 / 2.0 s** |
+| TPOT median | 201–207 ms | 152–169 ms |
+| 64 conversations: output tok/s | 30 | **180** |
+| TTFT median, 8–16k / 16–24k | 136 / 194 s | **19 / 7.5 s** |
+| TPOT median | 196–200 ms | 205–227 ms |
+| answers right | 95 % | 95 % |
+
+7.3× the output at 32 conversations, 6.0× at 64; no preemptions, no errors (the control's one
+traceback is the engine stopping at the end of the job). The V4.1 port measured 22 → 144
+and 27 → 154 tok/s under the same load. At 64 conversations TTFT is still 7–19 s:
+every turn adds ~1.5k new tokens to prefill and the 2048-token chunks queue behind
+each other.
+
+Benchmarks: the `BENCH=1` sweep's prompts are unique, so with caching on they measure the
+same as without. Fixed-seed random prompts that repeat across phases would be served from
+the cache, so random-prompt sweeps should run without it.
+
 ### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
 
 Two changes the V4.1 port made to this plugin, measured on V4:
@@ -1350,6 +1412,7 @@ where the V4.1 port, a larger model, takes 3.77 s after its prefill work.
 | `plugin/lumi_dsv4_debug/sparse_prefill.py` | sparse-attention prefill launch options from the V4.1 branch (`DSV4_SPARSE_PREFILL`) |
 | `plugin/lumi_dsv4_debug/mqa_logits.py` | the indexer's prefill logits in one Triton kernel, from the V4.1 branch (`DSV4_PREFILL_LOGITS`) |
 | `test_mqa_logits.py`, `run_mqa_logits_test.sh` | that kernel vs vLLM's torch fallback at V4's shapes: mask, error, top-512 overlap, time |
+| `../deepseek_v41_gfx90a/prefix_cache_check.py`, `agentic_bench.py`, `prefix_evict_probe.py` | prefix caching: hit vs cold, agentic load, eviction (from the V4.1 branch; `PREFIX_CHECK` / `AGENTIC` / `PREFIX_EVICT`) |
 | `test_score_prefill.py`, `run_score_prefill_test.sh` | `score_mm` tiles at prefill sizes vs `torch.mm` |
 | `profile_prefill.py` | profile one long prefill (`PROFILE_PREFILL=N`), from the V4.1 branch |
 | `small_kernels.py` | small kernels per step by issuing call, with Python stacks (eager traces) |
