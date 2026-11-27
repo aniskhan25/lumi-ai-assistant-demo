@@ -1190,8 +1190,16 @@ the runs with them. Decode on GSM8K prompts with both (job 24019177): TPOT 12.5 
   1.7e-4 for the served path. In serving, −12 % at one and four users. GSM8K 97.4 %, sanity
   5/5, needles 2/2 (one "garbage" flag: the known false positive on a correct LaTeX answer).
 
+- **MoE tiles at prefill sizes** (`MOE_PREFILL=1`, the default; `MOE_SMALL`'s table to 2048
+  tokens): `test_moe_roofline.py` with block_m up to 128 (job 24069742) finds gate/up 712 →
+  516 µs at 256 tokens and 929 → 828 at 2048, down 336 → 297 and 744 → 632, bit-identical.
+  The GEMMs still read their weights at only 0.2–0.5 TB/s: prefill has the same FP4-conversion
+  bound as decode. In serving it is within noise: 3.08 → 3.06 s at one user, 8.34 → 8.26 s at
+  four (jobs 24070076 / 24070075, GSM8K 97.2 %). It stays on, as it is never slower per call.
+
 Together −53 % since the prefill profile: 6.45 → 3.06 s for 16k tokens at one user, 18.7 →
-8.2 s at four. Left, by the profile: MoE tiles for prefill sizes (~12 %).
+8.2 s at four, ahead of the V4.1 port's 3.77 s. What is left has no single cheap fix: sparse
+attention, the MoE FP4 conversion, dense GEMMs and the all-reduce (mostly ranks waiting).
 
 ### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
 
