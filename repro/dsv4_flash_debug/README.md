@@ -1259,8 +1259,10 @@ and 27 → 154 tok/s under the same load. At 64 conversations TTFT is still 7–
 every turn adds ~1.5k new tokens to prefill and the 2048-token chunks queue behind
 each other.
 
-Benchmarks: the `BENCH=1` sweep's prompts are unique, so with caching on they measure the
-same as without. Fixed-seed random prompts that repeat across phases would be served from
+Without hits caching costs nothing: decode on unique GSM8K prompts, TPOT 12.8 / 16.4 / 23.6 /
+29.3 / 45.4 ms with caching against 12.6 / 16.2 / 22.8 / 29.1 / 45.5 without at 1 / 4 / 16 /
+32 / 64 users (jobs 24088748 / 24088749), all within run spread. Benchmarks: the `BENCH=1`
+sweep's GSM8K prompts are unique, so with caching on they measure the same as without. Fixed-seed random prompts that repeat across phases would be served from
 the cache, so random-prompt sweeps should run without it.
 
 ### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
