@@ -17,5 +17,5 @@ REPO="${SLURM_SUBMIT_DIR:-$(pwd)}"
 SNAPSHOT="$(ls -d /scratch/${SLURM_JOB_ACCOUNT}/${USER}/hf-cache/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots/* | head -n1)"
 module load Local-LAIF lumi-aif-singularity-bindings
 export HIP_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES}"
-MOE_TOKENS="${MOE_TOKENS:-2 8 32 64 128}" singularity exec "${CONTAINER}" python "${REPO}/repro/dsv4_flash_debug/test_moe_roofline.py" 2>&1 \
+MOE_TOKENS="${MOE_TOKENS:-2 8 32 64 128}" MOE_BM="${MOE_BM:-16 32}" singularity exec "${CONTAINER}" python "${REPO}/repro/dsv4_flash_debug/test_moe_roofline.py" 2>&1 \
   | grep -vE 'amdsmi|raw_cnt'

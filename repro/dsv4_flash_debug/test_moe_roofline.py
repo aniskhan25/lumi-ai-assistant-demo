@@ -156,7 +156,8 @@ hbm = (512 << 20) / graph_us([lambda: buf.sum()]) / 1e6
 print(f"{torch.cuda.get_device_name()}  practical HBM read: {hbm:.2f} TB/s (sum over 512 MiB)")
 
 CONS = [dict(block_m=bm, block_n=bn, block_k=bk, split_k=sk) for bm, bn, bk, sk in
-        itertools.product((16, 32), (64, 128, 256, 512), (128, 256), (1, 2, 4))]
+        itertools.product([int(b) for b in os.environ.get("MOE_BM", "16 32").split()],
+                          (64, 128, 256, 512), (128, 256), (1, 2, 4))]
 OVERS = [dict(num_warps=w, num_stages=s) for w, s in itertools.product((2, 4, 8), (1, 2, 3))]
 
 for which in ("gate_up", "down"):
