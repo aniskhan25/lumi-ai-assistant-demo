@@ -103,7 +103,16 @@ elif [ "${INDEXER_GATE:-0}" = 1 ]; then
   RUN+=(--env "PYTHONPATH=${REPO}/repro/deepseek_v41_gfx90a/indexer_gate:/opt/venv/lib/python3.12/site-packages")
 fi
 RUN+=("${CONTAINER}")
-echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} SPARSE_DECODE=${SPARSE_DECODE:-0} WO_A=${WO_A:-0} DENSE_GEMM=${DENSE_GEMM:-0} FP8_FUSE=${FP8_FUSE:-0} MHC_FAST=${MHC_FAST:-0}/${MHC_BF:-loop} BENCH_DATA=${BENCH_DATA:-random} CUSTOM_AR=${CUSTOM_AR:-0}/${CUSTOM_AR_MAX_MB:-8} FP8_ROUND_BLOCK=${FP8_ROUND_BLOCK:-2048} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0}/${MOE_TABLE:-v2} GATE_GEMM=${GATE_GEMM:-0} MOE_GLUE=${MOE_GLUE:-0}/${MOE_GLUE_ROUTE:-1} QNORM_ROPE=${QNORM_ROPE:-0} SPARSE_PREFILL=${SPARSE_PREFILL:-0} SCORE_PREFILL=${SCORE_PREFILL:-1} PREFILL_LOGITS=${PREFILL_LOGITS:-0} MHC_PREFILL=${MHC_PREFILL:-1} MOE_PREFILL=${MOE_PREFILL:-1} MTP=${MTP:-0} NUMA_BIND=${NUMA_BIND:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+echo "AMDGCN_USE_BUFFER_OPS=${AMDGCN_USE_BUFFER_OPS:-unset} INDEXER_GATE=${INDEXER_GATE:-0} TORCH_MHC=${TORCH_MHC:-0} MHC_FIX=${MHC_FIX:-} MHC_NATIVE=${MHC_NATIVE:-} MHC_CHECK=${MHC_CHECK:-0} TRITON_LOGITS=${TRITON_LOGITS:-0} NO_ASYNC=${NO_ASYNC:-0} BF16_LINEAR=${BF16_LINEAR:-0} BF16_ACT=${BF16_ACT:-fp8} COMPILE=${COMPILE:-0} ROUTER_GUARD=${ROUTER_GUARD:-1} GRAPH_DIFF=${GRAPH_DIFF:-0} SPARSE_SPLIT=${SPARSE_SPLIT:-0}/${SPARSE_SPLIT_MAX:-16} SPARSE_DECODE=${SPARSE_DECODE:-0} WO_A=${WO_A:-0} DENSE_GEMM=${DENSE_GEMM:-0} FP8_FUSE=${FP8_FUSE:-0} MHC_FAST=${MHC_FAST:-0}/${MHC_BF:-loop} BENCH_DATA=${BENCH_DATA:-random} CUSTOM_AR=${CUSTOM_AR:-0}/${CUSTOM_AR_MAX_MB:-8} FP8_ROUND_BLOCK=${FP8_ROUND_BLOCK:-2048} SCORE_GEMM=${SCORE_GEMM:-0} MOE_SMALL=${MOE_SMALL:-0}/${MOE_TABLE:-v2} GATE_GEMM=${GATE_GEMM:-0} MOE_GLUE=${MOE_GLUE:-0}/${MOE_GLUE_ROUTE:-1} QNORM_ROPE=${QNORM_ROPE:-0} SPARSE_PREFILL=${SPARSE_PREFILL:-0} SCORE_PREFILL=${SCORE_PREFILL:-1} PREFILL_LOGITS=${PREFILL_LOGITS:-0} MHC_PREFILL=${MHC_PREFILL:-1} MOE_PREFILL=${MOE_PREFILL:-1} PREFIX_CACHING=${PREFIX_CACHING:-0}/${RETENTION:-4096} MTP=${MTP:-0} NUMA_BIND=${NUMA_BIND:-0} CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-PIECEWISE}"
+
+# PREFIX_CACHING=1 (from the V4.1 branch): vLLM's prefix caching, off by default for V4.
+# With 0.26's dense sliding-window retention every sliding-window block is hashed and
+# queued for reuse, and a cached prefix is evicted after a few hundred thousand tokens of
+# other prefill (V4.1: job 23910870); RETENTION (default 4096) keeps sliding-window tails
+# once per RETENTION tokens and at each prompt's end only (RETENTION=dense: 0.26's).
+if [ "${PREFIX_CACHING:-0}" = 1 ] && [ "${RETENTION:-4096}" != dense ]; then
+  export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${RETENTION:-4096}"
+fi
 
 # MXFP4 experts: on ROCm vLLM's automatic MoE backend choice is aiter only (as for MiMo),
 # so ask for the Triton dequantising one. V4's attention stores K/V only as fp8_ds_mla
@@ -128,7 +137,7 @@ PROF_DIR="${LOG}/profile"
 SERVE=(vllm serve "${SNAPSHOT}" --served-model-name dsv4 --port "${PORT}"
        --tensor-parallel-size 8 --max-model-len 32768 --max-num-seqs 32
        --max-num-batched-tokens 8192 --gpu-memory-utilization 0.92
-       --no-enable-prefix-caching --kv-cache-dtype fp8
+       $([ "${PREFIX_CACHING:-0}" = 1 ] && echo --enable-prefix-caching --enable-prompt-tokens-details || echo --no-enable-prefix-caching) --kv-cache-dtype fp8
        ${EXTRA_VLLM_ARGS:-${DEFAULT_EXTRA}} ${MORE_VLLM_ARGS:-})
 echo "Serving: ${SERVE[*]}"
 echo "CPUs allowed: $(taskset -cp $$ | cut -d: -f2) ($(nproc))"
@@ -178,6 +187,23 @@ if [ "${PROBE:-1}" = 1 ]; then
     --base-url "http://127.0.0.1:${PORT}" --model dsv4 \
     --gsm8k-parquet "${GSM8K}" --gsm8k-n "${PROBE_GSM8K_N:-200}" --out "${LOG}/probe.json" \
     || STATUS=1
+fi
+
+# PREFIX_CHECK=1: prefix-cache hits against cold prefills, and agentic turns
+if [ "${PREFIX_CHECK:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/prefix_cache_check.py" \
+    "http://127.0.0.1:${PORT}" dsv4 "${GSM8K}" ${PREFIX_CHECK_ARGS:-} || STATUS=1
+fi
+# PREFIX_EVICT=1: how long a cached prefix survives other prefills (prefix_evict_probe.py)
+if [ "${PREFIX_EVICT:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/prefix_evict_probe.py" \
+    "http://127.0.0.1:${PORT}" dsv4 || STATUS=1
+fi
+# AGENTIC=1: concurrent conversations resending a growing context (agentic_bench.py);
+# AGENTIC_CONVS (default "32 64") conversations at once, AGENT_* env for lengths and time
+if [ "${AGENTIC:-0}" = 1 ]; then
+  "${RUN[@]}" python "${REPO}/repro/deepseek_v41_gfx90a/agentic_bench.py" \
+    "http://127.0.0.1:${PORT}" dsv4 "${GSM8K}" "${LOG}/agentic.jsonl" ${AGENTIC_CONVS:-32 64} || STATUS=1
 fi
 
 # BENCH=1: streaming `vllm bench serve` sweep, as for Qwen3.8-Flash (repro/qwen38_flash_gfx90a)
