@@ -104,12 +104,13 @@ short natural prompts, 32 sequences was 13 % slower at 32 users (same section).
 RoPE / KV insert in one Triton kernel: **75.6 tok/s for one user**, 824 at 32 (see
 "The routing prologue on the legacy path; q-norm / RoPE / KV insert"). For prefill,
 `SPARSE_PREFILL=1` (V4.1's launch options for the sparse-attention prefill kernel) and the
-score-GEMM tiles for prefill chunks (on by default) take a 16k-token prompt's time to the
-first token from 6.45 to **4.97 s** (see "Prefill").
+score-GEMM tiles for prefill chunks (on by default) and `PREFILL_LOGITS=1` (the indexer's
+prefill logits in Triton) take a 16k-token prompt's time to the first token from 6.45 to
+**3.47 s** (see "Prefill").
 
 ```bash
 AMDGCN_USE_BUFFER_OPS=0 INDEXER_GATE=1 MHC_FIX=triton CUSTOM_AR=1 SCORE_GEMM=1 \
-  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 QNORM_ROPE=1 SPARSE_PREFILL=1 \
+  MTP=1 SPARSE_DECODE=1 MOE_SMALL=1 GATE_GEMM=1 WO_A=1 DENSE_GEMM=1 MHC_FAST=1 MOE_GLUE=1 QNORM_ROPE=1 SPARSE_PREFILL=1 PREFILL_LOGITS=1 \
   TRITON_LOGITS=1 BF16_LINEAR=1 COMPILE=1 CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
   MORE_VLLM_ARGS="--max-num-seqs 64 --max-num-batched-tokens 2048" \
   sbatch repro/deepseek_v41_gfx90a/run_v4_serve.sh
@@ -1160,13 +1161,26 @@ the same 2048-token chunks.)
 | recipe before | 24014951 | 6.45 s | 18.7 s |
 | `SPARSE_PREFILL=1` | 24014950 | 5.51 s | 16.0 s |
 | `SPARSE_PREFILL=1`, score tiles off (same day as the next row) | 24019176 | 5.53 s | 16.1 s |
-| **`SPARSE_PREFILL=1` + score tiles** | 24019175 | **4.97 s** | **14.6 s** |
+| `SPARSE_PREFILL=1` + score tiles | 24019175 | 4.97 s | 14.6 s |
+| the same (control, same day as the next row) | 24049247 | 4.98 s | 14.7 s |
+| **+ `PREFILL_LOGITS=1`** | 24049246 | **3.47 s** | **9.38 s** |
 
-−23 % together. GSM8K 97.2 / 97.4 %, sanity 5/5 and both needles (the ~18k one included) in
+The first two together: −23 %. GSM8K 97.2 / 97.4 %, sanity 5/5 and both needles (the ~18k one included) in
 the runs with them. Decode on GSM8K prompts with both (job 24019177): TPOT 12.5 / 16.6 / 23.0
-/ 30.0 / 48.9 ms at 1 / 4 / 16 / 32 / 64 users, within earlier runs' spread. Next, by
-the profile: the indexer's prefill logits in Triton (the V4.1 branch's `mqa_logits.py`),
-`MHC_FAST` at prefill sizes, and MoE tiles for prefill.
+/ 30.0 / 48.9 ms at 1 / 4 / 16 / 32 / 64 users, within earlier runs' spread. 
+
+- **`PREFILL_LOGITS=1`** (`mqa_logits.py`, the V4.1 branch's kernel, with
+  `DSV4_INDEXER_GATE`): the indexer's prefill logits in one Triton kernel. It replaces
+  vLLM's torch fallback (`fp8_mqa_logits_torch`: a dense [heads, rows, keys] fp32 einsum,
+  elementwise passes and a sum), which the plugin had split into row chunks to fit in memory.
+  A program owns a logits tile, loads its keys once and loops over V4's 64 heads with bf16
+  dots. It writes −inf without computing for tiles outside every row's causal range.
+  `test_mqa_logits.py` (job 24049231, 2048 rows): same mask, max rel err 3e-7, top-512
+  overlap 100 %; 9.1 → 0.65 ms at 2k keys, 35.8 → 3.6 at 8k, 75.6 → 7.7 at 16k. In
+  serving, −30 % at one user and −36 % at four. GSM8K 97.0 %, sanity 5/5, needles 2/2.
+  V4 now prefills 16k tokens in less time than the V4.1 port (3.77 s).
+
+Left, by the profile: `MHC_FAST` at prefill sizes (~14 %), MoE tiles for prefill (~12 %).
 
 ### From the V4.1 branch: blocked FP8 rounding, larger custom all-reduce messages (Nov 24)
 
@@ -1315,6 +1329,8 @@ where the V4.1 port, a larger model, takes 3.77 s after its prefill work.
 | `plugin/lumi_dsv4_debug/qnorm_rope.py` | attention q-norm / RoPE / KV RoPE + FP8 cache insert in one Triton kernel (`DSV4_QNORM_ROPE`) |
 | `test_qnorm_rope.py`, `run_qnorm_rope_test.sh` | that kernel vs vLLM's HIP op: q, cache bytes, dequantised KV, us per call |
 | `plugin/lumi_dsv4_debug/sparse_prefill.py` | sparse-attention prefill launch options from the V4.1 branch (`DSV4_SPARSE_PREFILL`) |
+| `plugin/lumi_dsv4_debug/mqa_logits.py` | the indexer's prefill logits in one Triton kernel, from the V4.1 branch (`DSV4_PREFILL_LOGITS`) |
+| `test_mqa_logits.py`, `run_mqa_logits_test.sh` | that kernel vs vLLM's torch fallback at V4's shapes: mask, error, top-512 overlap, time |
 | `test_score_prefill.py`, `run_score_prefill_test.sh` | `score_mm` tiles at prefill sizes vs `torch.mm` |
 | `profile_prefill.py` | profile one long prefill (`PROFILE_PREFILL=N`), from the V4.1 branch |
 | `small_kernels.py` | small kernels per step by issuing call, with Python stacks (eager traces) |
