@@ -282,6 +282,14 @@ CONFIGS = [
 ]
 
 
+# Prefill chunks (129-2048 tokens; above that vLLM's path). test_mhc_fast.py (job 24068455),
+# one fused post+pre call, served -> tiled prenorm + loop big fuse at 1 warp: 191 -> 69 us at
+# 256 tokens, 360 -> 123 at 512, 550 -> 231 at 1024, 1034 -> 475 at 2048; closer to the
+# torch reference than the served path. DSV4_MHC_PREFILL=0 leaves them on vLLM's path.
+if os.environ.get("DSV4_MHC_PREFILL", "1") == "1":
+    CONFIGS.append((2048, ("tiled", 64, 64, 512, 4), 1))
+
+
 def pick(t: int):
     for m_max, cfg, bf_warps in CONFIGS:
         if t <= m_max:
